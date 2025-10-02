@@ -1,35 +1,6 @@
-# GUI Framework
 PyQt6==6.6.1
-PyQt6-Qt6==6.6.1
-PyQt6-sip==13.6.0
-
-# Database
-SQLAlchemy==2.0.23
-sqlite3
-
-# Date and time handling
-python-dateutil==2.8.2
-
-# Data validation
-pydantic==2.5.2
-
-# Configuration management
-python-decouple==3.8
-
-# Logging
-loguru==0.7.2
-
-# Testing (development)
-pytest==7.4.3
-pytest-qt==4.2.0
-
-# Code formatting and linting (development)
-black==23.11.0
-flake8==6.1.0
-isort==5.12.0
-
-# Type checking (development)
-mypy==1.7.1
-
-# Documentation (development)
-sphinx==7.2.6
+selenium==4.16.0
+requests==2.31.0
+python-dotenv==1.0.0
+beautifulsoup4==4.12.2
+webdriver-manager==4.0.1

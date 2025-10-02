@@ -1,29 +1,28 @@
-#!/usr/bin/env python3
-"""
-Aplicación de Gestión de Biblioteca HispaShare
-==============================================
-
-Punto de entrada principal de la aplicación.
-"""
-
 import sys
 from PyQt6.QtWidgets import QApplication
-from src.views.main_window import MainWindow
-
+from ui.main_window import MainWindow
+from core.database.db_manager import DatabaseManager
+from utils.logger import setup_logger
 
 def main():
-    """Función principal de la aplicación."""
-    app = QApplication(sys.argv)
-    app.setApplicationName("Gestión Biblioteca HispaShare")
-    app.setApplicationVersion("1.0.0")
+    # Configurar logger
+    logger = setup_logger()
+    logger.info("Iniciando Series Manager...")
     
-    # Crear y mostrar la ventana principal
+    # Inicializar base de datos
+    db = DatabaseManager()
+    db.initialize_database()
+    
+    # Crear aplicación Qt
+    app = QApplication(sys.argv)
+    app.setApplicationName("Series Manager")
+    app.setOrganizationName("SeriesManager")
+    
+    # Crear y mostrar ventana principal
     window = MainWindow()
     window.show()
     
-    # Ejecutar la aplicación
     sys.exit(app.exec())
-
 
 if __name__ == "__main__":
     main()

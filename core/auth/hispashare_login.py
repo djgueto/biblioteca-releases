@@ -1,0 +1,111 @@
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from webdriver_manager.chrome import ChromeDriverManager
+import logging
+import time
+
+
+class HispashareAuth:
+    def __init__(self, username, password, headless=False):
+        self.username = username
+        self.password = password
+        self.headless = headless
+        self.logger = logging.getLogger(__name__)
+        self.driver = None
+        self.base_url = "https://www.hispashare.org"
+    
+    def init_driver(self):
+        """Inicializar driver de Selenium"""
+        options = Options()
+        
+        if self.headless:
+            options.add_argument('--headless=new')
+        
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
+        options.add_argument('--disable-gpu')
+        options.add_argument('--window-size=1920,1080')
+        options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
+        
+        # Desactivar notificaciones
+        prefs = {
+            "profile.default_content_setting_values.notifications": 2
+        }
+        options.add_experimental_option("prefs", prefs)
+        
+        service = Service(ChromeDriverManager().install())
+        self.driver = webdriver.Chrome(service=service, options=options)
+        self.driver.implicitly_wait(10)
+    
+    def login(self):
+        """Iniciar sesión en Hispashare"""
+        try:
+            if not self.driver:
+                self.init_driver()
+            
+            self.logger.info("Accediendo a Hispashare...")
+            self.driver.get(self.base_url)
+            
+            # Esperar a que cargue la página
+            time.sleep(2)
+            
+            # Buscar formulario de login
+            try:
+                # Intentar encontrar el enlace de login
+                login_link = WebDriverWait(self.driver, 10).until(
+                    EC.presence_of_element_located((By.LINK_TEXT, "Iniciar sesión"))
+                )
+                login_link.click()
+                time.sleep(1)
+            except:
+                self.logger.warning("No se encontró enlace de login, buscando formulario directo")
+            
+            # Rellenar formulario
+            username_field = WebDriverWait(self.driver, 10).until(
+                EC.presence_of_element_located((By.NAME, "username"))
+            )
+            username_field.clear()
+            username_field.send_keys(self.username)
+            
+            password_field = self.driver.find_element(By.NAME, "password")
+            password_field.clear()
+            password_field.send_keys(self.password)
+            
+            # Enviar formulario
+            submit_button = self.driver.find_element(By.CSS_SELECTOR, "input[type='submit']")
+            submit_button.click()
+            
+            # Esperar a que se complete el login
+            time.sleep(3)
+            
+            # Verificar login exitoso
+            if self.is_logged_in():
+                self.logger.info("Login exitoso en Hispashare")
+                return True
+            else:
+                self.logger.error("Login fallido - credenciales incorrectas")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Error en login: {e}", exc_info=True)
+            return False
+    
+    def is_logged_in(self):
+        """Verificar si la sesión está iniciada"""
+        try:
+            # Buscar elementos que solo aparecen cuando estás logueado
+            # Por ejemplo, el nombre de usuario o un enlace de "Cerrar sesión"
+            self.driver.find_element(By.LINK_TEXT, "Cerrar sesión")
+            return True
+        except:
+            return False
+    
+    def close(self):
+        """Cerrar el navegador"""
+        if self.driver:
+            self.driver.quit()
+            self.driver = None
