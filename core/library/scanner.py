@@ -49,26 +49,39 @@ class LibraryScanner:
         # Buscar temporadas
         season_folders = self.find_season_folders(series_folder)
         
+        # Siempre escanear estructura plana para capturar todos los archivos
+        flat_episodes = self.scan_flat_structure(series_folder)
+        
         if season_folders:
             # Estructura con carpetas de temporadas
             for season_num, season_folder in season_folders.items():
                 episodes = self.scan_season_folder(season_folder, season_num)
-                series_data['seasons'][season_num] = len(episodes)
                 series_data['episodes'].extend(episodes)
+            
+            # También agregar episodios de estructura plana que no estén en carpetas de temporadas
+            for ep in flat_episodes:
+                # Verificar si el episodio ya está en la lista (evitar duplicados)
+                episode_exists = any(
+                    existing_ep['season'] == ep['season'] and 
+                    existing_ep['episode'] == ep['episode'] and
+                    existing_ep['file_path'] == ep['file_path']
+                    for existing_ep in series_data['episodes']
+                )
+                if not episode_exists:
+                    series_data['episodes'].append(ep)
         else:
             # Series sin carpetas de temporadas (todo en raíz)
-            episodes = self.scan_flat_structure(series_folder)
-            
-            # Agrupar por temporada
-            seasons_dict = {}
-            for ep in episodes:
-                season = ep['season']
-                if season not in seasons_dict:
-                    seasons_dict[season] = 0
-                seasons_dict[season] += 1
-            
-            series_data['seasons'] = seasons_dict
-            series_data['episodes'] = episodes
+            series_data['episodes'] = flat_episodes
+        
+        # Agrupar por temporada
+        seasons_dict = {}
+        for ep in series_data['episodes']:
+            season = ep['season']
+            if season not in seasons_dict:
+                seasons_dict[season] = 0
+            seasons_dict[season] += 1
+        
+        series_data['seasons'] = seasons_dict
         
         return series_data
     

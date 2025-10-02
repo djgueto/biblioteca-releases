@@ -17,15 +17,18 @@ class SchedulerThread(QThread):
     log_signal = pyqtSignal(str)
     finished_signal = pyqtSignal()
     error_signal = pyqtSignal(str)
+    url_saved_signal = pyqtSignal(int, str)  # Nueva señal: series_id, url
     
     def __init__(self):
         super().__init__()
         self.running = True
         self.logger = logging.getLogger(__name__)
         self.db = DatabaseManager()
+        self.current_driver = None  # Mantener referencia al driver actual
     
     def run(self):
         """Ejecutar ciclo principal"""
+        self.logger.info("Scheduler iniciado")
         while self.running:
             try:
                 self.execute_cycle()
@@ -45,7 +48,13 @@ class SchedulerThread(QThread):
                 self.logger.error(f"Error en ciclo: {e}", exc_info=True)
                 self.error_signal.emit(str(e))
                 self.log_signal.emit(f"❌ ERROR: {str(e)}")
-                time.sleep(1800)  # Esperar 30 min antes de reintentar
+                # Esperar antes de reintentar, pero verificar si seguimos ejecutándose
+                for _ in range(1800):  # 30 minutos en segundos
+                    if not self.running:
+                        break
+                    time.sleep(1)
+        
+        self.logger.info("Scheduler detenido correctamente")
     
     def execute_cycle(self):
         """Ejecutar un ciclo completo"""
@@ -53,11 +62,13 @@ class SchedulerThread(QThread):
         self.log_signal.emit(f"🚀 INICIO CICLO - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         self.log_signal.emit("=" * 60)
         
+        driver = None
         try:
             # 1. Login Hispashare
             self.progress_signal.emit(5, "🔐 Login Hispashare...")
             self.log_signal.emit("🔐 Iniciando sesión en Hispashare...")
             driver = self.login_hispashare()
+            self.current_driver = driver  # Mantener referencia
             
             # 2. Escanear biblioteca
             self.progress_signal.emit(15, "📁 Escaneando biblioteca...")
@@ -65,10 +76,11 @@ class SchedulerThread(QThread):
             series_list = self.scan_library()
             self.log_signal.emit(f"   ✅ {len(series_list)} series encontradas")
             
-            # 3. Vincular con TMDB
+            # 3. Obtener series de la base de datos para vincular con TMDB
             self.progress_signal.emit(35, "🎬 Vinculando con TMDB...")
             self.log_signal.emit("🎬 Vinculando series con TMDB...")
-            self.match_tmdb(series_list)
+            db_series_list = self.db.get_all_series()
+            self.match_tmdb(db_series_list)
             
             # 4. Detectar episodios faltantes
             self.progress_signal.emit(55, "🔍 Detectando faltantes...")
@@ -81,10 +93,6 @@ class SchedulerThread(QThread):
             self.log_signal.emit("🔎 Buscando URLs en Hispashare...")
             self.search_hispashare(driver)
             
-            # 6. Cerrar navegador
-            if driver:
-                driver.quit()
-            
             self.progress_signal.emit(100, "✅ Ciclo completado")
             self.log_signal.emit("✅ CICLO COMPLETADO CON ÉXITO")
             self.log_signal.emit("=" * 60)
@@ -94,6 +102,15 @@ class SchedulerThread(QThread):
         except Exception as e:
             self.logger.error(f"Error en execute_cycle: {e}", exc_info=True)
             raise
+        finally:
+            # Asegurar que el navegador se cierre siempre
+            if driver:
+                try:
+                    driver.quit()
+                    self.logger.info("Driver cerrado correctamente")
+                except Exception as e:
+                    self.logger.error(f"Error cerrando driver: {e}")
+            self.current_driver = None
     
     def login_hispashare(self):
         """Iniciar sesión en Hispashare"""
@@ -229,9 +246,12 @@ class SchedulerThread(QThread):
             series_list = self.db.get_series_without_hispashare_url()
             
             found = 0
+            total_series = len(series_list)
             
-            for series in series_list:
-                self.log_signal.emit(f"   🔎 Buscando: {series['name']}...")
+            self.log_signal.emit(f"   📊 Total de series a buscar: {total_series}")
+            
+            for i, series in enumerate(series_list, 1):
+                self.log_signal.emit(f"   🔎 [{i}/{total_series}] Buscando: {series['name']}...")
                 
                 try:
                     url = searcher.search_and_select(
@@ -240,19 +260,30 @@ class SchedulerThread(QThread):
                     )
                     
                     if url:
-                        self.db.update_hispashare_url(series['id'], url)
-                        found += 1
-                        self.log_signal.emit(f"      ✅ URL encontrada")
+                        # Guardar URL inmediatamente cuando se encuentra
+                        try:
+                            self.db.update_hispashare_url(series['id'], url)
+                            found += 1
+                            self.logger.info(f"URL guardada para '{series['name']}': {url}")
+                            self.log_signal.emit(f"      ✅ URL encontrada y guardada: {url[:50]}...")
+                            # Emitir señal para actualizar la UI en tiempo real
+                            self.logger.info(f"EMITIENDO SEÑAL url_saved_signal para serie ID {series['id']}: {url}")
+                            self.url_saved_signal.emit(series['id'], url)
+                            self.logger.info(f"Señal url_saved_signal emitida correctamente")
+                        except Exception as save_error:
+                            self.logger.error(f"Error guardando URL para '{series['name']}': {save_error}")
+                            self.log_signal.emit(f"      ⚠️ URL encontrada pero error al guardar: {str(save_error)}")
                     else:
                         self.log_signal.emit(f"      ❌ No se encontró")
                         
                 except Exception as e:
-                    self.log_signal.emit(f"      ❌ Error: {str(e)}")
+                    self.logger.error(f"Error buscando '{series['name']}': {e}")
+                    self.log_signal.emit(f"      ❌ Error en búsqueda: {str(e)}")
                     continue
                 
                 time.sleep(2)  # Esperar entre búsquedas
             
-            self.log_signal.emit(f"   ✅ {found} URLs encontradas en Hispashare")
+            self.log_signal.emit(f"   ✅ {found}/{total_series} URLs encontradas y guardadas en Hispashare")
             
         except Exception as e:
             self.logger.error(f"Error en search_hispashare: {e}")
@@ -262,3 +293,15 @@ class SchedulerThread(QThread):
         """Detener el scheduler"""
         self.logger.info("Deteniendo scheduler...")
         self.running = False
+        
+        # Cerrar driver activo si existe
+        if self.current_driver:
+            try:
+                self.logger.info("Cerrando driver de Selenium...")
+                self.current_driver.quit()
+                self.current_driver = None
+                self.logger.info("Driver cerrado correctamente")
+            except Exception as e:
+                self.logger.error(f"Error cerrando driver en stop(): {e}")
+        
+        self.logger.info("Scheduler marcado para detenerse")

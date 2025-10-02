@@ -12,6 +12,8 @@ class EpisodeParser:
             re.compile(r'[Ss](\d{1,2})[Ee](\d{1,3})', re.IGNORECASE),
             # 1x01, 1x1
             re.compile(r'(\d{1,2})[xX](\d{1,3})'),
+            # 1X01, 2X05 (formato alternativo con X mayúscula)
+            re.compile(r'(\d{1,2})X(\d{1,3})'),
             # 101 (temporada 1, episodio 1)
             re.compile(r'[\s\._-](\d)(\d{2})[\s\._-]'),
         ]

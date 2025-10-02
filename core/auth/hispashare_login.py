@@ -53,18 +53,8 @@ class HispashareAuth:
             # Esperar a que cargue la página
             time.sleep(2)
             
-            # Buscar formulario de login
-            try:
-                # Intentar encontrar el enlace de login
-                login_link = WebDriverWait(self.driver, 10).until(
-                    EC.presence_of_element_located((By.LINK_TEXT, "Iniciar sesión"))
-                )
-                login_link.click()
-                time.sleep(1)
-            except:
-                self.logger.warning("No se encontró enlace de login, buscando formulario directo")
-            
-            # Rellenar formulario
+            # Rellenar formulario de login directamente (ya estamos en la página de login)
+            self.logger.info("Rellenando formulario de login...")
             username_field = WebDriverWait(self.driver, 10).until(
                 EC.presence_of_element_located((By.NAME, "username"))
             )
@@ -75,9 +65,27 @@ class HispashareAuth:
             password_field.clear()
             password_field.send_keys(self.password)
             
-            # Enviar formulario
-            submit_button = self.driver.find_element(By.CSS_SELECTOR, "input[type='submit']")
-            submit_button.click()
+            # Esperar un momento para asegurar que los campos estén completados
+            time.sleep(1)
+            
+            # Buscar y hacer clic en el botón de "Iniciar sesión"
+            try:
+                # Intentar encontrar el botón por el texto "Iniciar sesión"
+                submit_button = WebDriverWait(self.driver, 10).until(
+                    EC.element_to_be_clickable((By.XPATH, "//a[@class='BUTTON' and contains(., 'Iniciar sesión')]"))
+                )
+                submit_button.click()
+                self.logger.info("Botón 'Iniciar sesión' pulsado correctamente")
+            except:
+                # Fallback: intentar con otros selectores posibles
+                try:
+                    submit_button = self.driver.find_element(By.CSS_SELECTOR, "a.BUTTON")
+                    submit_button.click()
+                    self.logger.info("Botón de login encontrado con selector alternativo")
+                except:
+                    # Último recurso: ejecutar el JavaScript directamente
+                    self.driver.execute_script("form_login.submit();")
+                    self.logger.info("Formulario enviado mediante JavaScript")
             
             # Esperar a que se complete el login
             time.sleep(3)

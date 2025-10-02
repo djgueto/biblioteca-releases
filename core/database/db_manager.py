@@ -190,6 +190,59 @@ class DatabaseManager:
             conn.rollback()
             raise
     
+    def update_series_manual(self, series_id, changes):
+        """Actualizar serie con cambios manuales"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            # Verificar si se está cambiando el TMDB ID
+            tmdb_id_changed = 'tmdb_id' in changes
+            
+            # Construir query dinámicamente basado en los cambios
+            set_clauses = []
+            values = []
+            
+            for field, value in changes.items():
+                if field in ['tmdb_id', 'tmdb_name', 'year', 'confidence_score', 
+                           'needs_review', 'hispashare_url', 'status']:
+                    set_clauses.append(f"{field} = ?")
+                    values.append(value)
+            
+            if not set_clauses:
+                self.logger.warning("No hay cambios válidos para actualizar")
+                return
+            
+            # Añadir timestamp de actualización
+            set_clauses.append("updated_at = CURRENT_TIMESTAMP")
+            
+            query = f"UPDATE series SET {', '.join(set_clauses)} WHERE id = ?"
+            values.append(series_id)
+            
+            cursor.execute(query, values)
+            conn.commit()
+            
+            self.logger.info(f"Serie {series_id} actualizada manualmente con cambios: {list(changes.keys())}")
+            
+            # Si se cambió el TMDB ID, recalcular episodios faltantes
+            if tmdb_id_changed and changes.get('tmdb_id'):
+                self.logger.info(f"Recalculando episodios faltantes para serie {series_id} debido a cambio de TMDB ID")
+                try:
+                    missing_count = self.recalculate_missing_episodes_for_series(series_id)
+                    self.logger.info(f"Recalculados {missing_count} episodios faltantes")
+                    # Retornar información sobre el recálculo para que la UI pueda actualizarse
+                    return {'recalculated_missing': True, 'missing_count': missing_count}
+                except Exception as e:
+                    self.logger.error(f"Error al recalcular episodios faltantes: {e}")
+                    # No lanzar excepción para no afectar la actualización principal
+            
+            return {'recalculated_missing': False}
+            
+        except Exception as e:
+            self.logger.error(f"Error en update_series_manual: {e}")
+            conn.rollback()
+            raise
+    
     def get_all_series(self):
         """Obtener todas las series"""
         conn = self.get_connection()
@@ -336,6 +389,67 @@ class DatabaseManager:
             
         except Exception as e:
             self.logger.error(f"Error en clear_missing_episodes: {e}")
+            conn.rollback()
+            raise
+    
+    def recalculate_missing_episodes_for_series(self, series_id):
+        """Recalcular episodios faltantes para una serie específica"""
+        from core.tmdb.api_client import TMDBClient
+        from config.settings import Settings
+        
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            # Obtener información de la serie
+            cursor.execute('''
+                SELECT * FROM series
+                WHERE id = ? AND tmdb_id IS NOT NULL
+            ''', (series_id,))
+            
+            series_row = cursor.fetchone()
+            if not series_row:
+                self.logger.warning(f"Serie {series_id} no encontrada o sin TMDB ID")
+                return 0
+            
+            series = dict(series_row)
+            
+            # Limpiar episodios faltantes existentes
+            self.clear_missing_episodes(series_id)
+            
+            # Obtener episodios de TMDB
+            tmdb_client = TMDBClient(Settings.TMDB_API_KEY)
+            tmdb_episodes = tmdb_client.get_all_episodes(series['tmdb_id'])
+            
+            # Obtener episodios locales
+            local_episodes = self.get_local_episodes(series_id)
+            
+            # Crear set de episodios locales
+            local_set = set()
+            for ep in local_episodes:
+                local_set.add((ep['season'], ep['episode']))
+            
+            # Encontrar faltantes
+            missing_count = 0
+            for ep in tmdb_episodes:
+                key = (ep['season_number'], ep['episode_number'])
+                if key not in local_set:
+                    episode_data = {
+                        'series_id': series_id,
+                        'series_name': series['name'],
+                        'season': ep['season_number'],
+                        'episode': ep['episode_number'],
+                        'name': ep['name'],
+                        'air_date': ep.get('air_date', '')
+                    }
+                    self.insert_missing_episode(episode_data)
+                    missing_count += 1
+            
+            self.logger.info(f"Recalculados {missing_count} episodios faltantes para serie {series['name']}")
+            return missing_count
+            
+        except Exception as e:
+            self.logger.error(f"Error en recalculate_missing_episodes_for_series: {e}")
             conn.rollback()
             raise
     
