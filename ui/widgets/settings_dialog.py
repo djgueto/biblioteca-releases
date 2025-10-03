@@ -81,6 +81,29 @@ class SettingsWidget(QWidget):
         options_group.setLayout(options_layout)
         layout.addWidget(options_group)
         
+        # Grupo eMule
+        emule_group = QGroupBox("🔗 eMule Integración")
+        emule_layout = QFormLayout()
+        
+        self.emule_url = QLineEdit()
+        self.emule_url.setPlaceholderText("http://localhost:4711")
+        emule_layout.addRow("URL Servidor:", self.emule_url)
+        
+        self.emule_username = QLineEdit()
+        self.emule_username.setPlaceholderText("admin")
+        emule_layout.addRow("Usuario:", self.emule_username)
+        
+        self.emule_password = QLineEdit()
+        self.emule_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.emule_password.setPlaceholderText("Contraseña del servidor web")
+        emule_layout.addRow("Contraseña:", self.emule_password)
+        
+        self.emule_auto_send = QCheckBox("Enviar enlaces automáticamente")
+        emule_layout.addRow("Auto-envío:", self.emule_auto_send)
+        
+        emule_group.setLayout(emule_layout)
+        layout.addWidget(emule_group)
+        
         # Botones
         btn_layout = QHBoxLayout()
         
@@ -91,8 +114,12 @@ class SettingsWidget(QWidget):
         btn_test = QPushButton("🧪 Probar Conexión")
         btn_test.clicked.connect(self.test_connection)
         
+        btn_test_emule = QPushButton("🔗 Probar eMule")
+        btn_test_emule.clicked.connect(self.test_emule_connection)
+        
         btn_layout.addWidget(btn_save)
         btn_layout.addWidget(btn_test)
+        btn_layout.addWidget(btn_test_emule)
         btn_layout.addStretch()
         
         layout.addLayout(btn_layout)
@@ -116,6 +143,12 @@ class SettingsWidget(QWidget):
         self.series_path.setText(Settings.SERIES_PATH)
         self.interval.setValue(Settings.CHECK_INTERVAL_HOURS)
         self.headless.setChecked(Settings.SELENIUM_HEADLESS)
+        
+        # Cargar configuración de eMule
+        self.emule_url.setText(Settings.EMULE_URL)
+        self.emule_username.setText(Settings.EMULE_USERNAME)
+        self.emule_password.setText(Settings.EMULE_PASSWORD)
+        self.emule_auto_send.setChecked(Settings.EMULE_AUTO_SEND)
     
     def save_settings(self):
         """Guardar configuración"""
@@ -125,7 +158,11 @@ class SettingsWidget(QWidget):
             'HISPASHARE_PASS': self.hispashare_pass.text(),
             'SERIES_PATH': self.series_path.text(),
             'CHECK_INTERVAL_HOURS': str(self.interval.value()),
-            'SELENIUM_HEADLESS': str(self.headless.isChecked())
+            'SELENIUM_HEADLESS': str(self.headless.isChecked()),
+            'EMULE_URL': self.emule_url.text(),
+            'EMULE_USERNAME': self.emule_username.text(),
+            'EMULE_PASSWORD': self.emule_password.text(),
+            'EMULE_AUTO_SEND': str(self.emule_auto_send.isChecked())
         }
         
         try:
@@ -138,6 +175,10 @@ class SettingsWidget(QWidget):
             Settings.SERIES_PATH = settings_dict['SERIES_PATH']
             Settings.CHECK_INTERVAL_HOURS = int(settings_dict['CHECK_INTERVAL_HOURS'])
             Settings.SELENIUM_HEADLESS = settings_dict['SELENIUM_HEADLESS'] == 'True'
+            Settings.EMULE_URL = settings_dict['EMULE_URL']
+            Settings.EMULE_USERNAME = settings_dict['EMULE_USERNAME']
+            Settings.EMULE_PASSWORD = settings_dict['EMULE_PASSWORD']
+            Settings.EMULE_AUTO_SEND = settings_dict['EMULE_AUTO_SEND'] == 'True'
             
             self.settings_saved.emit()
             self.logger.info("Configuración guardada correctamente")
@@ -191,3 +232,39 @@ class SettingsWidget(QWidget):
                 "Éxito",
                 "✅ Todas las conexiones son correctas"
             )
+    
+    def test_emule_connection(self):
+        """Probar conexión con eMule"""
+        from core.emule.client import EmuleClient
+        
+        try:
+            # Crear cliente temporal con la configuración actual
+            emule_client = EmuleClient()
+            
+            # Actualizar configuración temporal
+            emule_client.url = self.emule_url.text() or "http://localhost:4711"
+            emule_client.username = self.emule_username.text() or "admin"
+            emule_client.password = self.emule_password.text()
+            
+            # Probar conexión
+            if emule_client.test_connection():
+                QMessageBox.information(
+                    self,
+                    "Éxito",
+                    "✅ Conexión con eMule correcta"
+                )
+                self.logger.info("✅ Conexión eMule correcta")
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Error de Conexión",
+                    "❌ No se pudo conectar con eMule.\n\nVerifica:\n- Que eMule esté ejecutándose\n- La URL del servidor web\n- Las credenciales"
+                )
+                
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"❌ Error probando conexión eMule:\n{str(e)}"
+            )
+            self.logger.error(f"Error probando conexión eMule: {e}")

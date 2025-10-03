@@ -5,15 +5,23 @@ from .parser import EpisodeParser
 
 
 class LibraryScanner:
-    def __init__(self, series_path):
+    def __init__(self, series_path, db_manager=None):
         self.series_path = Path(series_path)
         self.logger = logging.getLogger(__name__)
         self.parser = EpisodeParser()
+        self.db_manager = db_manager
     
     def scan(self):
-        """Escanear carpeta de series"""
+        """Escanear la biblioteca de series"""
         if not self.series_path.exists():
             raise FileNotFoundError(f"Ruta no encontrada: {self.series_path}")
+        
+        # Limpiar series que ya no existen (solo si tenemos db_manager)
+        if self.db_manager:
+            self.logger.info("Limpiando series eliminadas...")
+            deleted_count = self.db_manager.cleanup_deleted_series()
+            if deleted_count > 0:
+                self.logger.info(f"Se eliminaron {deleted_count} series que ya no existen")
         
         series_list = []
         

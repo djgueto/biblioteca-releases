@@ -42,6 +42,7 @@ class DatabaseManager:
                 needs_review BOOLEAN DEFAULT 0,
                 hispashare_url TEXT,
                 status TEXT DEFAULT 'pending',
+                search_disabled BOOLEAN DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -97,6 +98,16 @@ class DatabaseManager:
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_missing_series ON missing_episodes(series_id)')
         
         conn.commit()
+        
+        # Migración: Agregar campo search_disabled si no existe
+        try:
+            cursor.execute("ALTER TABLE series ADD COLUMN search_disabled BOOLEAN DEFAULT 0")
+            conn.commit()
+            self.logger.info("Campo search_disabled agregado a la tabla series")
+        except Exception:
+            # El campo ya existe, no hacer nada
+            pass
+        
         self.logger.info("Base de datos inicializada correctamente")
     
     # ========== SERIES ==========
@@ -260,6 +271,21 @@ class DatabaseManager:
         rows = cursor.fetchall()
         return [dict(row) for row in rows]
     
+    def get_series_with_hispashare_urls(self):
+        """Obtener series que tienen URL de Hispashare"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT id, name, folder_path, hispashare_url, tmdb_id
+            FROM series 
+            WHERE hispashare_url IS NOT NULL AND hispashare_url != ''
+            ORDER BY name
+        ''')
+        
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+    
     def get_series_with_tmdb(self):
         """Obtener series con TMDB ID"""
         conn = self.get_connection()
@@ -274,22 +300,145 @@ class DatabaseManager:
         rows = cursor.fetchall()
         return [dict(row) for row in rows]
     
-    def get_series_without_hispashare_url(self):
-        """Obtener series sin URL de Hispashare"""
+    def get_series_by_id(self, series_id):
+        """Obtener una serie por su ID"""
         conn = self.get_connection()
         cursor = conn.cursor()
         
         cursor.execute('''
-            SELECT * FROM series
-            WHERE tmdb_id IS NOT NULL
-            AND (hispashare_url IS NULL OR hispashare_url = '')
+            SELECT * FROM series WHERE id = ?
+        ''', (series_id,))
+        
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    def get_series_without_hispashare_url(self):
+        """Obtener series sin URL de Hispashare y que no tengan búsqueda deshabilitada"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT id, name, tmdb_name, year, tmdb_id
+            FROM series 
+            WHERE (hispashare_url IS NULL OR hispashare_url = '') 
+            AND (search_disabled IS NULL OR search_disabled = 0)
             ORDER BY name
         ''')
         
         rows = cursor.fetchall()
         return [dict(row) for row in rows]
     
-    # ========== EPISODIOS LOCALES ==========
+    def get_series_with_missing_episodes_without_url(self):
+        """Obtener series que tienen episodios faltantes y no tienen URL de Hispashare"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT DISTINCT s.id, s.name, s.tmdb_name, s.year, s.tmdb_id
+            FROM series s
+            INNER JOIN missing_episodes me ON s.id = me.series_id
+            WHERE (s.hispashare_url IS NULL OR s.hispashare_url = '') 
+            AND (s.search_disabled IS NULL OR s.search_disabled = 0)
+            AND me.status = 'missing'
+            ORDER BY s.name
+        ''')
+        
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+    
+    def get_series_with_missing_episodes_and_url(self):
+        """Obtener series que tienen episodios faltantes y tienen URL de Hispashare"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT DISTINCT s.id, s.name, s.folder_path, s.hispashare_url, s.tmdb_id
+            FROM series s
+            INNER JOIN missing_episodes me ON s.id = me.series_id
+            WHERE s.hispashare_url IS NOT NULL AND s.hispashare_url != ''
+            AND me.status = 'missing'
+            ORDER BY s.name
+        ''')
+        
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+    
+    def disable_series_search(self, series_id):
+        """Marcar una serie para que no se busque más automáticamente"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('''
+                UPDATE series 
+                SET search_disabled = 1, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ''', (series_id,))
+            conn.commit()
+            self.logger.info(f"Búsqueda deshabilitada para serie ID: {series_id}")
+            
+        except Exception as e:
+            self.logger.error(f"Error al deshabilitar búsqueda: {e}")
+            conn.rollback()
+            raise
+    
+    def enable_series_search(self, series_id):
+        """Reactivar la búsqueda automática para una serie"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('''
+                UPDATE series 
+                SET search_disabled = 0, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ''', (series_id,))
+            conn.commit()
+            self.logger.info(f"Búsqueda reactivada para serie ID: {series_id}")
+            
+        except Exception as e:
+            self.logger.error(f"Error al reactivar búsqueda: {e}")
+            conn.rollback()
+            raise
+
+    def cleanup_deleted_series(self):
+        """Limpiar series cuyas carpetas ya no existen en el disco"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            # Obtener todas las series con sus rutas
+            cursor.execute('SELECT id, name, folder_path FROM series')
+            all_series = cursor.fetchall()
+            
+            deleted_count = 0
+            
+            for series in all_series:
+                series_id, series_name, folder_path = series
+                
+                # Verificar si la carpeta existe
+                if not Path(folder_path).exists():
+                    self.logger.info(f"Eliminando serie '{series_name}' - carpeta no existe: {folder_path}")
+                    
+                    # Eliminar episodios locales
+                    cursor.execute('DELETE FROM local_episodes WHERE series_id = ?', (series_id,))
+                    
+                    # Eliminar episodios faltantes
+                    cursor.execute('DELETE FROM missing_episodes WHERE series_id = ?', (series_id,))
+                    
+                    # Eliminar la serie
+                    cursor.execute('DELETE FROM series WHERE id = ?', (series_id,))
+                    
+                    deleted_count += 1
+            
+            conn.commit()
+            self.logger.info(f"Limpieza completada: {deleted_count} series eliminadas")
+            return deleted_count
+            
+        except Exception as e:
+            self.logger.error(f"Error en cleanup_deleted_series: {e}")
+            conn.rollback()
+            raise
     
     def insert_local_episodes(self, series_id, episodes):
         """Insertar episodios locales"""

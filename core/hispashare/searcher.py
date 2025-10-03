@@ -9,18 +9,20 @@ import time
 
 
 class HispashareSearcher:
-    def __init__(self, driver):
+    def __init__(self, driver, db_manager=None):
         self.driver = driver
         self.base_url = "https://www.hispashare.org"
         self.logger = logging.getLogger(__name__)
+        self.db_manager = db_manager
     
-    def search_and_select(self, series_name, tmdb_year=None):
+    def search_and_select(self, series_name, tmdb_year=None, series_id=None):
         """
         Busca serie y selecciona mejor resultado automáticamente
         
         Args:
             series_name: Nombre de la serie
             tmdb_year: Año de TMDB (opcional)
+            series_id: ID de la serie en la base de datos (opcional)
         
         Returns:
             str: URL completa del resultado seleccionado o None
@@ -37,6 +39,12 @@ class HispashareSearcher:
             
             if not results:
                 self.logger.warning(f"No se encontraron resultados para: {series_name}")
+                
+                # Marcar serie como no encontrada si tenemos db_manager y series_id
+                if self.db_manager and series_id:
+                    self.logger.info(f"Marcando serie '{series_name}' como no encontrada")
+                    self.db_manager.disable_series_search(series_id)
+                
                 return None
             
             # 4. Seleccionar mejor match
@@ -48,6 +56,14 @@ class HispashareSearcher:
                     f"(Score: {best_result.get('score', 0):.2%})"
                 )
                 return best_result['url']
+            else:
+                # No se encontró un match suficientemente bueno
+                self.logger.warning(f"No se encontró un match adecuado para: {series_name}")
+                
+                # Marcar serie como no encontrada si tenemos db_manager y series_id
+                if self.db_manager and series_id:
+                    self.logger.info(f"Marcando serie '{series_name}' como no encontrada (sin match adecuado)")
+                    self.db_manager.disable_series_search(series_id)
             
             return None
             

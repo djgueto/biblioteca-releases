@@ -12,6 +12,12 @@ class Settings:
     HISPASHARE_PASS = os.getenv("HISPASHARE_PASS", "")
     HISPASHARE_BASE_URL = "https://www.hispashare.org"
     
+    # eMule
+    EMULE_URL = os.getenv("EMULE_URL", "http://localhost:4711")
+    EMULE_USERNAME = os.getenv("EMULE_USERNAME", "admin")
+    EMULE_PASSWORD = os.getenv("EMULE_PASSWORD", "")
+    EMULE_AUTO_SEND = os.getenv("EMULE_AUTO_SEND", "False").lower() == "true"
+    
     # Rutas
     SERIES_PATH = os.getenv("SERIES_PATH", "")
     DB_PATH = "./series_manager.db"
@@ -53,3 +59,12 @@ class Settings:
         with open('.env', 'w') as f:
             for key, value in settings_dict.items():
                 f.write(f"{key}={value}\n")
+    
+    def get_emule_config(self):
+        """Obtener configuración de eMule"""
+        return {
+            'url': self.EMULE_URL,
+            'username': self.EMULE_USERNAME,
+            'password': self.EMULE_PASSWORD,
+            'auto_send': self.EMULE_AUTO_SEND
+        }

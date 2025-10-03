@@ -49,6 +49,7 @@ class MainWindow(QMainWindow):
         tabs = QTabWidget()
         tabs.addTab(self.create_series_tab(), "📺 Series")
         tabs.addTab(self.create_missing_tab(), "❌ Episodios Faltantes")
+        tabs.addTab(self.create_downloads_tab(), "📥 Descargas")
         tabs.addTab(self.create_log_tab(), "📋 Logs")
         tabs.addTab(self.create_settings_tab(), "⚙️ Configuración")
         
@@ -123,6 +124,12 @@ class MainWindow(QMainWindow):
         filter_layout = QHBoxLayout()
         self.filter_label = QLabel("Episodios que faltan en tu biblioteca")
         filter_layout.addWidget(self.filter_label)
+        
+        # Contador total de episodios faltantes
+        self.total_missing_label = QLabel("Total: 0 episodios")
+        self.total_missing_label.setStyleSheet("font-weight: bold; color: #d32f2f;")
+        filter_layout.addWidget(self.total_missing_label)
+        
         filter_layout.addStretch()
         
         btn_refresh_missing = QPushButton("🔄 Refrescar")
@@ -149,6 +156,57 @@ class MainWindow(QMainWindow):
         
         # Cargar datos iniciales
         self.refresh_missing_list()
+        
+        return widget
+    
+    def create_downloads_tab(self):
+        """Tab para gestionar descargas de episodios"""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        
+        # Botones superiores
+        btn_layout = QHBoxLayout()
+        
+        btn_refresh_downloads = QPushButton("🔄 Refrescar Enlaces")
+        btn_refresh_downloads.clicked.connect(self.refresh_downloads)
+        
+        btn_clear_downloads = QPushButton("🗑️ Limpiar Enlaces")
+        btn_clear_downloads.clicked.connect(self.clear_downloads)
+        
+        btn_copy_all = QPushButton("📋 Copiar Todos")
+        btn_copy_all.clicked.connect(self.copy_all_links)
+        
+        btn_send_emule = QPushButton("🔗 Enviar a eMule")
+        btn_send_emule.clicked.connect(self.send_all_to_emule)
+        
+        btn_layout.addWidget(btn_refresh_downloads)
+        btn_layout.addWidget(btn_clear_downloads)
+        btn_layout.addWidget(btn_copy_all)
+        btn_layout.addWidget(btn_send_emule)
+        btn_layout.addStretch()
+        
+        layout.addLayout(btn_layout)
+        
+        # Área de texto para mostrar enlaces ed2k
+        self.downloads_text = QTextEdit()
+        self.downloads_text.setReadOnly(True)
+        self.downloads_text.setPlaceholderText("Los enlaces ed2k aparecerán aquí después de procesar las descargas...")
+        self.downloads_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #f8f9fa;
+                border: 1px solid #dee2e6;
+                font-family: 'Courier New', monospace;
+                font-size: 9pt;
+                padding: 10px;
+            }
+        """)
+        
+        layout.addWidget(self.downloads_text)
+        
+        # Información
+        info_label = QLabel("💡 Los enlaces ed2k se generan automáticamente cuando el scheduler procesa las series con URLs de Hispashare")
+        info_label.setStyleSheet("color: #6c757d; font-style: italic; padding: 5px;")
+        layout.addWidget(info_label)
         
         return widget
     
@@ -233,10 +291,54 @@ class MainWindow(QMainWindow):
         self.btn_scan.setEnabled(False)
         self.append_log("🔍 Iniciando escaneo manual...")
         
-        # Aquí iría la lógica de escaneo
-        # Por ahora simulamos
-        self.update_progress(100, "Escaneo completado")
-        self.btn_scan.setEnabled(True)
+        try:
+            from core.library.scanner import LibraryScanner
+            from config.settings import Settings
+            
+            # Verificar que la ruta de series esté configurada
+            if not Settings.SERIES_PATH:
+                QMessageBox.warning(
+                    self, 
+                    "Configuración Incompleta", 
+                    "Por favor configura la ruta de series en Configuración"
+                )
+                return
+            
+            # Ejecutar escaneo
+            scanner = LibraryScanner(Settings.SERIES_PATH, self.db)
+            series_list = scanner.scan()
+            
+            # Guardar en base de datos
+            series_count = 0
+            for series in series_list:
+                self.db.insert_or_update_series(series)
+                series_count += 1
+            
+            self.append_log(f"✅ Escaneo completado: {series_count} series procesadas")
+            self.update_progress(100, "Escaneo completado")
+            
+            # Refrescar la lista de series
+            self.refresh_series_list()
+            
+            QMessageBox.information(
+                self, 
+                "Escaneo Completado", 
+                f"Se procesaron {series_count} series correctamente."
+            )
+            
+        except FileNotFoundError as e:
+            error_msg = f"Ruta no encontrada: {e}"
+            self.append_log(f"❌ Error: {error_msg}")
+            QMessageBox.critical(self, "Error", error_msg)
+            
+        except Exception as e:
+            error_msg = f"Error durante el escaneo: {str(e)}"
+            self.append_log(f"❌ Error: {error_msg}")
+            self.logger.error(f"Error en escaneo manual: {e}")
+            QMessageBox.critical(self, "Error", error_msg)
+            
+        finally:
+            self.btn_scan.setEnabled(True)
     
     def refresh_series_list(self):
         """Refrescar lista de series"""
@@ -275,11 +377,25 @@ class MainWindow(QMainWindow):
             
             # URL Hispashare
             url = series.get('hispashare_url', '')
-            self.series_table.setItem(row, 5, QTableWidgetItem(url))
+            url_item = QTableWidgetItem(url)
+            
+            # Si la serie tiene búsqueda deshabilitada, mostrar indicación visual
+            if series.get('search_disabled', 0) == 1:
+                if not url:  # Solo si no tiene URL
+                    url_item.setText("🚫 Búsqueda deshabilitada")
+                    url_item.setForeground(QColor('gray'))
+            
+            self.series_table.setItem(row, 5, url_item)
             
             # Estado
             status = series.get('status', 'Pendiente')
-            self.series_table.setItem(row, 6, QTableWidgetItem(status))
+            status_item = QTableWidgetItem(status)
+            
+            # Indicar visualmente si la búsqueda está deshabilitada
+            if series.get('search_disabled', 0) == 1:
+                status_item.setForeground(QColor('gray'))
+            
+            self.series_table.setItem(row, 6, status_item)
         
         # También refrescar la lista de episodios faltantes si existe
         if hasattr(self, 'missing_table'):
@@ -298,6 +414,19 @@ class MainWindow(QMainWindow):
             self.missing_table.setItem(row, 3, QTableWidgetItem(episode.get('name', '')))
             self.missing_table.setItem(row, 4, QTableWidgetItem(episode.get('air_date', '')))
             self.missing_table.setItem(row, 5, QTableWidgetItem(episode.get('status', 'Faltante')))
+        
+        # Actualizar contador total
+        total_count = len(missing_episodes)
+        if hasattr(self, 'total_missing_label'):
+            if total_count == 0:
+                self.total_missing_label.setText("Total: 0 episodios")
+                self.total_missing_label.setStyleSheet("font-weight: bold; color: #4caf50;")  # Verde para 0
+            elif total_count == 1:
+                self.total_missing_label.setText("Total: 1 episodio")
+                self.total_missing_label.setStyleSheet("font-weight: bold; color: #d32f2f;")  # Rojo para faltantes
+            else:
+                self.total_missing_label.setText(f"Total: {total_count} episodios")
+                self.total_missing_label.setStyleSheet("font-weight: bold; color: #d32f2f;")  # Rojo para faltantes
     
     @pyqtSlot()
     def on_settings_saved(self):
@@ -358,8 +487,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Advertencia", "Por favor selecciona una serie para editar")
             return
         
-        # Abrir diálogo de edición
-        dialog = SeriesEditDialog(series_data, self)
+        # Abrir diálogo de edición con búsqueda automática siempre activada
+        dialog = SeriesEditDialog(series_data, self, auto_search=True)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             changes = dialog.get_changes()
             if changes:
@@ -394,6 +523,10 @@ class MainWindow(QMainWindow):
         if self.series_table.itemAt(position) is None:
             return
         
+        series_data = self.get_selected_series_data()
+        if not series_data:
+            return
+        
         menu = QMenu(self)
         
         # Acción de editar
@@ -412,6 +545,19 @@ class MainWindow(QMainWindow):
         copy_url_action = QAction("📋 Copiar URL Hispashare", self)
         copy_url_action.triggered.connect(self.copy_hispashare_url)
         menu.addAction(copy_url_action)
+        
+        # Acción de enviar enlaces a eMule (solo si tiene URL de Hispashare)
+        if series_data.get('hispashare_url'):
+            send_emule_action = QAction("🔗 Enviar Enlaces a eMule", self)
+            send_emule_action.triggered.connect(self.send_series_to_emule)
+            menu.addAction(send_emule_action)
+        
+        # Acción para reactivar búsqueda (solo si está deshabilitada)
+        if series_data.get('search_disabled', 0) == 1:
+            menu.addSeparator()
+            reactivate_action = QAction("🔍 Reactivar Búsqueda Hispashare", self)
+            reactivate_action.triggered.connect(self.reactivate_series_search)
+            menu.addAction(reactivate_action)
         
         # Mostrar menú
         menu.exec(self.series_table.mapToGlobal(position))
@@ -448,6 +594,44 @@ class MainWindow(QMainWindow):
             self.append_log(f"📋 URL copiada al portapapeles: {url}")
         else:
             QMessageBox.information(self, "Información", "Esta serie no tiene URL de Hispashare")
+    
+    def reactivate_series_search(self):
+        """Reactivar búsqueda de Hispashare para una serie"""
+        series_data = self.get_selected_series_data()
+        if not series_data:
+            return
+        
+        reply = QMessageBox.question(
+            self,
+            "Reactivar Búsqueda",
+            f"¿Deseas reactivar la búsqueda de Hispashare para '{series_data['name']}'?\n\nEsto permitirá que la serie sea buscada nuevamente en los próximos escaneos automáticos.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                # Reactivar búsqueda en la base de datos
+                self.db.enable_series_search(series_data['id'])
+                
+                # Refrescar la tabla para mostrar el cambio
+                self.refresh_series_list()
+                
+                # Log del cambio
+                self.append_log(f"🔍 Búsqueda reactivada para '{series_data['name']}'")
+                
+                QMessageBox.information(
+                    self, 
+                    "Búsqueda Reactivada", 
+                    f"La búsqueda de Hispashare ha sido reactivada para '{series_data['name']}'.\n\nLa serie será incluida en los próximos escaneos automáticos."
+                )
+                
+            except Exception as e:
+                self.logger.error(f"Error reactivando búsqueda para '{series_data['name']}': {e}")
+                QMessageBox.critical(
+                    self, 
+                    "Error", 
+                    f"Error al reactivar la búsqueda:\n{str(e)}"
+                )
     
     @pyqtSlot(int, str)
     def on_url_saved(self, series_id, url):
@@ -521,3 +705,159 @@ class MainWindow(QMainWindow):
                     item.setBackground(default_color)
         except Exception as e:
             self.logger.error(f"Error quitando resaltado: {e}")
+    
+    def refresh_downloads(self):
+        """Refrescar la lista de enlaces ed2k desde archivos"""
+        try:
+            import os
+            downloads_dir = "downloads"
+            
+            if not os.path.exists(downloads_dir):
+                self.downloads_text.setPlainText("No hay archivos de descarga disponibles.")
+                return
+            
+            all_links = []
+            
+            # Leer todos los archivos .txt en el directorio downloads
+            for filename in os.listdir(downloads_dir):
+                if filename.endswith('.txt'):
+                    filepath = os.path.join(downloads_dir, filename)
+                    try:
+                        with open(filepath, 'r', encoding='utf-8') as f:
+                            content = f.read().strip()
+                            if content:
+                                all_links.append(f"# {filename}\n{content}\n")
+                    except Exception as e:
+                        self.logger.error(f"Error leyendo {filepath}: {e}")
+            
+            if all_links:
+                self.downloads_text.setPlainText('\n'.join(all_links))
+                self.append_log(f"✅ {len(all_links)} archivos de descarga cargados")
+            else:
+                self.downloads_text.setPlainText("No se encontraron enlaces ed2k.")
+                
+        except Exception as e:
+            self.logger.error(f"Error refrescando descargas: {e}")
+            QMessageBox.warning(self, "Error", f"Error al cargar descargas: {str(e)}")
+    
+    def clear_downloads(self):
+        """Limpiar el área de descargas"""
+        reply = QMessageBox.question(
+            self,
+            "Confirmar limpieza",
+            "¿Deseas limpiar todos los enlaces mostrados?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            self.downloads_text.clear()
+            self.append_log("🗑️ Enlaces de descarga limpiados")
+    
+    def copy_all_links(self):
+        """Copiar todos los enlaces al portapapeles"""
+        try:
+            from PyQt6.QtWidgets import QApplication
+            
+            text = self.downloads_text.toPlainText()
+            if text.strip():
+                clipboard = QApplication.clipboard()
+                clipboard.setText(text)
+                self.append_log("📋 Enlaces copiados al portapapeles")
+                QMessageBox.information(self, "Copiado", "Enlaces copiados al portapapeles")
+            else:
+                QMessageBox.information(self, "Sin enlaces", "No hay enlaces para copiar")
+                
+        except Exception as e:
+            self.logger.error(f"Error copiando enlaces: {e}")
+            QMessageBox.warning(self, "Error", f"Error al copiar: {str(e)}")
+    
+    def send_all_to_emule(self):
+        """Enviar todos los enlaces mostrados a eMule"""
+        try:
+            from core.emule.client import EmuleClient
+            
+            text = self.downloads_text.toPlainText()
+            if not text.strip():
+                QMessageBox.information(self, "Sin enlaces", "No hay enlaces para enviar")
+                return
+            
+            # Crear cliente eMule
+            emule_client = EmuleClient()
+            
+            if not emule_client.is_configured():
+                QMessageBox.warning(
+                    self,
+                    "eMule no configurado",
+                    "Por favor configura eMule en la pestaña de Configuración antes de enviar enlaces"
+                )
+                return
+            
+            # Extraer enlaces ed2k del texto
+            ed2k_links = emule_client.extract_ed2k_links_from_text(text)
+            
+            if not ed2k_links:
+                QMessageBox.information(self, "Sin enlaces válidos", "No se encontraron enlaces ed2k válidos")
+                return
+            
+            # Confirmar envío
+            reply = QMessageBox.question(
+                self,
+                "Confirmar envío",
+                f"¿Deseas enviar {len(ed2k_links)} enlaces a eMule?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            
+            if reply == QMessageBox.StandardButton.Yes:
+                # Enviar enlaces
+                result = emule_client.add_multiple_ed2k_links(ed2k_links)
+                
+                if result['success']:
+                    QMessageBox.information(
+                        self,
+                        "Éxito",
+                        f"✅ {result['added']}/{result['total']} enlaces enviados a eMule"
+                    )
+                    self.append_log(f"🔗 {result['added']}/{result['total']} enlaces enviados a eMule")
+                else:
+                    QMessageBox.warning(
+                        self,
+                        "Error",
+                        f"❌ Error enviando enlaces: {result.get('message', 'Error desconocido')}"
+                    )
+                    
+        except Exception as e:
+            self.logger.error(f"Error enviando enlaces a eMule: {e}")
+            QMessageBox.critical(self, "Error", f"Error enviando enlaces a eMule: {e}")
+    
+    def send_series_to_emule(self):
+        """Enviar enlaces de una serie específica a eMule"""
+        try:
+            from core.hispashare.downloader import HispashareDownloader
+            
+            series_data = self.get_selected_series_data()
+            if not series_data:
+                return
+            
+            # Crear downloader temporal
+            downloader = HispashareDownloader(None, self.db)
+            
+            # Enviar enlaces de la serie a eMule
+            result = downloader.send_links_to_emule(series_data['id'])
+            
+            if result['success']:
+                QMessageBox.information(
+                    self,
+                    "Éxito",
+                    f"✅ {result['added']}/{result['total']} enlaces de '{series_data['name']}' enviados a eMule"
+                )
+                self.append_log(f"🔗 Enlaces de '{series_data['name']}' enviados a eMule: {result['added']}/{result['total']}")
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Error",
+                    f"❌ Error enviando enlaces de '{series_data['name']}':\n{result.get('error', 'Error desconocido')}"
+                )
+                
+        except Exception as e:
+            self.logger.error(f"Error enviando serie a eMule: {e}")
+            QMessageBox.critical(self, "Error", f"Error enviando serie a eMule: {e}")

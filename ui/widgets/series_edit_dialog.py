@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize
 from PyQt6.QtGui import QFont, QPixmap
 import json
+import logging
 from config.settings import Settings
 
 
@@ -78,13 +79,15 @@ class ImageLoader(QThread):
 class SeriesEditDialog(QDialog):
     """Diálogo para edición manual de series"""
     
-    def __init__(self, series_data, parent=None):
+    def __init__(self, series_data, parent=None, auto_search=False):
         super().__init__(parent)
         self.series_data = series_data
         self.selected_tmdb_data = None
         self.search_thread = None
         self.image_loader = None
         self.poster_labels = []  # Lista de labels para carátulas
+        self.auto_search = auto_search
+        self.logger = logging.getLogger(__name__)
         
         self.setWindowTitle(f"Editar Serie: {series_data.get('name', 'Sin nombre')}")
         self.setModal(True)
@@ -170,6 +173,7 @@ class SeriesEditDialog(QDialog):
         # Lista de resultados con carátulas
         self.results_list = QListWidget()
         self.results_list.itemClicked.connect(self.on_result_selected)
+        self.results_list.itemDoubleClicked.connect(self.on_result_double_clicked)
         self.results_list.setMinimumHeight(200)
         layout.addWidget(QLabel("Resultados de búsqueda:"))
         layout.addWidget(self.results_list)
@@ -235,6 +239,32 @@ Nombre: {self.series_data.get('tmdb_name', 'No disponible')}
 Año: {self.series_data.get('year', 'No disponible')}
 Confianza: {self.series_data.get('confidence_score', 0):.2%}
             """.strip())
+        
+        # Si se solicita búsqueda automática, ejecutarla siempre (con o sin TMDB ID)
+        if self.auto_search and self.series_data.get('name'):
+            # Usar QTimer para ejecutar la búsqueda después de que se complete la inicialización de la UI
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(500, self.auto_search_tmdb)  # Aumentar tiempo para asegurar inicialización completa
+    
+    def auto_search_tmdb(self):
+        """Ejecutar búsqueda automática en TMDB"""
+        try:
+            # Verificar que los widgets estén inicializados
+            if not hasattr(self, 'search_input') or not hasattr(self, 'btn_search'):
+                self.logger.warning("Widgets no inicializados para búsqueda automática")
+                return
+            
+            # Establecer el nombre de la serie en el campo de búsqueda
+            series_name = self.series_data.get('name', '')
+            if series_name:
+                self.search_input.setText(series_name)
+                
+                # Ejecutar la búsqueda
+                self.search_tmdb()
+            else:
+                self.logger.warning("No hay nombre de serie para búsqueda automática")
+        except Exception as e:
+            self.logger.error(f"Error en búsqueda automática: {e}")
     
     def search_tmdb(self):
         """Buscar series en TMDB"""
@@ -273,9 +303,23 @@ Confianza: {self.series_data.get('confidence_score', 0):.2%}
             self.results_list.addItem("No se encontraron resultados")
             return
         
+        # Ordenar resultados por fecha de estreno (más nuevos primero)
+        def get_date_for_sorting(result):
+            date_str = result.get('first_air_date', '')
+            if date_str:
+                try:
+                    # Convertir fecha a formato comparable (YYYY-MM-DD)
+                    return date_str
+                except:
+                    return '0000-00-00'  # Fecha por defecto para series sin fecha
+            return '0000-00-00'
+        
+        # Ordenar por fecha descendente (más nuevas primero)
+        sorted_results = sorted(results, key=get_date_for_sorting, reverse=True)
+        
         # Crear items con placeholder para carátulas
         image_urls = []
-        for i, result in enumerate(results[:10]):  # Limitar a 10 resultados
+        for i, result in enumerate(sorted_results[:10]):  # Limitar a 10 resultados
             name = result.get('name', 'Sin nombre')
             year = result.get('first_air_date', '')[:4] if result.get('first_air_date') else 'N/A'
             overview = result.get('overview', 'Sin descripción')[:80] + "..." if len(result.get('overview', '')) > 80 else result.get('overview', 'Sin descripción')
@@ -354,6 +398,52 @@ Confianza: {self.series_data.get('confidence_score', 0):.2%}
         """
         
         self.selected_info.setHtml(info_text)
+    
+    def on_result_double_clicked(self, item):
+        """Manejar doble clic en resultado - seleccionar y guardar automáticamente"""
+        # Primero seleccionar el resultado
+        self.on_result_selected(item)
+        
+        # Si hay datos seleccionados, guardar automáticamente
+        if hasattr(self, 'selected_tmdb_data') and self.selected_tmdb_data:
+            # Preparar los cambios con la información de TMDB
+            changes = {}
+            
+            # Agregar ID de TMDB
+            changes['tmdb_id'] = self.selected_tmdb_data.get('id')
+            
+            # Establecer confianza al 100% para selección manual
+            changes['confidence_score'] = 1.0
+            
+            # Establecer que no necesita revisión (selección manual)
+            changes['needs_review'] = False
+            
+            # Actualizar nombre TMDB
+            changes['tmdb_name'] = self.selected_tmdb_data.get('name', '')
+            
+            # Agregar año si está disponible
+            first_air_date = self.selected_tmdb_data.get('first_air_date', '')
+            if first_air_date and len(first_air_date) >= 4:
+                changes['year'] = int(first_air_date[:4])
+            
+            # Actualizar nombre si es diferente
+            tmdb_name = self.selected_tmdb_data.get('name', '')
+            current_name = self.series_data.get('name', '')
+            if tmdb_name and tmdb_name != current_name:
+                changes['name'] = tmdb_name
+            
+            # Agregar fecha de estreno si está disponible
+            if self.selected_tmdb_data.get('first_air_date'):
+                changes['first_air_date'] = self.selected_tmdb_data.get('first_air_date')
+            
+            # Agregar descripción si está disponible
+            if self.selected_tmdb_data.get('overview'):
+                changes['overview'] = self.selected_tmdb_data.get('overview')
+            
+            # Guardar cambios y cerrar diálogo
+            self.changes_to_save = changes
+            self.accept()
+    
     
     def validate_url(self):
         """Validar URL de Hispashare"""

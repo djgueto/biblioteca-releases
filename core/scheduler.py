@@ -8,6 +8,7 @@ from core.library.scanner import LibraryScanner
 from core.tmdb.api_client import TMDBClient
 from core.tmdb.auto_matcher import TMDBAutoMatcher
 from core.hispashare.searcher import HispashareSearcher
+from core.hispashare.downloader import HispashareDownloader
 from core.database.db_manager import DatabaseManager
 from config.settings import Settings
 
@@ -93,6 +94,11 @@ class SchedulerThread(QThread):
             self.log_signal.emit("🔎 Buscando URLs en Hispashare...")
             self.search_hispashare(driver)
             
+            # 6. Descargar episodios faltantes
+            self.progress_signal.emit(85, "⬇️ Procesando descargas...")
+            self.log_signal.emit("⬇️ Procesando descargas de episodios faltantes...")
+            self.process_downloads(driver)
+            
             self.progress_signal.emit(100, "✅ Ciclo completado")
             self.log_signal.emit("✅ CICLO COMPLETADO CON ÉXITO")
             self.log_signal.emit("=" * 60)
@@ -134,7 +140,7 @@ class SchedulerThread(QThread):
     def scan_library(self):
         """Escanear biblioteca de series"""
         try:
-            scanner = LibraryScanner(Settings.SERIES_PATH)
+            scanner = LibraryScanner(Settings.SERIES_PATH, self.db)
             series_list = scanner.scan()
             
             # Guardar en base de datos
@@ -240,23 +246,29 @@ class SchedulerThread(QThread):
         return missing
     
     def search_hispashare(self, driver):
-        """Buscar series en Hispashare"""
+        """Buscar series en Hispashare - solo las que tienen episodios faltantes"""
         try:
-            searcher = HispashareSearcher(driver)
-            series_list = self.db.get_series_without_hispashare_url()
+            searcher = HispashareSearcher(driver, self.db)
+            # Cambiar para obtener solo series con episodios faltantes sin URL
+            series_list = self.db.get_series_with_missing_episodes_without_url()
             
             found = 0
             total_series = len(series_list)
             
-            self.log_signal.emit(f"   📊 Total de series a buscar: {total_series}")
+            if total_series == 0:
+                self.log_signal.emit("   ℹ️ No hay series con episodios faltantes que necesiten búsqueda en Hispashare")
+                return
+            
+            self.log_signal.emit(f"   📊 Series con episodios faltantes a buscar: {total_series}")
             
             for i, series in enumerate(series_list, 1):
-                self.log_signal.emit(f"   🔎 [{i}/{total_series}] Buscando: {series['name']}...")
+                self.log_signal.emit(f"   🔎 [{i}/{total_series}] Buscando: {series['name']} (tiene episodios faltantes)...")
                 
                 try:
                     url = searcher.search_and_select(
                         series['name'],
-                        series.get('year')
+                        series.get('year'),
+                        series['id']  # Pasar el ID de la serie
                     )
                     
                     if url:
@@ -274,7 +286,7 @@ class SchedulerThread(QThread):
                             self.logger.error(f"Error guardando URL para '{series['name']}': {save_error}")
                             self.log_signal.emit(f"      ⚠️ URL encontrada pero error al guardar: {str(save_error)}")
                     else:
-                        self.log_signal.emit(f"      ❌ No se encontró")
+                        self.log_signal.emit(f"      ❌ No se encontró (marcada para no buscar más)")
                         
                 except Exception as e:
                     self.logger.error(f"Error buscando '{series['name']}': {e}")
@@ -283,12 +295,59 @@ class SchedulerThread(QThread):
                 
                 time.sleep(2)  # Esperar entre búsquedas
             
-            self.log_signal.emit(f"   ✅ {found}/{total_series} URLs encontradas y guardadas en Hispashare")
+            self.log_signal.emit(f"   ✅ {found}/{total_series} URLs encontradas para series con episodios faltantes")
             
         except Exception as e:
             self.logger.error(f"Error en search_hispashare: {e}")
             raise
     
+    def process_downloads(self, driver):
+        """Procesar descargas de episodios faltantes - solo series que realmente tienen episodios faltantes"""
+        try:
+            # Obtener solo series con episodios faltantes que tienen URL de Hispashare
+            series_with_urls = self.db.get_series_with_missing_episodes_and_url()
+            
+            if not series_with_urls:
+                self.log_signal.emit("   ℹ️ No hay series con episodios faltantes y URLs para procesar descargas")
+                return
+            
+            downloader = HispashareDownloader(driver, self.db)
+            total_links = 0
+            
+            self.log_signal.emit(f"   📋 Procesando {len(series_with_urls)} series con episodios faltantes...")
+            
+            for series in series_with_urls:
+                if not self.running:
+                    break
+                
+                try:
+                    self.log_signal.emit(f"   🔍 Procesando: {series['name']} (tiene episodios faltantes)")
+                    
+                    # Obtener enlaces ed2k para episodios faltantes
+                    ed2k_links = downloader.download_missing_episodes(series['id'])
+                    
+                    if ed2k_links:
+                        total_links += len(ed2k_links)
+                        self.log_signal.emit(f"      ✅ {len(ed2k_links)} enlaces ed2k obtenidos para episodios faltantes")
+                    else:
+                        self.log_signal.emit(f"      ℹ️ No se encontraron enlaces para los episodios faltantes")
+                    
+                except Exception as e:
+                    self.logger.error(f"Error procesando serie '{series['name']}': {e}")
+                    self.log_signal.emit(f"      ❌ Error procesando: {str(e)}")
+                    continue
+                
+                time.sleep(1)  # Pequeña pausa entre series
+            
+            if total_links > 0:
+                self.log_signal.emit(f"   ✅ Total: {total_links} enlaces ed2k obtenidos para episodios faltantes")
+            else:
+                self.log_signal.emit("   ℹ️ No se obtuvieron enlaces ed2k en este ciclo")
+            
+        except Exception as e:
+            self.logger.error(f"Error en process_downloads: {e}")
+            raise
+
     def stop(self):
         """Detener el scheduler"""
         self.logger.info("Deteniendo scheduler...")
