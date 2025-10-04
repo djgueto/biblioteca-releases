@@ -11,6 +11,8 @@ from .widgets.settings_dialog import SettingsWidget
 from .widgets.series_edit_dialog import SeriesEditDialog
 from core.scheduler import SchedulerThread
 from core.database.db_manager import DatabaseManager
+from core.tmdb.api_client import TMDBClient
+from core.tmdb.auto_matcher import TMDBAutoMatcher
 from config.settings import Settings
 import logging
 
@@ -255,7 +257,9 @@ class MainWindow(QMainWindow):
         self.scheduler_thread.log_signal.connect(self.append_log)
         self.scheduler_thread.finished_signal.connect(self.on_cycle_finished)
         self.scheduler_thread.error_signal.connect(self.on_scheduler_error)
-        self.scheduler_thread.url_saved_signal.connect(self.on_url_saved)  # Nueva conexión
+        self.scheduler_thread.url_saved_signal.connect(self.on_url_saved)
+        self.scheduler_thread.tmdb_matched_signal.connect(self.on_tmdb_matched)
+        self.scheduler_thread.series_updated_signal.connect(self.on_series_updated)
         self.scheduler_thread.start()
         
         self.append_log("✅ Scheduler iniciado correctamente")
@@ -305,7 +309,7 @@ class MainWindow(QMainWindow):
                 return
             
             # Ejecutar escaneo
-            scanner = LibraryScanner(Settings.SERIES_PATH, self.db)
+            scanner = LibraryScanner(db_manager=self.db)
             series_list = scanner.scan()
             
             # Guardar en base de datos
@@ -319,6 +323,9 @@ class MainWindow(QMainWindow):
             
             # Refrescar la lista de series
             self.refresh_series_list()
+            
+            # Vincular automáticamente con TMDB las series nuevas
+            self.auto_match_new_series()
             
             QMessageBox.information(
                 self, 
@@ -861,3 +868,201 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.logger.error(f"Error enviando serie a eMule: {e}")
             QMessageBox.critical(self, "Error", f"Error enviando serie a eMule: {e}")
+    
+    def auto_match_new_series(self):
+        """Vincular automáticamente series sin TMDB ID"""
+        try:
+            # Obtener series sin TMDB ID
+            series_list = self.db.get_all_series()
+            unmatched_series = [s for s in series_list if not s.get('tmdb_id')]
+            
+            if not unmatched_series:
+                return
+            
+            self.append_log(f"🎬 Vinculando {len(unmatched_series)} series con TMDB...")
+            
+            tmdb_client = TMDBClient(Settings.TMDB_API_KEY)
+            matcher = TMDBAutoMatcher(tmdb_client)
+            
+            matched = 0
+            for series in unmatched_series:
+                self.append_log(f"   🔗 Matching: {series['name']}...")
+                
+                match_result = matcher.match_series(series)
+                
+                if match_result:
+                    series['tmdb_id'] = match_result['tmdb_id']
+                    series['year'] = match_result['year']
+                    series['confidence_score'] = match_result['confidence_score']
+                    series['needs_review'] = match_result['needs_review']
+                    
+                    self.db.update_tmdb_match(series['id'], match_result)
+                    matched += 1
+                    
+                    confidence_emoji = "✅" if match_result['confidence_score'] >= 0.85 else "⚠️"
+                    self.append_log(
+                        f"      {confidence_emoji} {match_result['name']} "
+                        f"({match_result['year']}) - "
+                        f"Confianza: {match_result['confidence_score']:.1%}"
+                    )
+                else:
+                    self.append_log(f"      ❌ No se encontró match para {series['name']}")
+            
+            self.append_log(f"✅ {matched} series vinculadas con TMDB")
+            
+            # Refrescar la lista después de vincular
+            self.refresh_series_list()
+            
+        except Exception as e:
+            self.logger.error(f"Error en auto_match_new_series: {e}")
+            self.append_log(f"❌ Error vinculando con TMDB: {e}")
+    
+    def on_tmdb_matched(self, series_id, match_data):
+        """Manejar cuando una serie es vinculada con TMDB en tiempo real"""
+        try:
+            self.update_series_tmdb_in_table(series_id, match_data)
+        except Exception as e:
+            self.logger.error(f"Error en on_tmdb_matched: {e}")
+    
+    def on_series_updated(self, series_id):
+        """Manejar cuando una serie es actualizada en tiempo real"""
+        try:
+            self.refresh_series_row(series_id)
+        except Exception as e:
+            self.logger.error(f"Error en on_series_updated: {e}")
+    
+    def update_series_tmdb_in_table(self, series_id, match_data):
+        """Actualizar datos TMDB de una serie en la tabla en tiempo real"""
+        try:
+            table = self.series_table
+            
+            # Buscar la fila correspondiente a la serie
+            for row in range(table.rowCount()):
+                item = table.item(row, 0)  # Columna ID
+                if item and int(item.text()) == series_id:
+                    # Actualizar año (columna 2)
+                    year_item = QTableWidgetItem(str(match_data.get('year', '')))
+                    table.setItem(row, 2, year_item)
+                    
+                    # Actualizar TMDB ID (columna 3)
+                    tmdb_item = QTableWidgetItem(str(match_data.get('tmdb_id', '')))
+                    table.setItem(row, 3, tmdb_item)
+                    
+                    # Actualizar confianza (columna 4)
+                    confidence = match_data.get('confidence_score', 0)
+                    confidence_item = QTableWidgetItem(f"{confidence:.1%}")
+                    
+                    # Color según confianza
+                    if confidence >= 0.85:
+                        confidence_item.setBackground(QColor(144, 238, 144))  # Verde claro
+                    elif confidence >= 0.7:
+                        confidence_item.setBackground(QColor(255, 255, 224))  # Amarillo claro
+                    else:
+                        confidence_item.setBackground(QColor(255, 182, 193))  # Rosa claro
+                    
+                    table.setItem(row, 4, confidence_item)
+                    
+                    # Efecto visual temporal
+                    original_bg = year_item.background()
+                    highlight_color = QColor(173, 216, 230)  # Azul claro
+                    
+                    year_item.setBackground(highlight_color)
+                    tmdb_item.setBackground(highlight_color)
+                    
+                    # Restaurar color original después de 3 segundos
+                    QTimer.singleShot(3000, lambda: self.restore_row_background(row, [1, 2, 3], original_bg))
+                    break
+                    
+        except Exception as e:
+            self.logger.error(f"Error actualizando TMDB en tabla: {e}")
+    
+    def refresh_series_row(self, series_id):
+        """Refrescar una fila específica de la tabla de series"""
+        try:
+            # Obtener datos actualizados de la serie
+            series_data = self.db.get_series_by_id(series_id)
+            if not series_data:
+                return
+            
+            table = self.series_table
+            
+            # Buscar la fila correspondiente
+            for row in range(table.rowCount()):
+                item = table.item(row, 0)  # Columna ID
+                if item and int(item.text()) == series_id:
+                    # Actualizar todas las columnas con los datos más recientes
+                    self.populate_series_row(row, series_data)
+                    break
+                    
+        except Exception as e:
+            self.logger.error(f"Error refrescando fila de serie: {e}")
+    
+    def populate_series_row(self, row, series_data):
+        """Llenar una fila específica de la tabla con datos de serie"""
+        try:
+            table = self.series_table
+            
+            # Nombre - Almacenar el ID de la serie como atributo del item
+            name_item = QTableWidgetItem(series_data.get('name', ''))
+            name_item.series_id = series_data.get('id')  # Almacenar ID para referencia
+            table.setItem(row, 0, name_item)
+            
+            # Año
+            table.setItem(row, 1, QTableWidgetItem(str(series_data.get('year', ''))))
+            
+            # TMDB ID
+            table.setItem(row, 2, QTableWidgetItem(str(series_data.get('tmdb_id', ''))))
+            
+            # Confianza
+            confidence = series_data.get('confidence_score', 0)
+            if confidence is None:
+                confidence = 0
+            conf_item = QTableWidgetItem(f"{confidence:.2%}")
+            if confidence >= 0.85:
+                conf_item.setForeground(QColor('green'))
+            elif confidence >= 0.70:
+                conf_item.setForeground(QColor('orange'))
+            else:
+                conf_item.setForeground(QColor('red'))
+            table.setItem(row, 3, conf_item)
+            
+            # Faltantes
+            missing_count = series_data.get('missing_count', 0)
+            table.setItem(row, 4, QTableWidgetItem(str(missing_count)))
+            
+            # URL Hispashare
+            url = series_data.get('hispashare_url', '')
+            url_item = QTableWidgetItem(url)
+            
+            # Si la serie tiene búsqueda deshabilitada, mostrar indicación visual
+            if series_data.get('search_disabled', 0) == 1:
+                if not url:  # Solo si no tiene URL
+                    url_item.setText("🚫 Búsqueda deshabilitada")
+                    url_item.setForeground(QColor('gray'))
+            
+            table.setItem(row, 5, url_item)
+            
+            # Estado
+            status = series_data.get('status', 'Pendiente')
+            status_item = QTableWidgetItem(status)
+            
+            # Indicar visualmente si la búsqueda está deshabilitada
+            if series_data.get('search_disabled', 0) == 1:
+                status_item.setForeground(QColor('gray'))
+            
+            table.setItem(row, 6, status_item)
+            
+        except Exception as e:
+            self.logger.error(f"Error llenando fila de serie: {e}")
+    
+    def restore_row_background(self, row, columns, original_bg):
+        """Restaurar el color de fondo original de ciertas columnas"""
+        try:
+            table = self.series_table
+            for col in columns:
+                if col < table.columnCount():
+                    item = table.item(row, col)
+                    if item:
+                        item.setBackground(original_bg)
+        except Exception as e:
+            self.logger.error(f"Error restaurando color de fondo: {e}")

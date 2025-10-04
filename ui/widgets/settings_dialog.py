@@ -1,7 +1,8 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QFormLayout, QLineEdit,
     QPushButton, QFileDialog, QCheckBox, QSpinBox,
-    QHBoxLayout, QMessageBox, QGroupBox
+    QHBoxLayout, QMessageBox, QGroupBox, QListWidget,
+    QListWidgetItem
 )
 from PyQt6.QtCore import pyqtSignal
 from config.settings import Settings
@@ -49,17 +50,49 @@ class SettingsWidget(QWidget):
         layout.addWidget(hispa_group)
         
         # Grupo Rutas
-        paths_group = QGroupBox("📁 Rutas")
-        paths_layout = QFormLayout()
+        paths_group = QGroupBox("📁 Rutas de Series")
+        paths_layout = QVBoxLayout()
         
-        path_layout = QHBoxLayout()
+        # Ruta principal (compatibilidad hacia atrás)
+        primary_path_layout = QHBoxLayout()
         self.series_path = QLineEdit()
-        self.series_path.setPlaceholderText("/ruta/a/tus/Series")
+        self.series_path.setPlaceholderText("/ruta/principal/Series")
         btn_browse = QPushButton("Buscar...")
         btn_browse.clicked.connect(self.browse_folder)
-        path_layout.addWidget(self.series_path)
-        path_layout.addWidget(btn_browse)
-        paths_layout.addRow("Carpeta Series:", path_layout)
+        primary_path_layout.addWidget(self.series_path)
+        primary_path_layout.addWidget(btn_browse)
+        
+        paths_form = QFormLayout()
+        paths_form.addRow("Ruta Principal:", primary_path_layout)
+        paths_layout.addLayout(paths_form)
+        
+        # Lista de rutas adicionales
+        additional_paths_layout = QVBoxLayout()
+        additional_paths_layout.addWidget(QWidget())  # Espaciador
+        
+        self.paths_list = QListWidget()
+        self.paths_list.setMaximumHeight(120)
+        self.paths_list.setToolTip("Rutas adicionales de series. Haz doble clic para editar.")
+        additional_paths_layout.addWidget(self.paths_list)
+        
+        # Botones para gestionar rutas adicionales
+        paths_buttons_layout = QHBoxLayout()
+        
+        btn_add_path = QPushButton("➕ Agregar Ruta")
+        btn_add_path.clicked.connect(self.add_series_path)
+        
+        btn_remove_path = QPushButton("➖ Eliminar Ruta")
+        btn_remove_path.clicked.connect(self.remove_series_path)
+        
+        paths_buttons_layout.addWidget(btn_add_path)
+        paths_buttons_layout.addWidget(btn_remove_path)
+        paths_buttons_layout.addStretch()
+        
+        additional_paths_layout.addLayout(paths_buttons_layout)
+        
+        paths_form_additional = QFormLayout()
+        paths_form_additional.addRow("Rutas Adicionales:", additional_paths_layout)
+        paths_layout.addLayout(paths_form_additional)
         
         paths_group.setLayout(paths_layout)
         layout.addWidget(paths_group)
@@ -149,14 +182,92 @@ class SettingsWidget(QWidget):
         self.emule_username.setText(Settings.EMULE_USERNAME)
         self.emule_password.setText(Settings.EMULE_PASSWORD)
         self.emule_auto_send.setChecked(Settings.EMULE_AUTO_SEND)
+        
+        # Cargar rutas adicionales
+        self.load_additional_paths()
+    
+    def load_additional_paths(self):
+        """Cargar rutas adicionales en la lista"""
+        self.paths_list.clear()
+        all_paths = Settings.get_series_paths()
+        
+        # Agregar rutas adicionales (excluyendo la principal)
+        if len(all_paths) > 1:
+            for path in all_paths[1:]:  # Saltar la primera (principal)
+                item = QListWidgetItem(path)
+                item.setToolTip(f"Ruta: {path}")
+                self.paths_list.addItem(item)
+    
+    def add_series_path(self):
+        """Agregar nueva ruta de series"""
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Seleccionar carpeta adicional de Series",
+            ""
+        )
+        if folder:
+            # Verificar que no esté duplicada
+            all_current_paths = self.get_all_current_paths()
+            if folder not in all_current_paths:
+                item = QListWidgetItem(folder)
+                item.setToolTip(f"Ruta: {folder}")
+                self.paths_list.addItem(item)
+            else:
+                QMessageBox.information(
+                    self,
+                    "Ruta Duplicada",
+                    "Esta ruta ya está configurada."
+                )
+    
+    def remove_series_path(self):
+        """Eliminar ruta de series seleccionada"""
+        current_item = self.paths_list.currentItem()
+        if current_item:
+            reply = QMessageBox.question(
+                self,
+                "Confirmar Eliminación",
+                f"¿Eliminar la ruta:\n{current_item.text()}?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self.paths_list.takeItem(self.paths_list.row(current_item))
+        else:
+            QMessageBox.information(
+                self,
+                "Selección Requerida",
+                "Por favor selecciona una ruta para eliminar."
+            )
+    
+    def get_all_current_paths(self):
+        """Obtener todas las rutas actuales (principal + adicionales)"""
+        paths = []
+        
+        # Ruta principal
+        if self.series_path.text().strip():
+            paths.append(self.series_path.text().strip())
+        
+        # Rutas adicionales
+        for i in range(self.paths_list.count()):
+            item = self.paths_list.item(i)
+            if item and item.text().strip():
+                paths.append(item.text().strip())
+        
+        return paths
     
     def save_settings(self):
         """Guardar configuración"""
+        # Obtener todas las rutas configuradas
+        all_paths = self.get_all_current_paths()
+        
+        # Guardar rutas usando el nuevo método
+        if all_paths:
+            Settings.save_series_paths(all_paths)
+        
+        # Preparar resto de configuración
         settings_dict = {
             'TMDB_API_KEY': self.tmdb_key.text(),
             'HISPASHARE_USER': self.hispashare_user.text(),
             'HISPASHARE_PASS': self.hispashare_pass.text(),
-            'SERIES_PATH': self.series_path.text(),
             'CHECK_INTERVAL_HOURS': str(self.interval.value()),
             'SELENIUM_HEADLESS': str(self.headless.isChecked()),
             'EMULE_URL': self.emule_url.text(),
@@ -166,13 +277,25 @@ class SettingsWidget(QWidget):
         }
         
         try:
-            Settings.save_settings(settings_dict)
+            # Leer configuración actual para preservar las rutas ya guardadas
+            current_settings = {}
+            try:
+                with open('.env', 'r') as f:
+                    for line in f:
+                        if '=' in line and not line.strip().startswith('#'):
+                            key, value = line.strip().split('=', 1)
+                            current_settings[key] = value
+            except FileNotFoundError:
+                pass
+            
+            # Actualizar con nueva configuración (sin sobrescribir rutas)
+            current_settings.update(settings_dict)
+            Settings.save_settings(current_settings)
             
             # Actualizar valores en memoria
             Settings.TMDB_API_KEY = settings_dict['TMDB_API_KEY']
             Settings.HISPASHARE_USER = settings_dict['HISPASHARE_USER']
             Settings.HISPASHARE_PASS = settings_dict['HISPASHARE_PASS']
-            Settings.SERIES_PATH = settings_dict['SERIES_PATH']
             Settings.CHECK_INTERVAL_HOURS = int(settings_dict['CHECK_INTERVAL_HOURS'])
             Settings.SELENIUM_HEADLESS = settings_dict['SELENIUM_HEADLESS'] == 'True'
             Settings.EMULE_URL = settings_dict['EMULE_URL']
@@ -180,8 +303,19 @@ class SettingsWidget(QWidget):
             Settings.EMULE_PASSWORD = settings_dict['EMULE_PASSWORD']
             Settings.EMULE_AUTO_SEND = settings_dict['EMULE_AUTO_SEND'] == 'True'
             
+            # Actualizar rutas en memoria
+            if all_paths:
+                Settings.SERIES_PATH = all_paths[0]
+                Settings.SERIES_PATHS = ";".join(all_paths[1:]) if len(all_paths) > 1 else ""
+            
             self.settings_saved.emit()
             self.logger.info("Configuración guardada correctamente")
+            
+            QMessageBox.information(
+                self,
+                "Configuración Guardada",
+                f"✅ Configuración guardada correctamente.\n\nRutas configuradas: {len(all_paths)}"
+            )
             
         except Exception as e:
             self.logger.error(f"Error al guardar configuración: {e}")

@@ -1,5 +1,6 @@
 import sqlite3
 import logging
+import os
 from pathlib import Path
 from datetime import datetime
 from config.settings import Settings
@@ -112,34 +113,94 @@ class DatabaseManager:
     
     # ========== SERIES ==========
     
+    def normalize_path(self, path: str) -> str:
+        """
+        Normaliza rutas para evitar duplicados entre rutas de red y unidades mapeadas
+        """
+        try:
+            # Convertir a Path para normalización básica
+            normalized = Path(path).resolve()
+            
+            # Si es una ruta de red, mantenerla como tal
+            if str(normalized).startswith('\\\\'):
+                return str(normalized).replace('/', '\\')
+            
+            # Si es una unidad mapeada, intentar obtener la ruta real de red
+            if os.name == 'nt' and len(str(normalized)) > 1 and str(normalized)[1] == ':':
+                try:
+                    # Intentar obtener la ruta UNC real usando net use
+                    import subprocess
+                    result = subprocess.run(['net', 'use'], capture_output=True, text=True, shell=True)
+                    if result.returncode == 0:
+                        lines = result.stdout.split('\n')
+                        drive_letter = str(normalized)[:2].upper()
+                        
+                        for line in lines:
+                            if drive_letter in line and '\\\\' in line:
+                                # Extraer la ruta UNC
+                                parts = line.split()
+                                for part in parts:
+                                    if part.startswith('\\\\'):
+                                        # Reemplazar la unidad mapeada con la ruta UNC
+                                        relative_path = str(normalized)[2:]  # Quitar "C:"
+                                        if relative_path.startswith('\\'):
+                                            relative_path = relative_path[1:]
+                                        return os.path.join(part, relative_path).replace('/', '\\')
+                except Exception:
+                    pass
+            
+            return str(normalized).replace('/', '\\')
+            
+        except Exception as e:
+            logging.warning(f"Error normalizando ruta {path}: {e}")
+            return path
+
     def insert_or_update_series(self, series_data):
         """Insertar o actualizar una serie"""
         conn = self.get_connection()
         cursor = conn.cursor()
         
         try:
-            # Verificar si existe
+            # Normalizar la ruta antes de buscar
+            normalized_path = self.normalize_path(series_data['folder_path'])
+            
+            # Verificar si existe por ruta normalizada
             cursor.execute(
-                'SELECT id FROM series WHERE folder_path = ?',
-                (series_data['folder_path'],)
+                'SELECT id, folder_path FROM series WHERE folder_path = ?',
+                (normalized_path,)
             )
             existing = cursor.fetchone()
             
+            # Si no existe con la ruta normalizada, buscar por nombre y verificar si es la misma ubicación física
+            if not existing:
+                cursor.execute(
+                    'SELECT id, folder_path FROM series WHERE name = ?',
+                    (series_data['name'],)
+                )
+                name_matches = cursor.fetchall()
+                
+                for match_id, match_path in name_matches:
+                    if self.normalize_path(match_path) == normalized_path:
+                        existing = (match_id, match_path)
+                        break
+            
             if existing:
                 series_id = existing[0]
-                # Actualizar
+                # Actualizar con la ruta normalizada
                 cursor.execute('''
                     UPDATE series 
-                    SET name = ?, updated_at = CURRENT_TIMESTAMP
+                    SET name = ?, folder_path = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?
-                ''', (series_data['name'], series_id))
+                ''', (series_data['name'], normalized_path, series_id))
+                logging.info(f"Serie actualizada: {series_data['name']} -> {normalized_path}")
             else:
-                # Insertar
+                # Insertar con ruta normalizada
                 cursor.execute('''
                     INSERT INTO series (name, folder_path)
                     VALUES (?, ?)
-                ''', (series_data['name'], series_data['folder_path']))
+                ''', (series_data['name'], normalized_path))
                 series_id = cursor.lastrowid
+                logging.info(f"Serie insertada: {series_data['name']} -> {normalized_path}")
             
             conn.commit()
             
@@ -446,9 +507,31 @@ class DatabaseManager:
         cursor = conn.cursor()
         
         try:
+            # Primero limpiar episodios existentes para esta serie
+            cursor.execute('DELETE FROM local_episodes WHERE series_id = ?', (series_id,))
+            
+            # Crear un set para evitar duplicados en el mismo lote
+            unique_episodes = {}
+            
             for episode in episodes:
+                # Crear clave única basada en serie, temporada y episodio
+                episode_key = (series_id, episode['season'], episode['episode'])
+                
+                # Si ya existe este episodio, mantener el que tenga ruta más específica
+                if episode_key in unique_episodes:
+                    existing_path = unique_episodes[episode_key]['file_path']
+                    new_path = episode['file_path']
+                    
+                    # Preferir rutas más específicas (más profundas en la estructura)
+                    if len(Path(new_path).parts) > len(Path(existing_path).parts):
+                        unique_episodes[episode_key] = episode
+                else:
+                    unique_episodes[episode_key] = episode
+            
+            # Insertar episodios únicos
+            for episode in unique_episodes.values():
                 cursor.execute('''
-                    INSERT OR REPLACE INTO local_episodes
+                    INSERT INTO local_episodes
                     (series_id, season, episode, filename, file_path)
                     VALUES (?, ?, ?, ?, ?)
                 ''', (
@@ -463,6 +546,52 @@ class DatabaseManager:
             
         except Exception as e:
             self.logger.error(f"Error en insert_local_episodes: {e}")
+            conn.rollback()
+            raise
+    
+    def cleanup_duplicate_episodes(self):
+        """Limpiar episodios duplicados existentes en la base de datos"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            # Encontrar duplicados (mismo series_id, season, episode)
+            cursor.execute('''
+                SELECT series_id, season, episode, COUNT(*) as count
+                FROM local_episodes
+                GROUP BY series_id, season, episode
+                HAVING COUNT(*) > 1
+            ''')
+            
+            duplicates = cursor.fetchall()
+            cleaned_count = 0
+            
+            for duplicate in duplicates:
+                series_id, season, episode, count = duplicate
+                
+                # Obtener todos los registros duplicados
+                cursor.execute('''
+                    SELECT id, file_path FROM local_episodes
+                    WHERE series_id = ? AND season = ? AND episode = ?
+                    ORDER BY LENGTH(file_path) DESC
+                ''', (series_id, season, episode))
+                
+                duplicate_records = cursor.fetchall()
+                
+                # Mantener solo el primero (ruta más larga/específica)
+                if len(duplicate_records) > 1:
+                    ids_to_delete = [record[0] for record in duplicate_records[1:]]
+                    
+                    for record_id in ids_to_delete:
+                        cursor.execute('DELETE FROM local_episodes WHERE id = ?', (record_id,))
+                        cleaned_count += 1
+            
+            conn.commit()
+            self.logger.info(f"Limpieza de duplicados completada: {cleaned_count} episodios duplicados eliminados")
+            return cleaned_count
+            
+        except Exception as e:
+            self.logger.error(f"Error en cleanup_duplicate_episodes: {e}")
             conn.rollback()
             raise
     
@@ -599,6 +728,43 @@ class DatabaseManager:
             
         except Exception as e:
             self.logger.error(f"Error en recalculate_missing_episodes_for_series: {e}")
+            conn.rollback()
+            raise
+
+    def cleanup_orphaned_missing_episodes(self):
+        """Limpiar episodios faltantes huérfanos (sin serie padre)"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            # Contar episodios huérfanos antes de limpiar
+            cursor.execute('''
+                SELECT COUNT(*)
+                FROM missing_episodes me
+                LEFT JOIN series s ON me.series_id = s.id
+                WHERE s.id IS NULL
+            ''')
+            
+            orphan_count_before = cursor.fetchone()[0]
+            
+            if orphan_count_before == 0:
+                self.logger.info("No hay episodios faltantes huérfanos para limpiar")
+                return 0
+            
+            # Eliminar episodios huérfanos
+            cursor.execute('''
+                DELETE FROM missing_episodes
+                WHERE series_id NOT IN (SELECT id FROM series)
+            ''')
+            
+            deleted_count = cursor.rowcount
+            conn.commit()
+            
+            self.logger.info(f"Limpiados {deleted_count} episodios faltantes huérfanos")
+            return deleted_count
+            
+        except Exception as e:
+            self.logger.error(f"Error en cleanup_orphaned_missing_episodes: {e}")
             conn.rollback()
             raise
     

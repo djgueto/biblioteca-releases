@@ -18,7 +18,9 @@ class SchedulerThread(QThread):
     log_signal = pyqtSignal(str)
     finished_signal = pyqtSignal()
     error_signal = pyqtSignal(str)
-    url_saved_signal = pyqtSignal(int, str)  # Nueva señal: series_id, url
+    url_saved_signal = pyqtSignal(int, str)  # series_id, url
+    tmdb_matched_signal = pyqtSignal(int, dict)  # series_id, match_data
+    series_updated_signal = pyqtSignal(int)  # series_id para refrescar fila específica
     
     def __init__(self):
         super().__init__()
@@ -71,30 +73,53 @@ class SchedulerThread(QThread):
             driver = self.login_hispashare()
             self.current_driver = driver  # Mantener referencia
             
-            # 2. Escanear biblioteca
-            self.progress_signal.emit(15, "📁 Escaneando biblioteca...")
+            # 2. Limpiar series eliminadas
+            self.progress_signal.emit(15, "🧹 Limpiando series eliminadas...")
+            self.log_signal.emit("🧹 Limpiando series eliminadas del disco...")
+            cleaned_count = self.db.cleanup_deleted_series()
+            self.log_signal.emit(f"   ✅ {cleaned_count} series eliminadas")
+            
+            # 2.1. Limpiar episodios faltantes huérfanos
+            self.log_signal.emit("🧹 Limpiando episodios faltantes huérfanos...")
+            orphan_count = self.db.cleanup_orphaned_missing_episodes()
+            self.log_signal.emit(f"   ✅ {orphan_count} episodios huérfanos eliminados")
+
+            # 3. Escanear biblioteca
+            self.progress_signal.emit(25, "📁 Escaneando biblioteca...")
             self.log_signal.emit("📁 Escaneando biblioteca local...")
             series_list = self.scan_library()
             self.log_signal.emit(f"   ✅ {len(series_list)} series encontradas")
             
-            # 3. Obtener series de la base de datos para vincular con TMDB
-            self.progress_signal.emit(35, "🎬 Vinculando con TMDB...")
+            # 4. Limpiar duplicados de episodios
+            self.progress_signal.emit(35, "🔧 Limpiando duplicados...")
+            self.log_signal.emit("🔧 Limpiando episodios duplicados...")
+            cleaned_count = self.db.cleanup_duplicate_episodes()
+            self.log_signal.emit(f"   ✅ {cleaned_count} duplicados eliminados")
+            
+            # 5. Insertar/actualizar series en BD
+            self.progress_signal.emit(45, "💾 Actualizando base de datos...")
+            self.log_signal.emit("💾 Actualizando series en base de datos...")
+            for series in series_list:
+                self.db.insert_or_update_series(series)
+            
+            # 6. Vincular con TMDB
+            self.progress_signal.emit(55, "🎬 Vinculando con TMDB...")
             self.log_signal.emit("🎬 Vinculando series con TMDB...")
             db_series_list = self.db.get_all_series()
             self.match_tmdb(db_series_list)
             
-            # 4. Detectar episodios faltantes
-            self.progress_signal.emit(55, "🔍 Detectando faltantes...")
+            # 7. Detectar episodios faltantes
+            self.progress_signal.emit(65, "🔍 Detectando episodios faltantes...")
             self.log_signal.emit("🔍 Detectando episodios faltantes...")
             missing_count = self.detect_missing()
             self.log_signal.emit(f"   ✅ {missing_count} episodios faltantes detectados")
             
-            # 5. Buscar en Hispashare
+            # 8. Buscar en Hispashare
             self.progress_signal.emit(75, "🔎 Buscando en Hispashare...")
             self.log_signal.emit("🔎 Buscando URLs en Hispashare...")
             self.search_hispashare(driver)
             
-            # 6. Descargar episodios faltantes
+            # 9. Descargar episodios faltantes
             self.progress_signal.emit(85, "⬇️ Procesando descargas...")
             self.log_signal.emit("⬇️ Procesando descargas de episodios faltantes...")
             self.process_downloads(driver)
@@ -140,8 +165,14 @@ class SchedulerThread(QThread):
     def scan_library(self):
         """Escanear biblioteca de series"""
         try:
-            scanner = LibraryScanner(Settings.SERIES_PATH, self.db)
+            scanner = LibraryScanner(db_manager=self.db)
             series_list = scanner.scan()
+            
+            # Limpiar duplicados existentes antes de procesar nuevas series
+            self.log_signal.emit("🧹 Limpiando episodios duplicados...")
+            cleaned_count = self.db.cleanup_duplicate_episodes()
+            if cleaned_count > 0:
+                self.log_signal.emit(f"   ✅ {cleaned_count} episodios duplicados eliminados")
             
             # Guardar en base de datos
             for series in series_list:
@@ -178,6 +209,9 @@ class SchedulerThread(QThread):
                     self.db.update_tmdb_match(series['id'], match_result)
                     matched += 1
                     
+                    # Emitir señal para actualizar la interfaz en tiempo real
+                    self.tmdb_matched_signal.emit(series['id'], match_result)
+                    
                     confidence_emoji = "✅" if match_result['confidence_score'] >= 0.85 else "⚠️"
                     self.log_signal.emit(
                         f"      {confidence_emoji} {match_result['name']} "
@@ -202,6 +236,9 @@ class SchedulerThread(QThread):
             total_missing = 0
             
             for series in series_list:
+                # Limpiar episodios faltantes existentes para esta serie antes de recalcular
+                self.db.clear_missing_episodes(series['id'])
+                
                 # Obtener episodios de TMDB
                 tmdb_episodes = tmdb_client.get_all_episodes(series['tmdb_id'])
                 
@@ -217,6 +254,9 @@ class SchedulerThread(QThread):
                     episode['series_name'] = series['name']
                     self.db.insert_missing_episode(episode)
                     total_missing += 1
+                
+                if missing:
+                    self.log_signal.emit(f"      📺 {series['name']}: {len(missing)} episodios faltantes")
             
             return total_missing
             

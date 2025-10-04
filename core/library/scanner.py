@@ -2,20 +2,26 @@ import os
 import logging
 from pathlib import Path
 from .parser import EpisodeParser
+from config.settings import Settings
 
 
 class LibraryScanner:
-    def __init__(self, series_path, db_manager=None):
-        self.series_path = Path(series_path)
+    def __init__(self, series_paths=None, db_manager=None):
+        # Si no se proporcionan rutas, usar las configuradas
+        if series_paths is None:
+            series_paths = Settings.get_series_paths()
+        
+        # Convertir a lista si es una sola ruta
+        if isinstance(series_paths, (str, Path)):
+            series_paths = [series_paths]
+        
+        self.series_paths = [Path(path) for path in series_paths]
         self.logger = logging.getLogger(__name__)
         self.parser = EpisodeParser()
         self.db_manager = db_manager
     
     def scan(self):
-        """Escanear la biblioteca de series"""
-        if not self.series_path.exists():
-            raise FileNotFoundError(f"Ruta no encontrada: {self.series_path}")
-        
+        """Escanear todas las rutas de series configuradas"""
         # Limpiar series que ya no existen (solo si tenemos db_manager)
         if self.db_manager:
             self.logger.info("Limpiando series eliminadas...")
@@ -23,10 +29,36 @@ class LibraryScanner:
             if deleted_count > 0:
                 self.logger.info(f"Se eliminaron {deleted_count} series que ya no existen")
         
+        all_series = []
+        
+        for series_path in self.series_paths:
+            if not series_path.exists():
+                self.logger.warning(f"Ruta no encontrada: {series_path}")
+                continue
+            
+            self.logger.info(f"Escaneando ruta: {series_path}")
+            series_list = self.scan_path(series_path)
+            all_series.extend(series_list)
+        
+        # Eliminar duplicados basándose en el nombre de la serie
+        unique_series = {}
+        for series in all_series:
+            series_name = series['name']
+            if series_name not in unique_series:
+                unique_series[series_name] = series
+            else:
+                # Si ya existe, combinar episodios
+                existing_series = unique_series[series_name]
+                self.merge_series_data(existing_series, series)
+        
+        return list(unique_series.values())
+    
+    def scan_path(self, series_path):
+        """Escanear una ruta específica de series"""
         series_list = []
         
         # Iterar por cada carpeta de serie
-        for series_folder in self.series_path.iterdir():
+        for series_folder in series_path.iterdir():
             if not series_folder.is_dir():
                 continue
             
@@ -41,6 +73,32 @@ class LibraryScanner:
                 series_list.append(series_data)
         
         return series_list
+    
+    def merge_series_data(self, existing_series, new_series):
+        """Combinar datos de series duplicadas de diferentes rutas"""
+        # Combinar episodios evitando duplicados
+        for new_episode in new_series['episodes']:
+            # Verificar si el episodio ya existe
+            episode_exists = any(
+                existing_ep['season'] == new_episode['season'] and 
+                existing_ep['episode'] == new_episode['episode'] and
+                (existing_ep['file_path'] == new_episode['file_path'] or 
+                 Path(existing_ep['file_path']).name == Path(new_episode['file_path']).name)
+                for existing_ep in existing_series['episodes']
+            )
+            
+            if not episode_exists:
+                existing_series['episodes'].append(new_episode)
+        
+        # Recalcular temporadas
+        seasons_dict = {}
+        for ep in existing_series['episodes']:
+            season = ep['season']
+            if season not in seasons_dict:
+                seasons_dict[season] = 0
+            seasons_dict[season] += 1
+        
+        existing_series['seasons'] = seasons_dict
     
     def scan_series(self, series_folder):
         """Escanear una serie específica"""
@@ -68,11 +126,12 @@ class LibraryScanner:
             
             # También agregar episodios de estructura plana que no estén en carpetas de temporadas
             for ep in flat_episodes:
-                # Verificar si el episodio ya está en la lista (evitar duplicados)
+                # Verificar si el episodio ya está en la lista (evitar duplicados mejorado)
                 episode_exists = any(
                     existing_ep['season'] == ep['season'] and 
                     existing_ep['episode'] == ep['episode'] and
-                    existing_ep['file_path'] == ep['file_path']
+                    (existing_ep['file_path'] == ep['file_path'] or 
+                     Path(existing_ep['file_path']).name == Path(ep['file_path']).name)
                     for existing_ep in series_data['episodes']
                 )
                 if not episode_exists:
@@ -131,6 +190,7 @@ class LibraryScanner:
     def scan_flat_structure(self, series_folder):
         """Escanear estructura plana (sin carpetas de temporadas)"""
         episodes = []
+        processed_files = set()  # Evitar procesar el mismo archivo múltiples veces
         
         for file_path in series_folder.rglob('*'):
             if not file_path.is_file():
@@ -138,6 +198,12 @@ class LibraryScanner:
             
             if not self.is_video_file(file_path):
                 continue
+            
+            # Evitar duplicados por nombre de archivo
+            file_key = (file_path.name.lower(), file_path.stat().st_size)
+            if file_key in processed_files:
+                continue
+            processed_files.add(file_key)
             
             episode_info = self.parser.parse_episode(file_path.name)
             

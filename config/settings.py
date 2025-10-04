@@ -20,7 +20,30 @@ class Settings:
     
     # Rutas
     SERIES_PATH = os.getenv("SERIES_PATH", "")
+    SERIES_PATHS = os.getenv("SERIES_PATHS", "")  # Múltiples rutas separadas por ;
     DB_PATH = "./series_manager.db"
+    
+    @classmethod
+    def get_series_paths(cls):
+        """Obtener todas las rutas de series configuradas"""
+        paths = []
+        
+        # Agregar ruta principal si existe
+        if cls.SERIES_PATH and cls.SERIES_PATH.strip():
+            paths.append(cls.SERIES_PATH.strip())
+        
+        # Agregar rutas adicionales si existen
+        if cls.SERIES_PATHS and cls.SERIES_PATHS.strip():
+            additional_paths = [path.strip() for path in cls.SERIES_PATHS.split(';') if path.strip()]
+            paths.extend(additional_paths)
+        
+        # Eliminar duplicados manteniendo el orden
+        unique_paths = []
+        for path in paths:
+            if path not in unique_paths:
+                unique_paths.append(path)
+        
+        return unique_paths
     
     # Selenium
     SELENIUM_HEADLESS = os.getenv("SELENIUM_HEADLESS", "False").lower() == "true"
@@ -59,6 +82,34 @@ class Settings:
         with open('.env', 'w') as f:
             for key, value in settings_dict.items():
                 f.write(f"{key}={value}\n")
+    
+    @classmethod
+    def save_series_paths(cls, paths_list):
+        """Guarda las rutas de series en el archivo .env"""
+        if not paths_list:
+            return
+        
+        # La primera ruta va a SERIES_PATH, las demás a SERIES_PATHS
+        primary_path = paths_list[0] if paths_list else ""
+        additional_paths = ";".join(paths_list[1:]) if len(paths_list) > 1 else ""
+        
+        # Leer configuración actual
+        current_settings = {}
+        try:
+            with open('.env', 'r') as f:
+                for line in f:
+                    if '=' in line and not line.strip().startswith('#'):
+                        key, value = line.strip().split('=', 1)
+                        current_settings[key] = value
+        except FileNotFoundError:
+            pass
+        
+        # Actualizar rutas
+        current_settings['SERIES_PATH'] = primary_path
+        current_settings['SERIES_PATHS'] = additional_paths
+        
+        # Guardar configuración actualizada
+        cls.save_settings(current_settings)
     
     def get_emule_config(self):
         """Obtener configuración de eMule"""

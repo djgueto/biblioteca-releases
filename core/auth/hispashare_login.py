@@ -37,9 +37,21 @@ class HispashareAuth:
         }
         options.add_experimental_option("prefs", prefs)
         
-        service = Service(ChromeDriverManager().install())
-        self.driver = webdriver.Chrome(service=service, options=options)
-        self.driver.implicitly_wait(10)
+        try:
+            # Usar webdriver-manager para ChromeDriver
+            service = Service(ChromeDriverManager().install())
+            self.driver = webdriver.Chrome(service=service, options=options)
+            self.driver.implicitly_wait(10)
+        except Exception as e:
+            self.logger.error(f"Error inicializando ChromeDriver: {e}")
+            # Intentar con driver del sistema si existe
+            try:
+                self.logger.info("Intentando usar ChromeDriver del sistema...")
+                self.driver = webdriver.Chrome(options=options)
+                self.driver.implicitly_wait(10)
+            except Exception as e2:
+                self.logger.error(f"Error con ChromeDriver del sistema: {e2}")
+                raise Exception(f"No se pudo inicializar ChromeDriver: {e}")
     
     def login(self):
         """Iniciar sesión en Hispashare"""
