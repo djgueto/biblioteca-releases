@@ -308,6 +308,17 @@ class SettingsWidget(QWidget):
                 Settings.SERIES_PATH = all_paths[0]
                 Settings.SERIES_PATHS = ";".join(all_paths[1:]) if len(all_paths) > 1 else ""
             
+            # Limpiar series de rutas que ya no existen
+            try:
+                from core.database.db_manager import DatabaseManager
+                db_manager = DatabaseManager()
+                cleaned_count = db_manager.cleanup_deleted_series()
+                if cleaned_count > 0:
+                    self.logger.info(f"Se eliminaron {cleaned_count} series de rutas inexistentes")
+                db_manager.close()
+            except Exception as cleanup_error:
+                self.logger.warning(f"Error al limpiar series huérfanas: {cleanup_error}")
+            
             self.settings_saved.emit()
             self.logger.info("Configuración guardada correctamente")
             

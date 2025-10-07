@@ -463,11 +463,15 @@ class DatabaseManager:
             raise
 
     def cleanup_deleted_series(self):
-        """Limpiar series cuyas carpetas ya no existen en el disco"""
+        """Limpiar series cuyas carpetas ya no existen en el disco o no están en rutas configuradas"""
         conn = self.get_connection()
         cursor = conn.cursor()
         
         try:
+            # Obtener rutas configuradas actualmente
+            configured_paths = Settings.get_series_paths()
+            configured_paths = [Path(path).resolve() for path in configured_paths if path.strip()]
+            
             # Obtener todas las series con sus rutas
             cursor.execute('SELECT id, name, folder_path FROM series')
             all_series = cursor.fetchall()
@@ -476,10 +480,39 @@ class DatabaseManager:
             
             for series in all_series:
                 series_id, series_name, folder_path = series
+                series_path = Path(folder_path)
+                
+                should_delete = False
+                delete_reason = ""
                 
                 # Verificar si la carpeta existe
-                if not Path(folder_path).exists():
-                    self.logger.info(f"Eliminando serie '{series_name}' - carpeta no existe: {folder_path}")
+                if not series_path.exists():
+                    should_delete = True
+                    delete_reason = "carpeta no existe"
+                else:
+                    # Verificar si la serie está dentro de alguna ruta configurada
+                    is_in_configured_path = False
+                    try:
+                        resolved_series_path = series_path.resolve()
+                        for configured_path in configured_paths:
+                            try:
+                                # Verificar si la serie está dentro de esta ruta configurada
+                                resolved_series_path.relative_to(configured_path)
+                                is_in_configured_path = True
+                                break
+                            except ValueError:
+                                # La serie no está en esta ruta configurada
+                                continue
+                    except Exception:
+                        # Error al resolver rutas, mantener la serie por seguridad
+                        is_in_configured_path = True
+                    
+                    if not is_in_configured_path:
+                        should_delete = True
+                        delete_reason = "no está en rutas configuradas"
+                
+                if should_delete:
+                    self.logger.info(f"Eliminando serie '{series_name}' - {delete_reason}: {folder_path}")
                     
                     # Eliminar episodios locales
                     cursor.execute('DELETE FROM local_episodes WHERE series_id = ?', (series_id,))
