@@ -45,9 +45,19 @@ class TMDBClient:
         """Obtener detalles de una temporada"""
         return self._make_request(f'tv/{series_id}/season/{season_number}')
     
-    def get_all_episodes(self, series_id):
-        """Obtener todos los episodios de una serie"""
+    def get_all_episodes(self, series_id, only_aired=True):
+        """
+        Obtener todos los episodios de una serie
+        
+        Args:
+            series_id: ID de la serie en TMDB
+            only_aired: Si True, solo incluye episodios ya emitidos (por defecto True)
+        
+        Returns:
+            list: Lista de episodios filtrados por fecha de emisión
+        """
         episodes = []
+        today = datetime.now().date()
         
         # Primero obtener detalles de la serie para saber cuántas temporadas tiene
         series_details = self.get_series_details(series_id)
@@ -65,11 +75,30 @@ class TMDBClient:
                 continue
             
             for episode in season_data['episodes']:
+                air_date_str = episode.get('air_date', '')
+                
+                # Si only_aired es True, filtrar por fecha de emisión
+                if only_aired and air_date_str:
+                    try:
+                        # Parsear fecha de emisión (formato YYYY-MM-DD)
+                        air_date = datetime.strptime(air_date_str, '%Y-%m-%d').date()
+                        
+                        # Solo incluir si ya se emitió (fecha <= hoy)
+                        if air_date > today:
+                            self.logger.debug(f"Episodio futuro omitido: S{season_num}E{episode['episode_number']} - {air_date_str}")
+                            continue
+                            
+                    except ValueError:
+                        # Si no se puede parsear la fecha, omitir el episodio si only_aired=True
+                        self.logger.warning(f"Fecha de emisión inválida para episodio S{season_num}E{episode['episode_number']}: {air_date_str}")
+                        if only_aired:
+                            continue
+                
                 episodes.append({
                     'season_number': season_num,
                     'episode_number': episode['episode_number'],
                     'name': episode['name'],
-                    'air_date': episode.get('air_date', ''),
+                    'air_date': air_date_str,
                     'overview': episode.get('overview', '')
                 })
         

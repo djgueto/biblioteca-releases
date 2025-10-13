@@ -728,9 +728,9 @@ class DatabaseManager:
             # Limpiar episodios faltantes existentes
             self.clear_missing_episodes(series_id)
             
-            # Obtener episodios de TMDB
+            # Obtener episodios de TMDB (solo los ya emitidos)
             tmdb_client = TMDBClient(Settings.TMDB_API_KEY)
-            tmdb_episodes = tmdb_client.get_all_episodes(series['tmdb_id'])
+            tmdb_episodes = tmdb_client.get_all_episodes(series['tmdb_id'], only_aired=True)
             
             # Obtener episodios locales
             local_episodes = self.get_local_episodes(series_id)
@@ -765,41 +765,65 @@ class DatabaseManager:
             raise
 
     def cleanup_orphaned_missing_episodes(self):
-        """Limpiar episodios faltantes huérfanos (sin serie padre)"""
+        """Limpiar episodios faltantes huérfanos (sin serie asociada)"""
         conn = self.get_connection()
         cursor = conn.cursor()
         
         try:
-            # Contar episodios huérfanos antes de limpiar
-            cursor.execute('''
-                SELECT COUNT(*)
-                FROM missing_episodes me
-                LEFT JOIN series s ON me.series_id = s.id
-                WHERE s.id IS NULL
-            ''')
-            
-            orphan_count_before = cursor.fetchone()[0]
-            
-            if orphan_count_before == 0:
-                self.logger.info("No hay episodios faltantes huérfanos para limpiar")
-                return 0
-            
-            # Eliminar episodios huérfanos
             cursor.execute('''
                 DELETE FROM missing_episodes
                 WHERE series_id NOT IN (SELECT id FROM series)
             ''')
             
-            deleted_count = cursor.rowcount
+            deleted = cursor.rowcount
             conn.commit()
             
-            self.logger.info(f"Limpiados {deleted_count} episodios faltantes huérfanos")
-            return deleted_count
+            if deleted > 0:
+                self.logger.info(f"Se eliminaron {deleted} episodios faltantes huérfanos")
             
         except Exception as e:
             self.logger.error(f"Error en cleanup_orphaned_missing_episodes: {e}")
             conn.rollback()
             raise
+    
+    def search_series_by_name(self, name):
+        """
+        Buscar series por nombre (búsqueda flexible)
+        
+        Args:
+            name: Nombre de la serie a buscar
+            
+        Returns:
+            list: Lista de series que coinciden
+        """
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            # Búsqueda exacta primero
+            cursor.execute('''
+                SELECT * FROM series 
+                WHERE name = ? OR tmdb_name = ?
+            ''', (name, name))
+            
+            exact_matches = cursor.fetchall()
+            if exact_matches:
+                return [dict(row) for row in exact_matches]
+            
+            # Búsqueda parcial (LIKE)
+            search_pattern = f"%{name}%"
+            cursor.execute('''
+                SELECT * FROM series 
+                WHERE name LIKE ? OR tmdb_name LIKE ?
+                ORDER BY name
+            ''', (search_pattern, search_pattern))
+            
+            partial_matches = cursor.fetchall()
+            return [dict(row) for row in partial_matches]
+            
+        except Exception as e:
+            self.logger.error(f"Error en search_series_by_name: {e}")
+            return []
     
     # ========== LOGS ==========
     

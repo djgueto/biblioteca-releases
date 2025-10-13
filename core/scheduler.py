@@ -9,6 +9,7 @@ from core.tmdb.api_client import TMDBClient
 from core.tmdb.auto_matcher import TMDBAutoMatcher
 from core.hispashare.searcher import HispashareSearcher
 from core.hispashare.downloader import HispashareDownloader
+from core.hispashare.content_scanner import ContentScanner
 from core.database.db_manager import DatabaseManager
 from config.settings import Settings
 
@@ -123,6 +124,11 @@ class SchedulerThread(QThread):
             self.progress_signal.emit(85, "⬇️ Procesando descargas...")
             self.log_signal.emit("⬇️ Procesando descargas de episodios faltantes...")
             self.process_downloads(driver)
+            
+            # 10. Barrido de nuevo contenido en Hispashare
+            self.progress_signal.emit(95, "🔍 Buscando nuevo contenido...")
+            self.log_signal.emit("🔍 Iniciando barrido de nuevo contenido en Hispashare...")
+            self.scan_new_content(driver)
             
             self.progress_signal.emit(100, "✅ Ciclo completado")
             self.log_signal.emit("✅ CICLO COMPLETADO CON ÉXITO")
@@ -239,8 +245,8 @@ class SchedulerThread(QThread):
                 # Limpiar episodios faltantes existentes para esta serie antes de recalcular
                 self.db.clear_missing_episodes(series['id'])
                 
-                # Obtener episodios de TMDB
-                tmdb_episodes = tmdb_client.get_all_episodes(series['tmdb_id'])
+                # Obtener episodios de TMDB (solo los ya emitidos)
+                tmdb_episodes = tmdb_client.get_all_episodes(series['tmdb_id'], only_aired=True)
                 
                 # Obtener episodios locales
                 local_episodes = self.db.get_local_episodes(series['id'])
@@ -387,6 +393,41 @@ class SchedulerThread(QThread):
         except Exception as e:
             self.logger.error(f"Error en process_downloads: {e}")
             raise
+    
+    def scan_new_content(self, driver):
+        """Escanear nuevo contenido en Hispashare"""
+        try:
+            # Verificar si el barrido de contenido está habilitado
+            if not getattr(Settings, 'CONTENT_SCAN_ENABLED', True):
+                self.log_signal.emit("   ℹ️ Barrido de nuevo contenido deshabilitado en configuración")
+                return
+            
+            scanner = ContentScanner(driver, self.db)
+            
+            # 1. Escanear páginas de Hispashare
+            self.log_signal.emit("   📄 Escaneando páginas de Hispashare...")
+            new_content = scanner.scan_new_content()
+            
+            if not new_content:
+                self.log_signal.emit("   ℹ️ No se encontró nuevo contenido que cumpla los filtros")
+                return
+            
+            self.log_signal.emit(f"   ✅ {len(new_content)} elementos de nuevo contenido encontrados")
+            
+            # 2. Procesar contenido encontrado
+            self.log_signal.emit("   🎬 Procesando nuevo contenido...")
+            ed2k_links = scanner.process_new_content(new_content)
+            
+            if ed2k_links:
+                self.log_signal.emit(f"   ✅ {len(ed2k_links)} enlaces ed2k obtenidos del nuevo contenido")
+            else:
+                self.log_signal.emit("   ℹ️ No se obtuvieron enlaces del nuevo contenido")
+            
+        except Exception as e:
+            self.logger.error(f"Error en scan_new_content: {e}")
+            self.log_signal.emit(f"   ❌ Error en barrido de contenido: {str(e)}")
+            # No relanzar la excepción para no interrumpir el ciclo completo
+            pass
 
     def stop(self):
         """Detener el scheduler"""

@@ -91,77 +91,198 @@ class HispashareDownloader:
     
     def _get_tmdb_episodes(self, tmdb_id):
         """
-        Obtiene la lista de episodios desde TMDB
+        Obtiene la lista de episodios desde TMDB (solo episodios ya emitidos)
         
         Returns:
             dict: {season: [episode_numbers]}
         """
-        # Por ahora, implementación básica
-        # En una implementación completa, consultaríamos la API de TMDB
-        # Para este ejemplo, asumimos que tenemos hasta 10 episodios por temporada
-        tmdb_episodes = {}
+        from core.tmdb.api_client import TMDBClient
+        from config.settings import Settings
         
-        # Obtener información básica de la serie desde la base de datos
-        conn = self.db_manager.get_connection()
-        cursor = conn.cursor()
+        if not tmdb_id:
+            return {}
         
-        # Por simplicidad, asumimos temporadas 1-5 con 10 episodios cada una
-        # En una implementación real, esto vendría de TMDB
-        for season in range(1, 6):
-            tmdb_episodes[season] = list(range(1, 11))
-        
-        return tmdb_episodes
+        try:
+            # Usar la API real de TMDB con filtro de episodios ya emitidos
+            tmdb_client = TMDBClient(Settings.TMDB_API_KEY)
+            episodes = tmdb_client.get_all_episodes(tmdb_id, only_aired=True)
+            
+            # Convertir formato de lista a dict {season: [episode_numbers]}
+            tmdb_episodes = {}
+            for episode in episodes:
+                season = episode['season_number']
+                episode_num = episode['episode_number']
+                
+                if season not in tmdb_episodes:
+                    tmdb_episodes[season] = []
+                
+                tmdb_episodes[season].append(episode_num)
+            
+            # Ordenar episodios por número
+            for season in tmdb_episodes:
+                tmdb_episodes[season].sort()
+            
+            return tmdb_episodes
+            
+        except Exception as e:
+            self.logger.error(f"Error obteniendo episodios de TMDB para serie {tmdb_id}: {e}")
+            return {}
     
-    def _calculate_quality_score(self, quality_text):
+    def _calculate_average_file_size(self, table):
         """
-        Calcula una puntuación para una calidad específica de forma simplificada
-        
-        Criterios de prioridad:
-        1. Resolución: 2160p > 1080p > 720p
-        2. Codec: x265 > x264
-        3. HDR
+        Calcula el tamaño de referencia de los archivos en una tabla T2.
+        Para contenido multi-archivo, prioriza el primer archivo ya que su calidad
+        determina la selección del conjunto completo.
         
         Args:
-            quality_text: Texto de la calidad
+            table: Elemento BeautifulSoup de la tabla T2
             
         Returns:
-            int: Puntuación de calidad (mayor = mejor)
+            float: Tamaño de referencia en MB
         """
-        score = 0
-        quality_lower = quality_text.lower()
+        file_sizes = []
         
-        # Resolución (prioridad máxima)
-        if '2160p' in quality_lower or '4k' in quality_lower:
-            score += 3000
-        elif '1080p' in quality_lower:
-            score += 2000
-        elif '720p' in quality_lower:
-            score += 1000
+        # Encontrar todas las filas de archivos (saltar header)
+        rows = table.find_all('tr')[1:]
+        
+        if not rows:
+            return 0
+        
+        # Para contenido multi-archivo, el primer archivo determina la calidad
+        first_row = rows[0]
+        first_file_size = self._extract_file_size_from_row(first_row)
+        
+        if first_file_size > 0:
+            # Si el primer archivo tiene tamaño válido, usarlo como referencia principal
+            file_sizes.append(first_file_size)
+            self.logger.info(f"Primer archivo encontrado con tamaño: {first_file_size:.2f} MB (determina la calidad del conjunto)")
+            
+            # Para contenido multi-archivo, también considerar otros archivos pero con menor peso
+            for row in rows[1:]:
+                size_mb = self._extract_file_size_from_row(row)
+                if size_mb > 0:
+                    file_sizes.append(size_mb * 0.3)  # Peso reducido para archivos adicionales
         else:
-            # Si no tiene resolución específica, puntuación baja
-            score += 100
+            # Si el primer archivo no tiene tamaño explícito, procesar todos
+            for row in rows:
+                size_mb = self._extract_file_size_from_row(row)
+                if size_mb > 0:
+                    file_sizes.append(size_mb)
         
-        # Codec de video (segunda prioridad)
-        if 'x265' in quality_lower or 'h265' in quality_lower or 'hevc' in quality_lower:
-            score += 500
-        elif 'x264' in quality_lower or 'h264' in quality_lower or 'avc' in quality_lower:
-            score += 300
+        # Si no encontramos tamaños explícitos, usar heurística basada en el primer archivo
+        if not file_sizes and rows:
+            first_row = rows[0]
+            file_link = first_row.find('a')
+            if file_link:
+                filename = file_link.get_text(strip=True)
+                estimated_size = self._estimate_size_from_filename(filename)
+                file_sizes.append(estimated_size)
+                self.logger.info(f"Tamaño estimado para primer archivo: {estimated_size:.2f} MB basado en nombre: {filename}")
         
-        # HDR (tercera prioridad)
-        if 'hdr' in quality_lower or 'dolby vision' in quality_lower or 'dovi' in quality_lower:
-            score += 100
+        # Calcular tamaño de referencia (promedio ponderado)
+        reference_size = sum(file_sizes) / len(file_sizes) if file_sizes else 0
         
-        return score
+        if len(rows) > 1:
+            self.logger.info(f"Contenido multi-archivo detectado ({len(rows)} archivos). Tamaño de referencia: {reference_size:.2f} MB")
+        else:
+            self.logger.info(f"Archivo único. Tamaño: {reference_size:.2f} MB")
+        
+        return reference_size
+    
+    def _extract_file_size_from_row(self, row):
+        """
+        Extrae el tamaño de archivo de una fila de tabla T2
+        
+        Args:
+            row: Elemento BeautifulSoup de la fila (tr)
+            
+        Returns:
+            float: Tamaño en MB, 0 si no se encuentra
+        """
+        cells = row.find_all('td')
+        
+        # Buscar en todas las celdas el tamaño
+        for cell in cells:
+            # Verificar si la celda tiene clase SIZE (común en Hispashare)
+            if 'SIZE' in cell.get('class', []):
+                size_text = cell.get_text(strip=True)
+                size_mb = self._parse_file_size(size_text)
+                if size_mb > 0:
+                    return size_mb
+            
+            # También buscar en celdas sin clase específica
+            size_text = cell.get_text(strip=True)
+            size_mb = self._parse_file_size(size_text)
+            if size_mb > 0:
+                return size_mb
+        
+        return 0
+    
+    def _parse_file_size(self, size_text):
+        """
+        Convierte texto de tamaño a MB
+        
+        Args:
+            size_text: Texto con el tamaño (ej: "2.1 GB", "950 MB")
+            
+        Returns:
+            float: Tamaño en MB
+        """
+        # Buscar patrones de tamaño
+        size_pattern = r'(\d+(?:\.\d+)?)\s*(GB|MB|KB|gb|mb|kb)'
+        match = re.search(size_pattern, size_text)
+        
+        if match:
+            size_value = float(match.group(1))
+            unit = match.group(2).upper()
+            
+            if unit == 'GB':
+                return size_value * 1024  # Convertir GB a MB
+            elif unit == 'MB':
+                return size_value
+            elif unit == 'KB':
+                return size_value / 1024  # Convertir KB a MB
+        
+        return 0
+    
+    def _estimate_size_from_filename(self, filename):
+        """
+        Estima el tamaño del archivo basado en su nombre y calidad
+        
+        Args:
+            filename: Nombre del archivo
+            
+        Returns:
+            float: Tamaño estimado en MB
+        """
+        filename_lower = filename.lower()
+        
+        # Estimaciones basadas en resolución y codec
+        if '2160p' in filename_lower or '4k' in filename_lower:
+            if 'x265' in filename_lower or 'hevc' in filename_lower:
+                return 8000  # ~8GB para 4K x265
+            else:
+                return 15000  # ~15GB para 4K x264
+        elif '1080p' in filename_lower:
+            if 'x265' in filename_lower or 'hevc' in filename_lower:
+                return 1500  # ~1.5GB para 1080p x265
+            else:
+                return 2500  # ~2.5GB para 1080p x264
+        elif '720p' in filename_lower:
+            return 1000  # ~1GB para 720p
+        else:
+            return 800  # Tamaño por defecto
 
     def _get_quality_sections_with_scores(self, soup):
         """
-        Obtiene todas las secciones de calidad con sus puntuaciones
+        Obtiene todas las secciones de calidad ordenadas por tamaño de archivo.
+        Prioriza secciones donde el primer archivo (que determina la calidad) es más grande.
         
         Args:
             soup: BeautifulSoup object de la página
             
         Returns:
-            list: Lista de tuplas (section, score, quality_text) ordenadas por puntuación
+            list: Lista de tuplas (section, file_size, quality_text) ordenadas por tamaño
         """
         quality_sections = []
         
@@ -177,12 +298,18 @@ class HispashareDownloader:
             if parent:
                 table = parent.find('table', class_='T2')
                 if table:
-                    score = self._calculate_quality_score(quality_text)
-                    quality_sections.append((table, score, quality_text))
-                    self.logger.info(f"Calidad encontrada: {quality_text} (puntuación: {score})")
+                    # Calcular el tamaño de referencia basado en el primer archivo
+                    reference_size = self._calculate_average_file_size(table)
+                    quality_sections.append((table, reference_size, quality_text))
+                    self.logger.info(f"Calidad encontrada: {quality_text} (tamaño de referencia: {reference_size:.2f} MB)")
         
-        # Ordenar por puntuación descendente (mejor calidad primero)
+        # Ordenar por tamaño descendente (archivos más grandes primero)
         quality_sections.sort(key=lambda x: x[1], reverse=True)
+        
+        if quality_sections:
+            self.logger.info(f"Secciones ordenadas por tamaño (mayor a menor):")
+            for i, (_, size, quality) in enumerate(quality_sections, 1):
+                self.logger.info(f"  {i}. {quality}: {size:.2f} MB")
         
         return quality_sections
     
@@ -210,34 +337,181 @@ class HispashareDownloader:
             page_source = self.driver.page_source
             soup = BeautifulSoup(page_source, 'html.parser')
             
-            # Obtener secciones de calidad ordenadas por puntuación
+            # Obtener secciones de calidad ordenadas por tamaño
             quality_sections = self._get_quality_sections_with_scores(soup)
             
             if not quality_sections:
                 self.logger.warning("No se encontraron secciones de calidad")
                 return []
             
-            # Procesar solo la mejor calidad que tenga episodios faltantes
-            for section, score, quality_text in quality_sections:
-                self.logger.info(f"Procesando calidad: {quality_text} (puntuación: {score})")
-                
-                # Procesar esta sección de calidad
-                section_links = self._process_quality_section(section, missing_episodes, quality_text)
-                
-                # Si encontramos enlaces en esta calidad, no procesar calidades inferiores
-                if section_links:
-                    self.logger.info(f"✅ Encontrados {len(section_links)} enlaces en la mejor calidad disponible: {quality_text}")
-                    return section_links
-                else:
-                    self.logger.info(f"No se encontraron episodios faltantes en: {quality_text}")
+            # Verificar si hay calidad 4K/2160p disponible
+            has_4k_section = self._check_for_4k_quality(quality_sections)
             
-            self.logger.warning("No se encontraron episodios faltantes en ninguna calidad")
-            return []
+            if has_4k_section and Settings.WAIT_FOR_4K:
+                self.logger.info("🎬 Calidad 4K/2160p detectada - Aplicando lógica de espera por mejor calidad")
+                return self._process_with_4k_priority(quality_sections, missing_episodes)
+            else:
+                self.logger.info("📺 Procesando con lógica estándar (sin espera por 4K)")
+                return self._process_standard_quality_selection(quality_sections, missing_episodes)
             
         except Exception as e:
             self.logger.error(f"Error procesando página de descarga: {e}")
             return []
     
+    def _check_for_4k_quality(self, quality_sections):
+        """
+        Verifica si hay alguna sección con calidad 4K/2160p disponible
+        
+        Args:
+            quality_sections: Lista de secciones de calidad
+            
+        Returns:
+            bool: True si hay calidad 4K disponible
+        """
+        for _, _, quality_text in quality_sections:
+            quality_lower = quality_text.lower()
+            if any(keyword in quality_lower for keyword in ['2160p', '4k', 'uhd', 'ultra']):
+                self.logger.info(f"✨ Calidad 4K detectada: {quality_text}")
+                return True
+        return False
+    
+    def _process_with_4k_priority(self, quality_sections, missing_episodes):
+        """
+        Procesa las secciones priorizando 4K y evitando descargas de calidades inferiores
+        si hay 4K disponible pero sin los episodios buscados
+        
+        Args:
+            quality_sections: Lista de secciones de calidad ordenadas
+            missing_episodes: Episodios faltantes
+            
+        Returns:
+            list: Enlaces ed2k o lista vacía si espera por 4K
+        """
+        # Separar secciones 4K de las demás
+        k4_sections = []
+        other_sections = []
+        
+        for section, file_size, quality_text in quality_sections:
+            quality_lower = quality_text.lower()
+            if any(keyword in quality_lower for keyword in ['2160p', '4k', 'uhd', 'ultra']):
+                k4_sections.append((section, file_size, quality_text))
+            else:
+                other_sections.append((section, file_size, quality_text))
+        
+        # Primero intentar con secciones 4K
+        for section, file_size, quality_text in k4_sections:
+            self.logger.info(f"🎯 Procesando calidad 4K: {quality_text} (tamaño: {file_size:.2f} MB)")
+            section_links = self._process_quality_section(section, missing_episodes, quality_text)
+            
+            if section_links:
+                self.logger.info(f"✅ Encontrados {len(section_links)} enlaces en 4K: {quality_text}")
+                return section_links
+            else:
+                self.logger.info(f"⏳ No se encontraron episodios faltantes en 4K: {quality_text}")
+        
+        # Si hay secciones 4K pero no tienen los episodios, decidir si esperar o descargar calidad inferior
+        if k4_sections:
+            self.logger.warning("🚫 Hay calidad 4K disponible pero no contiene los episodios buscados")
+            self.logger.warning("⏳ Esperando a que los episodios estén disponibles en 4K - No descargando calidades inferiores")
+            self.logger.info("💡 Para deshabilitar esta espera, configura WAIT_FOR_4K=False en .env")
+            return []  # No descargar nada, esperar por 4K
+        
+        # Si no hay 4K, procesar normalmente
+        return self._process_standard_quality_selection(other_sections, missing_episodes)
+    
+    def _process_standard_quality_selection(self, quality_sections, missing_episodes):
+        """
+        Procesa las secciones con la lógica estándar (mejor calidad disponible)
+        
+        Args:
+            quality_sections: Lista de secciones de calidad
+            missing_episodes: Episodios faltantes
+            
+        Returns:
+            list: Enlaces ed2k encontrados
+        """
+        # Procesar solo la mejor calidad que tenga episodios faltantes
+        for section, file_size, quality_text in quality_sections:
+            self.logger.info(f"Procesando calidad: {quality_text} (tamaño: {file_size:.2f} MB)")
+            
+            # Procesar esta sección de calidad
+            section_links = self._process_quality_section(section, missing_episodes, quality_text)
+            
+            # Si encontramos enlaces en esta calidad, no procesar calidades inferiores
+            if section_links:
+                self.logger.info(f"✅ Encontrados {len(section_links)} enlaces en la mejor calidad disponible: {quality_text}")
+                return section_links
+            else:
+                self.logger.info(f"No se encontraron episodios faltantes en: {quality_text}")
+        
+        self.logger.warning("No se encontraron episodios faltantes en ninguna calidad")
+        return []
+    
+    def _check_language_compatibility(self, section_parent):
+        """
+        Verifica si el idioma de la sección es compatible con las preferencias del usuario.
+        Rechaza contenido que tenga 'english' como idioma principal.
+        
+        Args:
+            section_parent: Elemento padre que contiene la información de idioma
+            
+        Returns:
+            tuple: (is_compatible, language_info) donde is_compatible es bool y language_info es str
+        """
+        try:
+            # Buscar el párrafo con información de idiomas
+            language_paragraph = section_parent.find('p', class_='INFO')
+            if not language_paragraph or 'Idiomas:' not in language_paragraph.get_text():
+                # Si no hay información de idioma, buscar en elementos hermanos
+                current = section_parent
+                for _ in range(3):  # Buscar en los siguientes 3 elementos
+                    current = current.find_next_sibling()
+                    if current:
+                        language_paragraph = current.find('p', class_='INFO')
+                        if language_paragraph and 'Idiomas:' in language_paragraph.get_text():
+                            break
+            
+            if not language_paragraph:
+                self.logger.warning("⚠️ No se encontró información de idioma - Asumiendo compatible")
+                return True, "Sin información de idioma"
+            
+            # Extraer todas las banderas de idioma
+            language_flags = language_paragraph.find_all('img', class_='FLAGM')
+            if not language_flags:
+                language_flags = language_paragraph.find_all('img', class_='FLAG')
+            
+            languages = []
+            for flag in language_flags:
+                lang = flag.get('alt') or flag.get('title', '')
+                if lang:
+                    languages.append(lang.lower())
+            
+            language_info = ', '.join(languages) if languages else "Sin idiomas detectados"
+            
+            # Verificar que tenga español o catalán (prioritario)
+            if any(lang in languages for lang in ['spanish', 'catalan', 'spanishfor']):
+                self.logger.info(f"✅ Idioma compatible - Contiene español/catalán: {language_info}")
+                return True, language_info
+            
+            # Si no tiene español/catalán pero tiene inglés + subtítulos españoles, rechazar
+            if 'english' in languages and 'spanishsub' in languages and 'spanish' not in languages:
+                self.logger.warning(f"🚫 Contenido rechazado - Solo subtítulos en español sin audio: {language_info}")
+                return False, language_info
+            
+            # Si solo tiene inglés sin español, rechazar
+            if 'english' in languages and not any(lang in languages for lang in ['spanish', 'catalan', 'spanishfor']):
+                self.logger.warning(f"🚫 Contenido rechazado - Solo inglés sin español: {language_info}")
+                return False, language_info
+            
+            # Si no tiene idiomas aceptables, rechazar
+            self.logger.warning(f"🚫 Contenido rechazado - Sin idiomas aceptables: {language_info}")
+            return False, language_info
+            
+        except Exception as e:
+            self.logger.error(f"Error verificando idioma: {e}")
+            # En caso de error, ser conservador y rechazar
+            return False, f"Error verificando idioma: {e}"
+
     def _process_quality_section(self, section, missing_episodes, quality_text=None):
         """
         Procesa una sección de calidad específica para encontrar episodios faltantes
@@ -252,6 +526,16 @@ class HispashareDownloader:
         """
         ed2k_links = []
         quality_info = f" ({quality_text})" if quality_text else ""
+        
+        # Verificar compatibilidad de idioma antes de procesar
+        section_parent = section.parent if section.parent else section
+        is_compatible, language_info = self._check_language_compatibility(section_parent)
+        
+        if not is_compatible:
+            self.logger.warning(f"🚫 Sección omitida por idioma incompatible{quality_info}: {language_info}")
+            return []
+        
+        self.logger.info(f"🌍 Idioma verificado{quality_info}: {language_info}")
         
         # Encontrar todas las filas de episodios
         episode_rows = section.find_all('tr')[1:]  # Saltar header

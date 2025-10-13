@@ -49,7 +49,7 @@ class SettingsWidget(QWidget):
         hispa_group.setLayout(hispa_layout)
         layout.addWidget(hispa_group)
         
-        # Grupo Rutas
+        # Grupo Rutas de Series
         paths_group = QGroupBox("📁 Rutas de Series")
         paths_layout = QVBoxLayout()
         
@@ -97,6 +97,147 @@ class SettingsWidget(QWidget):
         paths_group.setLayout(paths_layout)
         layout.addWidget(paths_group)
         
+        # Grupo Rutas de Películas
+        movies_group = QGroupBox("🎬 Rutas de Películas")
+        movies_layout = QVBoxLayout()
+        
+        # Ruta principal de películas
+        movies_primary_layout = QHBoxLayout()
+        self.movies_path = QLineEdit()
+        self.movies_path.setPlaceholderText("/ruta/principal/Películas")
+        btn_browse_movies = QPushButton("Buscar...")
+        btn_browse_movies.clicked.connect(lambda: self.browse_folder_for_type('movies'))
+        movies_primary_layout.addWidget(self.movies_path)
+        movies_primary_layout.addWidget(btn_browse_movies)
+        
+        movies_form = QFormLayout()
+        movies_form.addRow("Ruta Principal:", movies_primary_layout)
+        movies_layout.addLayout(movies_form)
+        
+        # Lista de rutas adicionales de películas
+        movies_additional_layout = QVBoxLayout()
+        
+        self.movies_paths_list = QListWidget()
+        self.movies_paths_list.setMaximumHeight(100)
+        self.movies_paths_list.setToolTip("Rutas adicionales de películas. Haz doble clic para editar.")
+        movies_additional_layout.addWidget(self.movies_paths_list)
+        
+        # Botones para gestionar rutas de películas
+        movies_buttons_layout = QHBoxLayout()
+        
+        btn_add_movies_path = QPushButton("➕ Agregar")
+        btn_add_movies_path.clicked.connect(lambda: self.add_path_for_type('movies'))
+        
+        btn_remove_movies_path = QPushButton("➖ Eliminar")
+        btn_remove_movies_path.clicked.connect(lambda: self.remove_path_for_type('movies'))
+        
+        movies_buttons_layout.addWidget(btn_add_movies_path)
+        movies_buttons_layout.addWidget(btn_remove_movies_path)
+        movies_buttons_layout.addStretch()
+        
+        movies_additional_layout.addLayout(movies_buttons_layout)
+        
+        movies_form_additional = QFormLayout()
+        movies_form_additional.addRow("Rutas Adicionales:", movies_additional_layout)
+        movies_layout.addLayout(movies_form_additional)
+        
+        movies_group.setLayout(movies_layout)
+        layout.addWidget(movies_group)
+        
+        # Grupo Rutas de Documentales
+        docs_group = QGroupBox("📚 Rutas de Documentales")
+        docs_layout = QVBoxLayout()
+        
+        # Ruta principal de documentales
+        docs_primary_layout = QHBoxLayout()
+        self.documentaries_path = QLineEdit()
+        self.documentaries_path.setPlaceholderText("/ruta/principal/Documentales")
+        btn_browse_docs = QPushButton("Buscar...")
+        btn_browse_docs.clicked.connect(lambda: self.browse_folder_for_type('documentaries'))
+        docs_primary_layout.addWidget(self.documentaries_path)
+        docs_primary_layout.addWidget(btn_browse_docs)
+        
+        docs_form = QFormLayout()
+        docs_form.addRow("Ruta Principal:", docs_primary_layout)
+        docs_layout.addLayout(docs_form)
+        
+        # Lista de rutas adicionales de documentales
+        docs_additional_layout = QVBoxLayout()
+        
+        self.documentaries_paths_list = QListWidget()
+        self.documentaries_paths_list.setMaximumHeight(100)
+        self.documentaries_paths_list.setToolTip("Rutas adicionales de documentales. Haz doble clic para editar.")
+        docs_additional_layout.addWidget(self.documentaries_paths_list)
+        
+        # Botones para gestionar rutas de documentales
+        docs_buttons_layout = QHBoxLayout()
+        
+        btn_add_docs_path = QPushButton("➕ Agregar")
+        btn_add_docs_path.clicked.connect(lambda: self.add_path_for_type('documentaries'))
+        
+        btn_remove_docs_path = QPushButton("➖ Eliminar")
+        btn_remove_docs_path.clicked.connect(lambda: self.remove_path_for_type('documentaries'))
+        
+        docs_buttons_layout.addWidget(btn_add_docs_path)
+        docs_buttons_layout.addWidget(btn_remove_docs_path)
+        docs_buttons_layout.addStretch()
+        
+        docs_additional_layout.addLayout(docs_buttons_layout)
+        
+        docs_form_additional = QFormLayout()
+        docs_form_additional.addRow("Rutas Adicionales:", docs_additional_layout)
+        docs_layout.addLayout(docs_form_additional)
+        
+        docs_group.setLayout(docs_layout)
+        layout.addWidget(docs_group)
+        
+        # Grupo Rutas de Música
+        music_group = QGroupBox("🎵 Rutas de Música")
+        music_layout = QVBoxLayout()
+        
+        # Ruta principal de música
+        music_primary_layout = QHBoxLayout()
+        self.music_path = QLineEdit()
+        self.music_path.setPlaceholderText("/ruta/principal/Música")
+        btn_browse_music = QPushButton("Buscar...")
+        btn_browse_music.clicked.connect(lambda: self.browse_folder_for_type('music'))
+        music_primary_layout.addWidget(self.music_path)
+        music_primary_layout.addWidget(btn_browse_music)
+        
+        music_form = QFormLayout()
+        music_form.addRow("Ruta Principal:", music_primary_layout)
+        music_layout.addLayout(music_form)
+        
+        # Lista de rutas adicionales de música
+        music_additional_layout = QVBoxLayout()
+        
+        self.music_paths_list = QListWidget()
+        self.music_paths_list.setMaximumHeight(100)
+        self.music_paths_list.setToolTip("Rutas adicionales de música. Haz doble clic para editar.")
+        music_additional_layout.addWidget(self.music_paths_list)
+        
+        # Botones para gestionar rutas de música
+        music_buttons_layout = QHBoxLayout()
+        
+        btn_add_music_path = QPushButton("➕ Agregar")
+        btn_add_music_path.clicked.connect(lambda: self.add_path_for_type('music'))
+        
+        btn_remove_music_path = QPushButton("➖ Eliminar")
+        btn_remove_music_path.clicked.connect(lambda: self.remove_path_for_type('music'))
+        
+        music_buttons_layout.addWidget(btn_add_music_path)
+        music_buttons_layout.addWidget(btn_remove_music_path)
+        music_buttons_layout.addStretch()
+        
+        music_additional_layout.addLayout(music_buttons_layout)
+        
+        music_form_additional = QFormLayout()
+        music_form_additional.addRow("Rutas Adicionales:", music_additional_layout)
+        music_layout.addLayout(music_form_additional)
+        
+        music_group.setLayout(music_layout)
+        layout.addWidget(music_group)
+        
         # Grupo Opciones
         options_group = QGroupBox("⚙️ Opciones")
         options_layout = QFormLayout()
@@ -107,6 +248,22 @@ class SettingsWidget(QWidget):
         self.interval.setValue(4)
         self.interval.setSuffix(" horas")
         options_layout.addRow("Intervalo ciclo:", self.interval)
+        
+        self.discovery_pages = QSpinBox()
+        self.discovery_pages.setMinimum(1)
+        self.discovery_pages.setMaximum(10)
+        self.discovery_pages.setValue(3)
+        self.discovery_pages.setSuffix(" páginas")
+        self.discovery_pages.setToolTip("Número de páginas a buscar en el descubrimiento de contenido")
+        options_layout.addRow("Páginas descubrimiento:", self.discovery_pages)
+        
+        self.minimum_movie_size = QSpinBox()
+        self.minimum_movie_size.setMinimum(1)
+        self.minimum_movie_size.setMaximum(50)
+        self.minimum_movie_size.setValue(4)
+        self.minimum_movie_size.setSuffix(" GB")
+        self.minimum_movie_size.setToolTip("Tamaño mínimo para descargar películas (filtro de calidad)")
+        options_layout.addRow("Tamaño mínimo películas:", self.minimum_movie_size)
         
         self.headless = QCheckBox("Ejecutar sin ventana del navegador")
         options_layout.addRow("Modo headless:", self.headless)
@@ -168,6 +325,28 @@ class SettingsWidget(QWidget):
         if folder:
             self.series_path.setText(folder)
     
+    def browse_folder_for_type(self, content_type):
+        """Buscar carpeta para un tipo específico de contenido"""
+        type_names = {
+            'movies': 'Películas',
+            'documentaries': 'Documentales', 
+            'music': 'Música'
+        }
+        
+        type_widgets = {
+            'movies': self.movies_path,
+            'documentaries': self.documentaries_path,
+            'music': self.music_path
+        }
+        
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            f"Seleccionar carpeta de {type_names[content_type]}",
+            type_widgets[content_type].text()
+        )
+        if folder:
+            type_widgets[content_type].setText(folder)
+    
     def load_settings(self):
         """Cargar configuración actual"""
         self.tmdb_key.setText(Settings.TMDB_API_KEY)
@@ -175,6 +354,8 @@ class SettingsWidget(QWidget):
         self.hispashare_pass.setText(Settings.HISPASHARE_PASS)
         self.series_path.setText(Settings.SERIES_PATH)
         self.interval.setValue(Settings.CHECK_INTERVAL_HOURS)
+        self.discovery_pages.setValue(Settings.CONTENT_DISCOVERY_PAGES)
+        self.minimum_movie_size.setValue(int(Settings.MINIMUM_MOVIE_SIZE_GB))
         self.headless.setChecked(Settings.SELENIUM_HEADLESS)
         
         # Cargar configuración de eMule
@@ -183,9 +364,38 @@ class SettingsWidget(QWidget):
         self.emule_password.setText(Settings.EMULE_PASSWORD)
         self.emule_auto_send.setChecked(Settings.EMULE_AUTO_SEND)
         
-        # Cargar rutas adicionales
+        # Cargar rutas de series
         self.load_additional_paths()
+        
+        # Cargar rutas de otros tipos de contenido
+        self.load_paths_for_type('movies')
+        self.load_paths_for_type('documentaries')
+        self.load_paths_for_type('music')
     
+    def load_paths_for_type(self, content_type):
+        """Cargar rutas para un tipo específico de contenido"""
+        type_settings = {
+            'movies': (Settings.MOVIES_PATH, Settings.get_movies_paths, self.movies_path, self.movies_paths_list),
+            'documentaries': (Settings.DOCUMENTARIES_PATH, Settings.get_documentaries_paths, self.documentaries_path, self.documentaries_paths_list),
+            'music': (Settings.MUSIC_PATH, Settings.get_music_paths, self.music_path, self.music_paths_list)
+        }
+        
+        primary_path, get_paths_func, primary_widget, list_widget = type_settings[content_type]
+        
+        # Cargar ruta principal
+        primary_widget.setText(primary_path)
+        
+        # Cargar rutas adicionales
+        list_widget.clear()
+        all_paths = get_paths_func()
+        
+        # Agregar rutas adicionales (excluyendo la principal)
+        if len(all_paths) > 1:
+            for path in all_paths[1:]:  # Saltar la primera (principal)
+                item = QListWidgetItem(path)
+                item.setToolTip(f"Ruta: {path}")
+                list_widget.addItem(item)
+
     def load_additional_paths(self):
         """Cargar rutas adicionales en la lista"""
         self.paths_list.clear()
@@ -197,6 +407,65 @@ class SettingsWidget(QWidget):
                 item = QListWidgetItem(path)
                 item.setToolTip(f"Ruta: {path}")
                 self.paths_list.addItem(item)
+    
+    def add_path_for_type(self, content_type):
+        """Agregar nueva ruta para un tipo específico de contenido"""
+        type_names = {
+            'movies': 'Películas',
+            'documentaries': 'Documentales',
+            'music': 'Música'
+        }
+        
+        type_widgets = {
+            'movies': self.movies_paths_list,
+            'documentaries': self.documentaries_paths_list,
+            'music': self.music_paths_list
+        }
+        
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            f"Seleccionar carpeta adicional de {type_names[content_type]}",
+            ""
+        )
+        if folder:
+            # Verificar que no esté duplicada
+            all_current_paths = self.get_all_current_paths_for_type(content_type)
+            if folder not in all_current_paths:
+                item = QListWidgetItem(folder)
+                item.setToolTip(f"Ruta: {folder}")
+                type_widgets[content_type].addItem(item)
+            else:
+                QMessageBox.information(
+                    self,
+                    "Ruta Duplicada",
+                    "Esta ruta ya está configurada."
+                )
+    
+    def remove_path_for_type(self, content_type):
+        """Eliminar ruta seleccionada para un tipo específico de contenido"""
+        type_widgets = {
+            'movies': self.movies_paths_list,
+            'documentaries': self.documentaries_paths_list,
+            'music': self.music_paths_list
+        }
+        
+        list_widget = type_widgets[content_type]
+        current_item = list_widget.currentItem()
+        if current_item:
+            reply = QMessageBox.question(
+                self,
+                "Confirmar Eliminación",
+                f"¿Eliminar la ruta:\n{current_item.text()}?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                list_widget.takeItem(list_widget.row(current_item))
+        else:
+            QMessageBox.information(
+                self,
+                "Selección Requerida",
+                "Por favor selecciona una ruta para eliminar."
+            )
     
     def add_series_path(self):
         """Agregar nueva ruta de series"""
@@ -238,6 +507,29 @@ class SettingsWidget(QWidget):
                 "Por favor selecciona una ruta para eliminar."
             )
     
+    def get_all_current_paths_for_type(self, content_type):
+        """Obtener todas las rutas actuales para un tipo específico de contenido"""
+        type_widgets = {
+            'movies': (self.movies_path, self.movies_paths_list),
+            'documentaries': (self.documentaries_path, self.documentaries_paths_list),
+            'music': (self.music_path, self.music_paths_list)
+        }
+        
+        paths = []
+        primary_widget, list_widget = type_widgets[content_type]
+        
+        # Ruta principal
+        if primary_widget.text().strip():
+            paths.append(primary_widget.text().strip())
+        
+        # Rutas adicionales
+        for i in range(list_widget.count()):
+            item = list_widget.item(i)
+            if item and item.text().strip():
+                paths.append(item.text().strip())
+        
+        return paths
+
     def get_all_current_paths(self):
         """Obtener todas las rutas actuales (principal + adicionales)"""
         paths = []
@@ -256,12 +548,23 @@ class SettingsWidget(QWidget):
     
     def save_settings(self):
         """Guardar configuración"""
-        # Obtener todas las rutas configuradas
-        all_paths = self.get_all_current_paths()
+        # Obtener todas las rutas configuradas para series
+        all_series_paths = self.get_all_current_paths()
         
-        # Guardar rutas usando el nuevo método
-        if all_paths:
-            Settings.save_series_paths(all_paths)
+        # Guardar rutas de series usando el nuevo método
+        if all_series_paths:
+            Settings.save_series_paths(all_series_paths)
+        
+        # Guardar rutas de otros tipos de contenido
+        for content_type in ['movies', 'documentaries', 'music']:
+            paths = self.get_all_current_paths_for_type(content_type)
+            if paths:
+                if content_type == 'movies':
+                    Settings.save_movies_paths(paths)
+                elif content_type == 'documentaries':
+                    Settings.save_documentaries_paths(paths)
+                elif content_type == 'music':
+                    Settings.save_music_paths(paths)
         
         # Preparar resto de configuración
         settings_dict = {
@@ -269,6 +572,8 @@ class SettingsWidget(QWidget):
             'HISPASHARE_USER': self.hispashare_user.text(),
             'HISPASHARE_PASS': self.hispashare_pass.text(),
             'CHECK_INTERVAL_HOURS': str(self.interval.value()),
+            'CONTENT_DISCOVERY_PAGES': str(self.discovery_pages.value()),
+            'MINIMUM_MOVIE_SIZE_GB': str(float(self.minimum_movie_size.value())),
             'SELENIUM_HEADLESS': str(self.headless.isChecked()),
             'EMULE_URL': self.emule_url.text(),
             'EMULE_USERNAME': self.emule_username.text(),
@@ -297,6 +602,8 @@ class SettingsWidget(QWidget):
             Settings.HISPASHARE_USER = settings_dict['HISPASHARE_USER']
             Settings.HISPASHARE_PASS = settings_dict['HISPASHARE_PASS']
             Settings.CHECK_INTERVAL_HOURS = int(settings_dict['CHECK_INTERVAL_HOURS'])
+            Settings.CONTENT_DISCOVERY_PAGES = int(settings_dict['CONTENT_DISCOVERY_PAGES'])
+            Settings.MINIMUM_MOVIE_SIZE_GB = float(settings_dict['MINIMUM_MOVIE_SIZE_GB'])
             Settings.SELENIUM_HEADLESS = settings_dict['SELENIUM_HEADLESS'] == 'True'
             Settings.EMULE_URL = settings_dict['EMULE_URL']
             Settings.EMULE_USERNAME = settings_dict['EMULE_USERNAME']
@@ -304,9 +611,9 @@ class SettingsWidget(QWidget):
             Settings.EMULE_AUTO_SEND = settings_dict['EMULE_AUTO_SEND'] == 'True'
             
             # Actualizar rutas en memoria
-            if all_paths:
-                Settings.SERIES_PATH = all_paths[0]
-                Settings.SERIES_PATHS = ";".join(all_paths[1:]) if len(all_paths) > 1 else ""
+            if all_series_paths:
+                Settings.SERIES_PATH = all_series_paths[0]
+                Settings.SERIES_PATHS = ";".join(all_series_paths[1:]) if len(all_series_paths) > 1 else ""
             
             # Limpiar series de rutas que ya no existen
             try:
@@ -325,7 +632,7 @@ class SettingsWidget(QWidget):
             QMessageBox.information(
                 self,
                 "Configuración Guardada",
-                f"✅ Configuración guardada correctamente.\n\nRutas configuradas: {len(all_paths)}"
+                f"✅ Configuración guardada correctamente.\n\nRutas de series configuradas: {len(all_series_paths)}"
             )
             
         except Exception as e:
