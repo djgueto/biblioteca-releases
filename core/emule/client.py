@@ -120,11 +120,19 @@ class EmuleClient:
             self.logger.debug(f"🔗 URL construida para eMule: {url}")
             
             # Enviar la petición
-            response = requests.get(
-                url,
-                auth=(username, password),
-                timeout=30
-            )
+            try:
+                response = requests.get(
+                    url,
+                    auth=(username, password),
+                    timeout=30
+                )
+            except requests.exceptions.RequestException as e:
+                error_msg = f"Error de red al añadir enlace a eMule: {str(e)}"
+                self.logger.error(error_msg)
+                return {
+                    'success': False,
+                    'error': error_msg
+                }
             
             # Log detallado de la respuesta
             self.logger.debug(f"📡 Respuesta HTTP: {response.status_code}")

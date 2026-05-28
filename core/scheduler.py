@@ -2,6 +2,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 import time
 import logging
 from datetime import datetime
+import re
 
 from core.auth.hispashare_login import HispashareAuth
 from core.library.scanner import LibraryScanner
@@ -97,6 +98,11 @@ class SchedulerThread(QThread):
             cleaned_count = self.db.cleanup_duplicate_episodes()
             self.log_signal.emit(f"   ✅ {cleaned_count} duplicados eliminados")
             
+            # 4b. Limpiar duplicados de series
+            self.log_signal.emit("🔧 Limpiando series duplicadas...")
+            cleaned_series = self.db.cleanup_duplicate_series()
+            self.log_signal.emit(f"   ✅ {cleaned_series} series duplicadas eliminadas")
+            
             # 5. Insertar/actualizar series en BD
             self.progress_signal.emit(45, "💾 Actualizando base de datos...")
             self.log_signal.emit("💾 Actualizando series en base de datos...")
@@ -114,7 +120,12 @@ class SchedulerThread(QThread):
             self.log_signal.emit("🔍 Detectando episodios faltantes...")
             missing_count = self.detect_missing()
             self.log_signal.emit(f"   ✅ {missing_count} episodios faltantes detectados")
-            
+
+            # 7.1. Buscar URLs para series nuevas sin episodios faltantes
+            self.progress_signal.emit(70, "🔎 Buscando URLs para series nuevas...")
+            self.log_signal.emit("🔎 Buscando URLs en Hispashare para series nuevas sin episodios faltantes...")
+            self.search_hispashare_for_new_series(driver)
+
             # 8. Buscar en Hispashare
             self.progress_signal.emit(75, "🔎 Buscando en Hispashare...")
             self.log_signal.emit("🔎 Buscando URLs en Hispashare...")
@@ -290,6 +301,33 @@ class SchedulerThread(QThread):
                 })
         
         return missing
+
+    def _normalize_hispashare_query(self, text: str) -> str:
+        value = (text or "").strip()
+        if not value:
+            return ""
+
+        value = re.sub(r'\s+', ' ', value)
+        value = re.sub(r'\bTemporadas?\s*\d+(?:\s*-\s*\d+)?\b', '', value, flags=re.IGNORECASE)
+        value = re.sub(r'\bTemporada\s*\d+\b', '', value, flags=re.IGNORECASE)
+        value = re.sub(r'\bSeason\s*\d+(?:\s*-\s*\d+)?\b', '', value, flags=re.IGNORECASE)
+        value = re.sub(r'\bComplete\b', '', value, flags=re.IGNORECASE)
+        value = re.sub(r'\bPack\b', '', value, flags=re.IGNORECASE)
+        value = re.sub(r'\b\(.*?Temporad.*?\)\b', '', value, flags=re.IGNORECASE)
+        value = re.sub(r'\s+', ' ', value).strip()
+        return value
+
+    def _get_hispashare_search_query(self, series: dict) -> tuple[str, int | None]:
+        tmdb_name = series.get('tmdb_name') or ''
+        local_name = series.get('name') or ''
+        year = series.get('year')
+
+        preferred = tmdb_name.strip() if tmdb_name and tmdb_name.strip() else local_name.strip()
+        query = self._normalize_hispashare_query(preferred)
+        if not query:
+            query = self._normalize_hispashare_query(local_name)
+
+        return query, year
     
     def search_hispashare(self, driver):
         """Buscar series en Hispashare - solo las que tienen episodios faltantes"""
@@ -308,12 +346,14 @@ class SchedulerThread(QThread):
             self.log_signal.emit(f"   📊 Series con episodios faltantes a buscar: {total_series}")
             
             for i, series in enumerate(series_list, 1):
-                self.log_signal.emit(f"   🔎 [{i}/{total_series}] Buscando: {series['name']} (tiene episodios faltantes)...")
+                query, year = self._get_hispashare_search_query(series)
+                label = series.get('tmdb_name') or series.get('name')
+                self.log_signal.emit(f"   🔎 [{i}/{total_series}] Buscando: {label} -> '{query}'...")
                 
                 try:
                     url = searcher.search_and_select(
-                        series['name'],
-                        series.get('year'),
+                        query,
+                        year,
                         series['id']  # Pasar el ID de la serie
                     )
                     
@@ -321,6 +361,9 @@ class SchedulerThread(QThread):
                         # Guardar URL inmediatamente cuando se encuentra
                         try:
                             self.db.update_hispashare_url(series['id'], url)
+                            cover_url = self.db.derive_hispashare_cover_url(url)
+                            if cover_url:
+                                self.db.update_hispashare_cover_url(series['id'], cover_url)
                             found += 1
                             self.logger.info(f"URL guardada para '{series['name']}': {url}")
                             self.log_signal.emit(f"      ✅ URL encontrada y guardada: {url[:50]}...")
@@ -346,7 +389,71 @@ class SchedulerThread(QThread):
         except Exception as e:
             self.logger.error(f"Error en search_hispashare: {e}")
             raise
-    
+
+    def search_hispashare_for_new_series(self, driver):
+        """Buscar y guardar URL de Hispashare para series nuevas que no tienen episodios faltantes.
+        Evita duplicar con las que ya se buscan en search_hispashare()."""
+        try:
+            searcher = HispashareSearcher(driver, self.db)
+
+            # Series sin URL en general
+            all_without_url = self.db.get_series_without_hispashare_url()
+
+            # Series con episodios faltantes sin URL (ya se gestionan en search_hispashare)
+            missing_without_url = self.db.get_series_with_missing_episodes_without_url()
+            missing_ids = {s['id'] for s in missing_without_url}
+
+            # Filtrar para quedarse con las "nuevas" (sin episodios faltantes)
+            series_list = [s for s in all_without_url if s['id'] not in missing_ids]
+
+            if not series_list:
+                self.log_signal.emit("   ℹ️ No hay series nuevas sin URL que necesiten búsqueda en Hispashare")
+                return
+
+            self.log_signal.emit(f"   📊 Series nuevas sin URL a buscar: {len(series_list)}")
+
+            found = 0
+            for i, series in enumerate(series_list, 1):
+                query, year = self._get_hispashare_search_query(series)
+                label = series.get('tmdb_name') or series.get('name')
+                self.log_signal.emit(f"   🔎 [NUEVAS {i}/{len(series_list)}] Buscando: {label} -> '{query}'...")
+
+                try:
+                    url = searcher.search_and_select(
+                        query,
+                        year,
+                        series['id']
+                    )
+
+                    if url:
+                        try:
+                            self.db.update_hispashare_url(series['id'], url)
+                            cover_url = self.db.derive_hispashare_cover_url(url)
+                            if cover_url:
+                                self.db.update_hispashare_cover_url(series['id'], cover_url)
+                            found += 1
+                            self.logger.info(f"URL guardada para '{series['name']}': {url}")
+                            self.log_signal.emit(f"      ✅ URL encontrada y guardada: {url[:50]}...")
+                            self.url_saved_signal.emit(series['id'], url)
+                        except Exception as save_error:
+                            self.logger.error(f"Error guardando URL para '{series['name']}': {save_error}")
+                            self.log_signal.emit(f"      ⚠️ URL encontrada pero error al guardar: {str(save_error)}")
+                    else:
+                        self.log_signal.emit("      ❌ No se encontró (marcada para no buscar más)")
+
+                except Exception as e:
+                    self.logger.error(f"Error buscando '{series['name']}': {e}")
+                    self.log_signal.emit(f"      ❌ Error en búsqueda: {str(e)}")
+                    continue
+
+                time.sleep(2)  # pequeña pausa entre búsquedas
+
+            self.log_signal.emit(f"   ✅ {found}/{len(series_list)} URLs encontradas para series nuevas sin episodios faltantes")
+
+        except Exception as e:
+            self.logger.error(f"Error en search_hispashare_for_new_series: {e}")
+            raise
+
     def process_downloads(self, driver):
         """Procesar descargas de episodios faltantes - solo series que realmente tienen episodios faltantes"""
         try:

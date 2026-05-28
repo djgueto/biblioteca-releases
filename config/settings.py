@@ -1,7 +1,16 @@
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+BASE_DIR = Path(__file__).resolve().parents[1]
+ENV_PATH = BASE_DIR / ".env"
+load_dotenv(dotenv_path=ENV_PATH)
+
+def _resolve_path(value: str) -> str:
+    p = Path(value).expanduser()
+    if not p.is_absolute():
+        p = (BASE_DIR / p).resolve()
+    return str(p)
 
 class Settings:
     # APIs
@@ -32,7 +41,7 @@ class Settings:
     MUSIC_PATH = os.getenv("MUSIC_PATH", "")
     MUSIC_PATHS = os.getenv("MUSIC_PATHS", "")  # Múltiples rutas separadas por ;
     
-    DB_PATH = "./series_manager.db"
+    DB_PATH = _resolve_path(os.getenv("DB_PATH", "series_manager.db"))
     
     @classmethod
     def get_series_paths(cls):
@@ -140,8 +149,14 @@ class Settings:
     
     # Calidad y preferencias
     WAIT_FOR_4K = os.getenv("WAIT_FOR_4K", "True").lower() == "true"  # Esperar por 4K/2160p si está disponible
+    WAIT_FOR_4K_MAX_WAIT_DAYS = int(os.getenv("WAIT_FOR_4K_MAX_WAIT_DAYS", "7"))
     PREFERRED_MIN_QUALITY = os.getenv("PREFERRED_MIN_QUALITY", "1080p")  # Calidad mínima preferida
     MINIMUM_MOVIE_SIZE_GB = float(os.getenv("MINIMUM_MOVIE_SIZE_GB", "4.0"))  # Tamaño mínimo para películas en GB
+    # Tamaño máximo opcional para películas (0 o vacío deshabilita el filtro máximo)
+    MAXIMUM_MOVIE_SIZE_GB = float(os.getenv("MAXIMUM_MOVIE_SIZE_GB", "0"))
+
+    # Búsqueda en biblioteca
+    LIBRARY_SEARCH_MAX_DEPTH = int(os.getenv("LIBRARY_SEARCH_MAX_DEPTH", "2"))  # Profundidad máxima de subcarpetas para detectar contenido existente
     
     @classmethod
     def validate(cls):
@@ -165,7 +180,7 @@ class Settings:
     @classmethod
     def save_settings(cls, settings_dict):
         """Guarda configuración en archivo .env"""
-        with open('.env', 'w') as f:
+        with open(ENV_PATH, 'w', encoding='utf-8') as f:
             for key, value in settings_dict.items():
                 f.write(f"{key}={value}\n")
     
@@ -182,7 +197,7 @@ class Settings:
         # Leer configuración actual
         current_settings = {}
         try:
-            with open('.env', 'r') as f:
+            with open(ENV_PATH, 'r', encoding='utf-8') as f:
                 for line in f:
                     if '=' in line and not line.strip().startswith('#'):
                         key, value = line.strip().split('=', 1)
@@ -210,7 +225,7 @@ class Settings:
         # Leer configuración actual
         current_settings = {}
         try:
-            with open('.env', 'r') as f:
+            with open(ENV_PATH, 'r', encoding='utf-8') as f:
                 for line in f:
                     if '=' in line and not line.strip().startswith('#'):
                         key, value = line.strip().split('=', 1)
@@ -238,7 +253,7 @@ class Settings:
         # Leer configuración actual
         current_settings = {}
         try:
-            with open('.env', 'r') as f:
+            with open(ENV_PATH, 'r', encoding='utf-8') as f:
                 for line in f:
                     if '=' in line and not line.strip().startswith('#'):
                         key, value = line.strip().split('=', 1)
@@ -266,7 +281,7 @@ class Settings:
         # Leer configuración actual
         current_settings = {}
         try:
-            with open('.env', 'r') as f:
+            with open(ENV_PATH, 'r', encoding='utf-8') as f:
                 for line in f:
                     if '=' in line and not line.strip().startswith('#'):
                         key, value = line.strip().split('=', 1)

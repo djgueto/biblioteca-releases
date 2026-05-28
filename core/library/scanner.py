@@ -40,15 +40,15 @@ class LibraryScanner:
             series_list = self.scan_path(series_path)
             all_series.extend(series_list)
         
-        # Eliminar duplicados basándose en el nombre de la serie
+        # Eliminar duplicados basándose en la ruta normalizada de la serie
         unique_series = {}
         for series in all_series:
-            series_name = series['name']
-            if series_name not in unique_series:
-                unique_series[series_name] = series
+            series_path = str(Path(series['folder_path']).resolve()).lower()
+            if series_path not in unique_series:
+                unique_series[series_path] = series
             else:
                 # Si ya existe, combinar episodios
-                existing_series = unique_series[series_name]
+                existing_series = unique_series[series_path]
                 self.merge_series_data(existing_series, series)
         
         return list(unique_series.values())
@@ -102,6 +102,24 @@ class LibraryScanner:
     
     def scan_series(self, series_folder):
         """Escanear una serie específica"""
+        # Verificar si existe en BD con otro nombre (diferencia de mayúsculas/minúsculas) y renombrar si es necesario
+        if self.db_manager:
+            try:
+                existing_series = self.db_manager.search_series_by_name(series_folder.name)
+                # Filtrar coincidencia exacta insensible a mayúsculas
+                matches = [s for s in existing_series if s['name'].lower() == series_folder.name.lower()]
+                
+                if matches:
+                    db_name = matches[0]['name']
+                    # Si el nombre en disco difiere del de BD solo en mayúsculas/minúsculas
+                    if db_name != series_folder.name:
+                        self.logger.info(f"Renombrando carpeta '{series_folder.name}' a '{db_name}' para coincidir con la base de datos")
+                        new_folder = series_folder.parent / db_name
+                        series_folder.rename(new_folder)
+                        series_folder = new_folder
+            except Exception as e:
+                self.logger.warning(f"No se pudo renombrar la carpeta '{series_folder.name}': {e}")
+
         series_name = series_folder.name
         
         # Estructura de datos de la serie

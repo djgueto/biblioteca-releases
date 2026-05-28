@@ -3,6 +3,7 @@ import logging
 import os
 from pathlib import Path
 from datetime import datetime
+from urllib.parse import urlparse, parse_qs
 from config.settings import Settings
 
 
@@ -42,6 +43,7 @@ class DatabaseManager:
                 confidence_score REAL,
                 needs_review BOOLEAN DEFAULT 0,
                 hispashare_url TEXT,
+                hispashare_cover_url TEXT,
                 status TEXT DEFAULT 'pending',
                 search_disabled BOOLEAN DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -108,6 +110,14 @@ class DatabaseManager:
         except Exception:
             # El campo ya existe, no hacer nada
             pass
+
+        # Migración: Agregar campo hispashare_cover_url si no existe
+        try:
+            cursor.execute("ALTER TABLE series ADD COLUMN hispashare_cover_url TEXT")
+            conn.commit()
+            self.logger.info("Campo hispashare_cover_url agregado a la tabla series")
+        except Exception:
+            pass
         
         self.logger.info("Base de datos inicializada correctamente")
     
@@ -164,9 +174,9 @@ class DatabaseManager:
             # Normalizar la ruta antes de buscar
             normalized_path = self.normalize_path(series_data['folder_path'])
             
-            # Verificar si existe por ruta normalizada
+            # Verificar si existe por ruta normalizada (insensible a mayúsculas/minúsculas)
             cursor.execute(
-                'SELECT id, folder_path FROM series WHERE folder_path = ?',
+                'SELECT id, folder_path FROM series WHERE lower(folder_path) = lower(?)',
                 (normalized_path,)
             )
             existing = cursor.fetchone()
@@ -174,25 +184,50 @@ class DatabaseManager:
             # Si no existe con la ruta normalizada, buscar por nombre y verificar si es la misma ubicación física
             if not existing:
                 cursor.execute(
-                    'SELECT id, folder_path FROM series WHERE name = ?',
+                    'SELECT id, folder_path FROM series WHERE lower(name) = lower(?)',
                     (series_data['name'],)
                 )
                 name_matches = cursor.fetchall()
                 
                 for match_id, match_path in name_matches:
-                    if self.normalize_path(match_path) == normalized_path:
+                    if self.normalize_path(match_path).lower() == normalized_path.lower():
                         existing = (match_id, match_path)
                         break
             
             if existing:
                 series_id = existing[0]
-                # Actualizar con la ruta normalizada
-                cursor.execute('''
-                    UPDATE series 
-                    SET name = ?, folder_path = ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                ''', (series_data['name'], normalized_path, series_id))
-                logging.info(f"Serie actualizada: {series_data['name']} -> {normalized_path}")
+                current_path = existing[1]
+                
+                # Verificar conflicto antes de actualizar ruta
+                if current_path != normalized_path:
+                    # Verificar si la ruta destino ya existe en otra serie
+                    cursor.execute('SELECT id FROM series WHERE folder_path = ?', (normalized_path,))
+                    conflict = cursor.fetchone()
+                    
+                    if conflict and conflict[0] != series_id:
+                        self.logger.warning(f"Conflicto de ruta detectado: '{normalized_path}' ya existe en ID {conflict[0]}. No se actualizará la ruta para ID {series_id}.")
+                        # Solo actualizar nombre y fecha
+                        cursor.execute('''
+                            UPDATE series 
+                            SET name = ?, updated_at = CURRENT_TIMESTAMP
+                            WHERE id = ?
+                        ''', (series_data['name'], series_id))
+                    else:
+                        # Actualizar todo incluyendo ruta
+                        cursor.execute('''
+                            UPDATE series 
+                            SET name = ?, folder_path = ?, updated_at = CURRENT_TIMESTAMP
+                            WHERE id = ?
+                        ''', (series_data['name'], normalized_path, series_id))
+                        self.logger.info(f"Serie actualizada: {series_data['name']} -> {normalized_path}")
+                else:
+                    # La ruta no cambió, solo actualizar nombre
+                    cursor.execute('''
+                        UPDATE series 
+                        SET name = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                    ''', (series_data['name'], series_id))
+                    self.logger.debug(f"Serie actualizada (sin cambio de ruta): {series_data['name']}")
             else:
                 # Insertar con ruta normalizada
                 cursor.execute('''
@@ -242,6 +277,57 @@ class DatabaseManager:
             self.logger.error(f"Error en update_tmdb_match: {e}")
             conn.rollback()
             raise
+
+    def clear_tmdb_match(self, series_id):
+        """Quitar vinculación TMDB de una serie (permite re-matching)"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('''
+                UPDATE series
+                SET tmdb_id = NULL,
+                    tmdb_name = NULL,
+                    year = NULL,
+                    confidence_score = NULL,
+                    needs_review = 0,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ''', (series_id,))
+            conn.commit()
+        except Exception as e:
+            self.logger.error(f"Error en clear_tmdb_match: {e}")
+            conn.rollback()
+            raise
+
+    def derive_hispashare_cover_url(self, hispashare_url: str) -> str | None:
+        try:
+            parsed = urlparse(hispashare_url or "")
+            qs = parse_qs(parsed.query)
+            title_id = (qs.get("id") or [None])[0]
+            if not title_id:
+                return None
+            if not str(title_id).isdigit():
+                return None
+            return f"{Settings.HISPASHARE_BASE_URL}/images/titles/{title_id}/cover.jpg"
+        except Exception:
+            return None
+
+    def update_hispashare_cover_url(self, series_id, cover_url):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('''
+                UPDATE series
+                SET hispashare_cover_url = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ''', (cover_url, series_id))
+            conn.commit()
+        except Exception as e:
+            self.logger.error(f"Error en update_hispashare_cover_url: {e}")
+            conn.rollback()
+            raise
     
     def update_hispashare_url(self, series_id, url):
         """Actualizar URL de Hispashare"""
@@ -270,6 +356,7 @@ class DatabaseManager:
         try:
             # Verificar si se está cambiando el TMDB ID
             tmdb_id_changed = 'tmdb_id' in changes
+            hispashare_url_changed = 'hispashare_url' in changes
             
             # Construir query dinámicamente basado en los cambios
             set_clauses = []
@@ -280,6 +367,15 @@ class DatabaseManager:
                            'needs_review', 'hispashare_url', 'status']:
                     set_clauses.append(f"{field} = ?")
                     values.append(value)
+
+            if hispashare_url_changed:
+                url_value = changes.get('hispashare_url')
+                if url_value and str(url_value).strip():
+                    cover_url = self.derive_hispashare_cover_url(str(url_value).strip())
+                else:
+                    cover_url = None
+                set_clauses.append("hispashare_cover_url = ?")
+                values.append(cover_url)
             
             if not set_clauses:
                 self.logger.warning("No hay cambios válidos para actualizar")
@@ -582,6 +678,68 @@ class DatabaseManager:
             conn.rollback()
             raise
     
+    def cleanup_duplicate_series(self):
+        """Limpiar series duplicadas (mismo nombre/path insensible a mayúsculas)"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            # Encontrar duplicados por folder_path (insensible a mayúsculas)
+            cursor.execute('''
+                SELECT lower(folder_path), COUNT(*) 
+                FROM series 
+                GROUP BY lower(folder_path) 
+                HAVING COUNT(*) > 1
+            ''')
+            
+            duplicates = cursor.fetchall()
+            total_cleaned = 0
+            
+            for path_lower, _ in duplicates:
+                cursor.execute('SELECT * FROM series WHERE lower(folder_path) = ? ORDER BY id', (path_lower,))
+                rows = cursor.fetchall()
+                series_list = [dict(row) for row in rows]
+                
+                if not series_list:
+                    continue
+                
+                # Ordenar para encontrar la mejor para mantener
+                # Criterios: 1. Tiene TMDB ID, 2. Tiene URL Hispashare, 3. ID más bajo (más antiguo)
+                series_list.sort(key=lambda s: (
+                    s['tmdb_id'] is not None, 
+                    s['hispashare_url'] is not None and s['hispashare_url'] != '',
+                    -s['id'] # Preferir IDs más antiguos (negativo porque sort es reverse=True)
+                ), reverse=True)
+                
+                keep = series_list[0]
+                to_delete = series_list[1:]
+                
+                self.logger.info(f"Consolidando duplicados para '{keep['name']}': Manteniendo ID {keep['id']}, eliminando {len(to_delete)} otros")
+                
+                for s in to_delete:
+                    # Mover episodios locales a la serie mantenida
+                    cursor.execute('UPDATE OR IGNORE local_episodes SET series_id = ? WHERE series_id = ?', (keep['id'], s['id']))
+                    # Eliminar los que no se pudieron mover (duplicados)
+                    cursor.execute('DELETE FROM local_episodes WHERE series_id = ?', (s['id'],))
+                    
+                    # Mover episodios faltantes
+                    cursor.execute('UPDATE OR IGNORE missing_episodes SET series_id = ? WHERE series_id = ?', (keep['id'], s['id']))
+                    cursor.execute('DELETE FROM missing_episodes WHERE series_id = ?', (s['id'],))
+                    
+                    # Eliminar la serie duplicada
+                    cursor.execute('DELETE FROM series WHERE id = ?', (s['id'],))
+                    total_cleaned += 1
+            
+            conn.commit()
+            if total_cleaned > 0:
+                self.logger.info(f"Limpieza de series duplicadas completada: {total_cleaned} series eliminadas")
+            return total_cleaned
+            
+        except Exception as e:
+            self.logger.error(f"Error en cleanup_duplicate_series: {e}")
+            conn.rollback()
+            return 0
+
     def cleanup_duplicate_episodes(self):
         """Limpiar episodios duplicados existentes en la base de datos"""
         conn = self.get_connection()
@@ -681,6 +839,20 @@ class DatabaseManager:
             WHERE status = 'missing'
             ORDER BY series_name, season, episode
         ''')
+        
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    def get_missing_episodes_for_series(self, series_id):
+        """Obtener episodios faltantes de una serie"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT * FROM missing_episodes
+            WHERE series_id = ? AND status = 'missing'
+            ORDER BY season, episode
+        ''', (series_id,))
         
         rows = cursor.fetchall()
         return [dict(row) for row in rows]

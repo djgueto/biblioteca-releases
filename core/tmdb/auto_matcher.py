@@ -2,6 +2,9 @@ from difflib import SequenceMatcher
 from datetime import datetime
 import re
 import logging
+import unicodedata
+
+from config.settings import Settings
 
 
 class TMDBAutoMatcher:
@@ -69,67 +72,89 @@ class TMDBAutoMatcher:
             'name': best_match['name'],
             'year': year,
             'confidence_score': best_score,
-            'needs_review': best_score < 0.85
+            'needs_review': best_score < Settings.AUTO_MATCH_THRESHOLD
         }
     
     def calculate_match_score(self, local_series, tmdb_result):
         """Calcular score de coincidencia (0-1)"""
-        score = 0.0
-        
-        # 1. Similitud de nombre (50% - sigue siendo el más importante)
-        name_similarity = self.calculate_name_similarity(
-            local_series['name'],
-            tmdb_result['name']
-        )
-        score += name_similarity * 0.5
-        
-        # 2. Coincidencia de temporadas (25% - más peso por fiabilidad)
-        season_score = self.calculate_season_match(
-            local_series,
-            tmdb_result['id']
-        )
-        score += season_score * 0.25
-        
-        # 3. Coincidencia de episodios (15% - importante para validación)
-        episode_score = self.calculate_episode_match(
-            local_series,
-            tmdb_result['id']
-        )
-        score += episode_score * 0.15
-        
-        # 4. Factor temporal (7% - priorizar series recientes)
+        local_name = local_series.get('name', '')
+        local_seasons = len(local_series.get('seasons', {}) or {})
+        local_episodes = len(local_series.get('episodes', []) or [])
+
+        name_similarity = self.calculate_name_similarity(local_name, tmdb_result.get('name', ''))
+        local_year = self.extract_year(local_series)
+        year_score = self.calculate_year_match(local_year, tmdb_result)
         date_score = self.calculate_date_relevance(tmdb_result)
-        score += date_score * 0.07
-        
-        # 5. Popularidad (3% - mínimo peso)
+
         popularity = tmdb_result.get('popularity', 0)
-        popularity_score = min(1.0, popularity / 100)
-        score += popularity_score * 0.03
-        
-        return score
+        popularity_score = min(1.0, popularity / 100) if popularity else 0.0
+
+        has_local_structure = local_seasons > 0 or local_episodes > 0
+        is_sparse_local = local_episodes < 3 and local_seasons == 0
+
+        if not has_local_structure or is_sparse_local:
+            w_name = 0.78
+            w_year = 0.18 if local_year else 0.0
+            w_date = 0.03
+            w_pop = 0.01
+            denom = w_name + w_year + w_date + w_pop
+            w_name, w_year, w_date, w_pop = (w_name / denom, w_year / denom, w_date / denom, w_pop / denom)
+            return (name_similarity * w_name) + (year_score * w_year) + (date_score * w_date) + (popularity_score * w_pop)
+
+        season_score = self.calculate_season_match(local_series, tmdb_result['id'])
+        episode_score = self.calculate_episode_match(local_series, tmdb_result['id'])
+
+        w_name = 0.55
+        w_season = 0.20
+        w_episode = 0.10
+        w_year = 0.10 if local_year else 0.0
+        w_date = 0.03
+        w_pop = 0.02
+        denom = w_name + w_season + w_episode + w_year + w_date + w_pop
+        w_name, w_season, w_episode, w_year, w_date, w_pop = (
+            w_name / denom,
+            w_season / denom,
+            w_episode / denom,
+            w_year / denom,
+            w_date / denom,
+            w_pop / denom,
+        )
+
+        return (
+            (name_similarity * w_name)
+            + (season_score * w_season)
+            + (episode_score * w_episode)
+            + (year_score * w_year)
+            + (date_score * w_date)
+            + (popularity_score * w_pop)
+        )
     
     def calculate_name_similarity(self, name1, name2):
         """Calcular similitud entre dos nombres"""
-        # Normalizar ambos nombres
-        norm1 = self.normalize_name(name1)
-        norm2 = self.normalize_name(name2)
-        
-        # Usar SequenceMatcher para similitud
-        similarity = SequenceMatcher(None, norm1, norm2).ratio()
-        
-        # Bonus si uno contiene al otro (más generoso)
-        if norm1 in norm2 or norm2 in norm1:
-            similarity = max(similarity, 0.85)
-        
-        # Bonus adicional para coincidencias parciales significativas
-        words1 = set(norm1.split())
-        words2 = set(norm2.split())
-        
-        if words1 and words2:
-            word_overlap = len(words1.intersection(words2)) / max(len(words1), len(words2))
-            similarity = max(similarity, word_overlap * 0.8)
-        
-        return similarity
+        def variants(raw: str) -> list[str]:
+            raw = raw or ""
+            base = self.primary_title(raw)
+            return [self.normalize_name(raw), self.normalize_name(base)]
+
+        best = 0.0
+        v1 = variants(name1)
+        v2 = variants(name2)
+
+        for a in v1:
+            for b in v2:
+                if not a or not b:
+                    continue
+                sim = SequenceMatcher(None, a, b).ratio()
+                if a in b or b in a:
+                    sim = max(sim, 0.92)
+                words1 = set(a.split())
+                words2 = set(b.split())
+                if words1 and words2:
+                    overlap = len(words1.intersection(words2)) / max(len(words1), len(words2))
+                    sim = max(sim, overlap * 0.9)
+                best = max(best, sim)
+
+        return best
     
     def calculate_season_match(self, local_series, tmdb_id):
         """Calcular coincidencia de temporadas con mayor precisión"""
@@ -212,7 +237,9 @@ class TMDBAutoMatcher:
     
     def normalize_name(self, name):
         """Normalizar nombre para comparación"""
-        # Convertir a minúsculas
+        name = name or ""
+        name = unicodedata.normalize('NFD', name)
+        name = ''.join(ch for ch in name if unicodedata.category(ch) != 'Mn')
         name = name.lower()
         
         # Quitar contenido entre paréntesis
@@ -222,6 +249,7 @@ class TMDBAutoMatcher:
         name = re.sub(r'\b\d{4}\b', '', name)
         
         # Quitar caracteres especiales excepto espacios
+        name = name.replace('&', ' and ')
         name = re.sub(r'[^\w\s]', ' ', name)
         
         # Quitar espacios múltiples
@@ -231,6 +259,74 @@ class TMDBAutoMatcher:
         name = name.strip()
         
         return name
+
+    def primary_title(self, name: str) -> str:
+        name = name or ""
+        for sep in (" - ", " – ", " — ", ": "):
+            if sep in name:
+                return name.split(sep, 1)[0].strip()
+        return name.strip()
+
+    def extract_year(self, local_series) -> int | None:
+        candidates = []
+        for key in ('name', 'folder_path'):
+            value = (local_series or {}).get(key)
+            if value:
+                candidates.append(str(value))
+
+        text = " ".join(candidates)
+        years = re.findall(r'\b(19\d{2}|20\d{2})\b', text)
+        if not years:
+            return None
+
+        try:
+            year = int(years[0])
+        except ValueError:
+            return None
+
+        current_year = datetime.now().year
+        if 1900 <= year <= current_year + 1:
+            return year
+        return None
+
+    def calculate_year_match(self, local_year: int | None, tmdb_result) -> float:
+        if not local_year:
+            return 0.5
+
+        first_air_date = tmdb_result.get('first_air_date', '') if tmdb_result else ''
+        if not first_air_date or len(first_air_date) < 4:
+            return 0.5
+
+        try:
+            tmdb_year = int(first_air_date[:4])
+        except (ValueError, TypeError):
+            return 0.5
+
+        diff = abs(tmdb_year - local_year)
+        if diff == 0:
+            return 1.0
+        if diff == 1:
+            return 0.85
+        if diff == 2:
+            return 0.65
+        return max(0.0, 1.0 - (diff / 8.0))
+
+    def calculate_fast_score(self, local_series, tmdb_details) -> float:
+        local_name = (local_series or {}).get('name', '')
+        name_similarity = self.calculate_name_similarity(local_name, (tmdb_details or {}).get('name', ''))
+        local_year = self.extract_year(local_series)
+        year_score = self.calculate_year_match(local_year, tmdb_details)
+        date_score = self.calculate_date_relevance(tmdb_details)
+        popularity = (tmdb_details or {}).get('popularity', 0) or 0
+        popularity_score = min(1.0, popularity / 100) if popularity else 0.0
+
+        w_name = 0.82
+        w_year = 0.14 if local_year else 0.0
+        w_date = 0.03
+        w_pop = 0.01
+        denom = w_name + w_year + w_date + w_pop
+        w_name, w_year, w_date, w_pop = (w_name / denom, w_year / denom, w_date / denom, w_pop / denom)
+        return (name_similarity * w_name) + (year_score * w_year) + (date_score * w_date) + (popularity_score * w_pop)
     
     def calculate_date_relevance(self, tmdb_result):
         """Calcular relevancia temporal - priorizar series recientes"""

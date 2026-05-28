@@ -40,10 +40,9 @@ class HispashareSearcher:
             if not results:
                 self.logger.warning(f"No se encontraron resultados para: {series_name}")
                 
-                # Marcar serie como no encontrada si tenemos db_manager y series_id
+                # Dejamos registro pero NO deshabilitamos la búsqueda permanente para permitir reintentos futuros
                 if self.db_manager and series_id:
-                    self.logger.info(f"Marcando serie '{series_name}' como no encontrada")
-                    self.db_manager.disable_series_search(series_id)
+                    self.logger.info(f"Serie '{series_name}' no encontrada en Hispashare. Se reintentará en el futuro.")
                 
                 return None
             
@@ -60,10 +59,8 @@ class HispashareSearcher:
                 # No se encontró un match suficientemente bueno
                 self.logger.warning(f"No se encontró un match adecuado para: {series_name}")
                 
-                # Marcar serie como no encontrada si tenemos db_manager y series_id
                 if self.db_manager and series_id:
-                    self.logger.info(f"Marcando serie '{series_name}' como no encontrada (sin match adecuado)")
-                    self.db_manager.disable_series_search(series_id)
+                    self.logger.info(f"Match no adecuado para '{series_name}'. Se reintentará en el futuro.")
             
             return None
             

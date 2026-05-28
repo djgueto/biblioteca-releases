@@ -2,6 +2,7 @@ import os
 import re
 import logging
 from pathlib import Path
+from datetime import date, datetime
 from bs4 import BeautifulSoup
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -60,6 +61,67 @@ class HispashareDownloader:
                 missing_episodes[season] = missing_in_season
         
         return missing_episodes
+
+    def _parse_air_date(self, value):
+        if not value:
+            return None
+        if isinstance(value, date):
+            return value
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            try:
+                return datetime.strptime(text, "%Y-%m-%d").date()
+            except Exception:
+                return None
+        return None
+
+    def _build_missing_episodes_from_rows(self, rows):
+        missing_episodes = {}
+        air_dates = {}
+        for row in rows:
+            season = row.get('season')
+            episode = row.get('episode')
+            if season is None or episode is None:
+                continue
+            missing_episodes.setdefault(season, []).append(episode)
+            air_dates[(season, episode)] = row.get('air_date')
+
+        for season in missing_episodes:
+            missing_episodes[season] = sorted(set(missing_episodes[season]))
+
+        return missing_episodes, air_dates
+
+    def _filter_missing_by_min_age(self, missing_episodes, air_dates, min_age_days):
+        if not min_age_days or min_age_days <= 0:
+            return missing_episodes, 0, sum(len(v) for v in missing_episodes.values())
+
+        today = date.today()
+        eligible = {}
+        skipped = 0
+        total = 0
+
+        for season, episodes in missing_episodes.items():
+            for episode in episodes:
+                total += 1
+                air_date = self._parse_air_date(air_dates.get((season, episode)))
+                if air_date is None:
+                    eligible.setdefault(season, []).append(episode)
+                    continue
+
+                age_days = (today - air_date).days
+                if age_days >= min_age_days:
+                    eligible.setdefault(season, []).append(episode)
+                else:
+                    skipped += 1
+
+        for season in eligible:
+            eligible[season] = sorted(set(eligible[season]))
+
+        return eligible, skipped, total
     
     def _scan_existing_episodes(self, series_path):
         """
@@ -313,7 +375,7 @@ class HispashareDownloader:
         
         return quality_sections
     
-    def process_download_page(self, hispashare_url, missing_episodes):
+    def process_download_page(self, hispashare_url, missing_episodes, air_dates=None):
         """
         Procesa la página de descarga de Hispashare para obtener enlaces ed2k
         
@@ -349,7 +411,21 @@ class HispashareDownloader:
             
             if has_4k_section and Settings.WAIT_FOR_4K:
                 self.logger.info("🎬 Calidad 4K/2160p detectada - Aplicando lógica de espera por mejor calidad")
-                return self._process_with_4k_priority(quality_sections, missing_episodes)
+                filtered_missing = missing_episodes
+                if air_dates is not None:
+                    filtered_missing, skipped, total = self._filter_missing_by_min_age(
+                        missing_episodes,
+                        air_dates,
+                        getattr(Settings, 'WAIT_FOR_4K_MAX_WAIT_DAYS', 7)
+                    )
+                    if skipped and total:
+                        self.logger.info(f"⏳ {skipped}/{total} episodios recientes omitidos por WAIT_FOR_4K_MAX_WAIT_DAYS")
+                    if not filtered_missing:
+                        self.logger.warning("⏳ Todos los episodios faltantes son recientes - Esperando por 4K")
+                        self.logger.info("💡 Ajusta WAIT_FOR_4K_MAX_WAIT_DAYS o desactiva WAIT_FOR_4K en .env si quieres descargar ya")
+                        return []
+
+                return self._process_with_4k_priority(quality_sections, filtered_missing)
             else:
                 self.logger.info("📺 Procesando con lógica estándar (sin espera por 4K)")
                 return self._process_standard_quality_selection(quality_sections, missing_episodes)
@@ -412,9 +488,8 @@ class HispashareDownloader:
         # Si hay secciones 4K pero no tienen los episodios, decidir si esperar o descargar calidad inferior
         if k4_sections:
             self.logger.warning("🚫 Hay calidad 4K disponible pero no contiene los episodios buscados")
-            self.logger.warning("⏳ Esperando a que los episodios estén disponibles en 4K - No descargando calidades inferiores")
-            self.logger.info("💡 Para deshabilitar esta espera, configura WAIT_FOR_4K=False en .env")
-            return []  # No descargar nada, esperar por 4K
+            self.logger.warning("⬇️ Descargando la mejor calidad disponible (no 4K) para los episodios elegibles")
+            return self._process_standard_quality_selection(other_sections, missing_episodes)
         
         # Si no hay 4K, procesar normalmente
         return self._process_standard_quality_selection(other_sections, missing_episodes)
@@ -459,26 +534,59 @@ class HispashareDownloader:
             tuple: (is_compatible, language_info) donde is_compatible es bool y language_info es str
         """
         try:
-            # Buscar el párrafo con información de idiomas
+            language_element = None
+            
+            # Estrategia 1: Buscar párrafo con clase INFO que contenga "Idiomas:"
             language_paragraph = section_parent.find('p', class_='INFO')
-            if not language_paragraph or 'Idiomas:' not in language_paragraph.get_text():
-                # Si no hay información de idioma, buscar en elementos hermanos
+            if language_paragraph and 'Idiomas:' in language_paragraph.get_text():
+                language_element = language_paragraph
+            
+            # Estrategia 2: Buscar celda td que contenga "Idioma:" (formato más común)
+            if not language_element:
+                language_cells = section_parent.find_all('td')
+                for cell in language_cells:
+                    if 'Idioma:' in cell.get_text():
+                        language_element = cell
+                        break
+            
+            # Estrategia 3: Buscar en elementos hermanos
+            if not language_element:
                 current = section_parent
-                for _ in range(3):  # Buscar en los siguientes 3 elementos
+                for _ in range(5):  # Buscar en los siguientes 5 elementos
                     current = current.find_next_sibling()
                     if current:
+                        # Buscar párrafo INFO
                         language_paragraph = current.find('p', class_='INFO')
                         if language_paragraph and 'Idiomas:' in language_paragraph.get_text():
+                            language_element = language_paragraph
+                            break
+                        # Buscar celda td con idioma
+                        language_cells = current.find_all('td')
+                        for cell in language_cells:
+                            if 'Idioma:' in cell.get_text():
+                                language_element = cell
+                                break
+                        if language_element:
                             break
             
-            if not language_paragraph:
+            # Estrategia 4: Búsqueda recursiva más amplia
+            if not language_element:
+                # Buscar en todo el árbol del elemento padre
+                all_elements = section_parent.find_all(['p', 'td', 'div'])
+                for element in all_elements:
+                    text = element.get_text()
+                    if 'Idioma:' in text or 'Idiomas:' in text:
+                        language_element = element
+                        break
+            
+            if not language_element:
                 self.logger.warning("⚠️ No se encontró información de idioma - Asumiendo compatible")
                 return True, "Sin información de idioma"
             
             # Extraer todas las banderas de idioma
-            language_flags = language_paragraph.find_all('img', class_='FLAGM')
+            language_flags = language_element.find_all('img', class_='FLAGM')
             if not language_flags:
-                language_flags = language_paragraph.find_all('img', class_='FLAG')
+                language_flags = language_element.find_all('img', class_='FLAG')
             
             languages = []
             for flag in language_flags:
@@ -487,24 +595,20 @@ class HispashareDownloader:
                     languages.append(lang.lower())
             
             language_info = ', '.join(languages) if languages else "Sin idiomas detectados"
+            self.logger.info(f"🌍 Idiomas detectados: {language_info}")
             
-            # Verificar que tenga español o catalán (prioritario)
-            if any(lang in languages for lang in ['spanish', 'catalan', 'spanishfor']):
-                self.logger.info(f"✅ Idioma compatible - Contiene español/catalán: {language_info}")
+            # Verificar que tenga español o catalán como IDIOMA DE AUDIO
+            if any(lang in languages for lang in ['spanish', 'catalan', 'catala']):
+                self.logger.info(f"✅ Idioma compatible - Audio en español/catalán: {language_info}")
                 return True, language_info
             
-            # Si no tiene español/catalán pero tiene inglés + subtítulos españoles, rechazar
-            if 'english' in languages and 'spanishsub' in languages and 'spanish' not in languages:
-                self.logger.warning(f"🚫 Contenido rechazado - Solo subtítulos en español sin audio: {language_info}")
-                return False, language_info
+            # Si tiene subtítulos españoles (spanishsub o spanishfor) también es válido
+            if any(lang in languages for lang in ['spanishsub', 'spanishfor']):
+                self.logger.info(f"✅ Idioma compatible - Subtítulos en español: {language_info}")
+                return True, language_info
             
-            # Si solo tiene inglés sin español, rechazar
-            if 'english' in languages and not any(lang in languages for lang in ['spanish', 'catalan', 'spanishfor']):
-                self.logger.warning(f"🚫 Contenido rechazado - Solo inglés sin español: {language_info}")
-                return False, language_info
-            
-            # Si no tiene idiomas aceptables, rechazar
-            self.logger.warning(f"🚫 Contenido rechazado - Sin idiomas aceptables: {language_info}")
+            # Si no tiene ningún idioma español/catalán ni subtítulos españoles, rechazar
+            self.logger.warning(f"🚫 Contenido rechazado - Sin español ni catalán: {language_info}")
             return False, language_info
             
         except Exception as e:
@@ -767,16 +871,20 @@ class HispashareDownloader:
             self.logger.error(f"Serie {series_id} no tiene URL de Hispashare")
             return []
         
-        # Obtener episodios faltantes
-        missing_episodes = self.get_missing_episodes(series_id)
-        if not missing_episodes:
+        rows = self.db_manager.get_missing_episodes_for_series(series_id)
+        if not rows:
             self.logger.info(f"No hay episodios faltantes para la serie {series['name']}")
             return []
-        
+
+        missing_episodes, air_dates = self._build_missing_episodes_from_rows(rows)
+        if not missing_episodes:
+            self.logger.info(f"No hay episodios faltantes procesables para la serie {series['name']}")
+            return []
+
         self.logger.info(f"Episodios faltantes para {series['name']}: {missing_episodes}")
         
         # Procesar página de descarga
-        ed2k_links = self.process_download_page(series['hispashare_url'], missing_episodes)
+        ed2k_links = self.process_download_page(series['hispashare_url'], missing_episodes, air_dates=air_dates)
         
         if ed2k_links:
             self.logger.info(f"Se obtuvieron {len(ed2k_links)} enlaces ed2k para {series['name']}")

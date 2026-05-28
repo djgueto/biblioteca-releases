@@ -5,14 +5,16 @@ from PyQt6.QtWidgets import (
     QMessageBox, QHeaderView, QMenu, QDialog
 )
 from PyQt6.QtCore import Qt, pyqtSlot, QTimer
-from PyQt6.QtGui import QColor, QAction
+from PyQt6.QtGui import QColor, QAction, QPixmap
 
 from .widgets.settings_dialog import SettingsWidget
 from .widgets.series_edit_dialog import SeriesEditDialog
+from .widgets.image_loader import ImageLoaderThread
 from core.scheduler import SchedulerThread
 from core.database.db_manager import DatabaseManager
 from core.tmdb.api_client import TMDBClient
 from core.tmdb.auto_matcher import TMDBAutoMatcher
+from core.tmdb.recalc_thread import TMDBRecalcThread
 from config.settings import Settings
 import logging
 
@@ -22,6 +24,12 @@ class MainWindow(QMainWindow):
         self.db = DatabaseManager()
         self.logger = logging.getLogger(__name__)
         self.scheduler_thread = None
+        self.tmdb_recalc_thread = None
+        self.cover_loaders = {}
+        self.cover_labels = {}
+        self.cover_row_height = 84
+        self.cover_thumb_height = 80
+        self.cover_thumb_width = 60
         
         self.setWindowTitle("Series Manager - Hispashare + TMDB")
         self.setMinimumSize(1200, 800)
@@ -82,25 +90,31 @@ class MainWindow(QMainWindow):
         
         self.btn_refresh = QPushButton("🔄 Refrescar")
         self.btn_refresh.clicked.connect(self.refresh_series_list)
+
+        self.btn_recalc_tmdb = QPushButton("🎬 Recalcular Confianza TMDB")
+        self.btn_recalc_tmdb.clicked.connect(self.recalculate_all_tmdb_confidence)
         
         btn_layout.addWidget(self.btn_scan)
         btn_layout.addWidget(self.btn_refresh)
+        btn_layout.addWidget(self.btn_recalc_tmdb)
         btn_layout.addStretch()
         
         layout.addLayout(btn_layout)
         
         # Tabla de series
         self.series_table = QTableWidget()
-        self.series_table.setColumnCount(7)
+        self.series_table.setColumnCount(8)
         self.series_table.setHorizontalHeaderLabels([
             "Nombre", "Año", "TMDB ID", "Confianza", 
-            "Faltantes", "URL Hispashare", "Estado"
+            "Faltantes", "URL Hispashare", "Carátula", "Estado"
         ])
         
         # Ajustar columnas
         header = self.series_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
+        self.series_table.verticalHeader().setDefaultSectionSize(self.cover_row_height)
         
         self.series_table.setAlternatingRowColors(True)
         self.series_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -116,6 +130,47 @@ class MainWindow(QMainWindow):
         self.refresh_series_list()
         
         return widget
+
+    def recalculate_all_tmdb_confidence(self):
+        reply = QMessageBox.question(
+            self,
+            "Recalcular TMDB",
+            "Esto recalculará la confianza TMDB de todas las series.\n\n"
+            "Puede tardar y hará peticiones a TMDB.\n\n¿Continuar?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        if self.tmdb_recalc_thread and self.tmdb_recalc_thread.isRunning():
+            QMessageBox.information(self, "TMDB", "Ya hay un recálculo en curso")
+            return
+
+        self.btn_scan.setEnabled(False)
+        self.btn_refresh.setEnabled(False)
+        self.btn_recalc_tmdb.setEnabled(False)
+        self.append_log("🎬 Iniciando recálculo de confianza TMDB para todas las series...")
+
+        self.tmdb_recalc_thread = TMDBRecalcThread()
+        self.tmdb_recalc_thread.progress_signal.connect(self.update_progress)
+        self.tmdb_recalc_thread.log_signal.connect(self.append_log)
+        self.tmdb_recalc_thread.series_updated_signal.connect(self.refresh_series_row)
+        self.tmdb_recalc_thread.finished_signal.connect(self.on_tmdb_recalc_finished)
+        self.tmdb_recalc_thread.error_signal.connect(self.on_tmdb_recalc_error)
+        self.tmdb_recalc_thread.start()
+
+    def on_tmdb_recalc_finished(self, total, updated, failed):
+        self.refresh_series_list()
+        self.append_log(f"✅ Recálculo TMDB completado: {updated}/{total} actualizadas, {failed} con fallo")
+        self.btn_scan.setEnabled(True)
+        self.btn_refresh.setEnabled(True)
+        self.btn_recalc_tmdb.setEnabled(True)
+
+    def on_tmdb_recalc_error(self, message):
+        QMessageBox.critical(self, "TMDB", f"Error en recálculo TMDB:\n{message}")
+        self.btn_scan.setEnabled(True)
+        self.btn_refresh.setEnabled(True)
+        self.btn_recalc_tmdb.setEnabled(True)
     
     def create_missing_tab(self):
         """Tab con episodios faltantes"""
@@ -354,6 +409,7 @@ class MainWindow(QMainWindow):
         self.series_table.setRowCount(len(series_list))
         
         for row, series in enumerate(series_list):
+            self.series_table.setRowHeight(row, self.cover_row_height)
             # Nombre - Almacenar el ID de la serie como atributo del item
             name_item = QTableWidgetItem(series.get('name', ''))
             name_item.series_id = series.get('id')  # Almacenar ID para referencia
@@ -393,6 +449,17 @@ class MainWindow(QMainWindow):
                     url_item.setForeground(QColor('gray'))
             
             self.series_table.setItem(row, 5, url_item)
+
+            series_id = series.get('id')
+            cover_url = series.get('hispashare_cover_url', '')
+            cover_label = QLabel()
+            cover_label.setFixedSize(self.cover_thumb_width, self.cover_thumb_height)
+            cover_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.series_table.setCellWidget(row, 6, cover_label)
+            if series_id is not None:
+                self.cover_labels[series_id] = cover_label
+                if cover_url:
+                    self.load_cover_for_series(series_id, cover_url)
             
             # Estado
             status = series.get('status', 'Pendiente')
@@ -402,7 +469,7 @@ class MainWindow(QMainWindow):
             if series.get('search_disabled', 0) == 1:
                 status_item.setForeground(QColor('gray'))
             
-            self.series_table.setItem(row, 6, status_item)
+            self.series_table.setItem(row, 7, status_item)
         
         # También refrescar la lista de episodios faltantes si existe
         if hasattr(self, 'missing_table'):
@@ -583,9 +650,55 @@ class MainWindow(QMainWindow):
         )
         
         if reply == QMessageBox.StandardButton.Yes:
-            # Aquí se podría implementar el reescaneo automático
             self.append_log(f"🔄 Reescaneando '{series_data['name']}' en TMDB...")
-            QMessageBox.information(self, "Información", "Funcionalidad de reescaneo en desarrollo")
+            
+            try:
+                if not Settings.TMDB_API_KEY:
+                    QMessageBox.warning(self, "Configuración", "TMDB_API_KEY no configurada")
+                    return
+                
+                local_episodes = self.db.get_local_episodes(series_data['id'])
+                seasons = {}
+                for ep in local_episodes:
+                    season = ep.get('season')
+                    if season is None:
+                        continue
+                    seasons[season] = seasons.get(season, 0) + 1
+                
+                local_series = {
+                    'id': series_data['id'],
+                    'name': series_data['name'],
+                    'folder_path': series_data.get('folder_path', ''),
+                    'seasons': seasons,
+                    'episodes': local_episodes
+                }
+                
+                tmdb_client = TMDBClient(Settings.TMDB_API_KEY)
+                matcher = TMDBAutoMatcher(tmdb_client)
+                
+                match_result = matcher.match_series(local_series)
+                if not match_result:
+                    self.append_log(f"❌ No se encontró match TMDB para '{series_data['name']}'")
+                    QMessageBox.information(self, "TMDB", "No se encontró un match adecuado en TMDB")
+                    return
+                
+                self.db.update_tmdb_match(series_data['id'], match_result)
+                self.append_log(
+                    f"✅ TMDB actualizado: {match_result['name']} ({match_result.get('year', '')}) - "
+                    f"Confianza: {match_result['confidence_score']:.1%}"
+                )
+                
+                self.refresh_series_row(series_data['id'])
+                QMessageBox.information(
+                    self,
+                    "TMDB",
+                    f"TMDB actualizado.\n\n{match_result['name']} ({match_result.get('year', '')})\n"
+                    f"Confianza: {match_result['confidence_score']:.1%}"
+                )
+                
+            except Exception as e:
+                self.logger.error(f"Error reescaneando TMDB: {e}")
+                QMessageBox.critical(self, "Error", f"Error reescaneando TMDB:\n{str(e)}")
     
     def copy_hispashare_url(self):
         """Copiar URL de Hispashare al portapapeles"""
@@ -666,6 +779,14 @@ class MainWindow(QMainWindow):
                     
                     # Actualizar el texto de la URL
                     url_item.setText(url)
+
+                    cover_url = self.db.derive_hispashare_cover_url(url)
+                    if cover_url:
+                        try:
+                            self.db.update_hispashare_cover_url(series_id, cover_url)
+                        except Exception:
+                            pass
+                        self.load_cover_for_series(series_id, cover_url)
                     
                     # Añadir efecto visual temporal
                     url_item.setBackground(QColor(144, 238, 144))  # Verde claro
@@ -938,8 +1059,8 @@ class MainWindow(QMainWindow):
             
             # Buscar la fila correspondiente a la serie
             for row in range(table.rowCount()):
-                item = table.item(row, 0)  # Columna ID
-                if item and int(item.text()) == series_id:
+                item = table.item(row, 0)  # Columna Nombre (con atributo series_id)
+                if item and hasattr(item, 'series_id') and item.series_id == series_id:
                     # Actualizar año (columna 2)
                     year_item = QTableWidgetItem(str(match_data.get('year', '')))
                     table.setItem(row, 2, year_item)
@@ -988,8 +1109,8 @@ class MainWindow(QMainWindow):
             
             # Buscar la fila correspondiente
             for row in range(table.rowCount()):
-                item = table.item(row, 0)  # Columna ID
-                if item and int(item.text()) == series_id:
+                item = table.item(row, 0)  # Columna Nombre (con atributo series_id)
+                if item and hasattr(item, 'series_id') and item.series_id == series_id:
                     # Actualizar todas las columnas con los datos más recientes
                     self.populate_series_row(row, series_data)
                     break
@@ -1041,6 +1162,17 @@ class MainWindow(QMainWindow):
                     url_item.setForeground(QColor('gray'))
             
             table.setItem(row, 5, url_item)
+
+            series_id = series_data.get('id')
+            cover_url = series_data.get('hispashare_cover_url', '')
+            cover_label = QLabel()
+            cover_label.setFixedSize(self.cover_thumb_width, self.cover_thumb_height)
+            cover_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            table.setCellWidget(row, 6, cover_label)
+            if series_id is not None:
+                self.cover_labels[series_id] = cover_label
+                if cover_url:
+                    self.load_cover_for_series(series_id, cover_url)
             
             # Estado
             status = series_data.get('status', 'Pendiente')
@@ -1050,10 +1182,38 @@ class MainWindow(QMainWindow):
             if series_data.get('search_disabled', 0) == 1:
                 status_item.setForeground(QColor('gray'))
             
-            table.setItem(row, 6, status_item)
+            table.setItem(row, 7, status_item)
             
         except Exception as e:
             self.logger.error(f"Error llenando fila de serie: {e}")
+
+    def load_cover_for_series(self, series_id, cover_url):
+        if not series_id or not cover_url:
+            return
+        if series_id in self.cover_loaders:
+            return
+        loader = ImageLoaderThread(series_id, cover_url)
+        loader.loaded.connect(self.on_cover_loaded)
+        loader.failed.connect(self.on_cover_failed)
+        self.cover_loaders[series_id] = loader
+        loader.start()
+
+    def on_cover_loaded(self, series_id, image_bytes):
+        label = self.cover_labels.get(series_id)
+        loader = self.cover_loaders.pop(series_id, None)
+        if loader:
+            loader.deleteLater()
+        if not label:
+            return
+        pixmap = QPixmap()
+        if not pixmap.loadFromData(image_bytes):
+            return
+        label.setPixmap(pixmap.scaledToHeight(self.cover_thumb_height, Qt.TransformationMode.SmoothTransformation))
+
+    def on_cover_failed(self, series_id):
+        loader = self.cover_loaders.pop(series_id, None)
+        if loader:
+            loader.deleteLater()
     
     def restore_row_background(self, row, columns, original_bg):
         """Restaurar el color de fondo original de ciertas columnas"""

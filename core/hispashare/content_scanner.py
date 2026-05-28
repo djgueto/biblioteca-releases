@@ -33,6 +33,9 @@ class ContentScanner:
             for i in range(1, num_pages + 1)
         ]
         
+        from datetime import datetime
+        current_year = datetime.now().year
+        
         # Filtros de contenido
         self.filters = {
             'genres': ['Películas', 'Series', 'Música', 'Documentales'],
@@ -40,7 +43,7 @@ class ContentScanner:
             'preferred_codecs': ['x265', 'x264'],     # Preferir x265 sobre x264
             'preferred_quality': ['hdr', 'dolby vision'],  # Preferir HDR
             'languages': ['spanish', 'catalan'],      # Solo español y catalán
-            'year': 2025                              # Solo contenido de 2025
+            'year': current_year                      # Solo contenido del año actual
         }
     
     def scan_new_content(self):
@@ -311,16 +314,19 @@ class ContentScanner:
                 self.logger.info(f"   ❌ Formato no encontrado en: {combined_text}")
                 return False
             
-            # Filtro de tamaño mínimo para películas
+            # Filtro de tamaño para películas (mínimo y máximo estimados)
             if is_movie:
                 estimated_size_gb = self._estimate_movie_size_from_quality(combined_text)
                 min_size_gb = self.settings.MINIMUM_MOVIE_SIZE_GB
-                
+                max_size_gb = getattr(self.settings, 'MAXIMUM_MOVIE_SIZE_GB', 0)
+
                 if estimated_size_gb < min_size_gb:
                     self.logger.info(f"   ❌ Película muy pequeña: {estimated_size_gb:.1f}GB < {min_size_gb}GB mínimo")
                     return False
-                else:
-                    self.logger.info(f"   ✅ Tamaño de película aceptable: {estimated_size_gb:.1f}GB >= {min_size_gb}GB")
+                if max_size_gb and estimated_size_gb > max_size_gb:
+                    self.logger.info(f"   ❌ Película demasiado grande: {estimated_size_gb:.1f}GB > {max_size_gb}GB máximo")
+                    return False
+                self.logger.info(f"   ✅ Tamaño de película estimado aceptable: {estimated_size_gb:.1f}GB")
             
             self.logger.info(f"✅ Contenido pasa todos los filtros: {item['title'][:50]}...")
             return True
@@ -332,10 +338,11 @@ class ContentScanner:
     def _estimate_movie_size_from_quality(self, quality_text):
         """
         Estima el tamaño de una película basándose en la calidad
+        ACTUALIZADO: Estimaciones más conservadoras para evitar descargas < 4GB
         """
         quality_lower = quality_text.lower()
         
-        # Patrones de tamaño por calidad
+        # Patrones de tamaño por calidad - ESTIMACIONES MÁS CONSERVADORAS
         if '2160p' in quality_lower or '4k' in quality_lower:
             if 'remux' in quality_lower or 'bdremux' in quality_lower:
                 return 50.0  # 4K Remux muy grande
@@ -349,11 +356,12 @@ class ContentScanner:
             elif 'bluray' in quality_lower or 'bdrip' in quality_lower:
                 return 8.0   # 1080p BluRay
             else:
-                return 4.0   # 1080p comprimido
+                # CAMBIO CRÍTICO: Estimación más conservadora para 1080p comprimido
+                return 5.0   # 1080p comprimido - ESTIMACIÓN MÁS CONSERVADORA (era 3.0)
         elif '720p' in quality_lower:
-            return 2.0
+            return 2.5   # Aumentado de 2.0 a 2.5
         else:
-            return 1.5  # Calidad desconocida, asumir pequeña
+            return 2.0   # Calidad desconocida, estimación más conservadora (era 1.5)
     
     def _is_movie(self, item):
         """
@@ -512,7 +520,10 @@ class ContentScanner:
                 return False
             
             title_lower = title.lower()
+            max_depth = getattr(self.settings, 'LIBRARY_SEARCH_MAX_DEPTH', 2)
+            video_exts = {'.mkv', '.mp4', '.avi', '.mov', '.m4v'}
             
+            # Búsqueda directa en carpetas de primer nivel
             for item in directory.iterdir():
                 if item.is_dir():
                     item_name_lower = item.name.lower()
@@ -520,7 +531,28 @@ class ContentScanner:
                     if self._titles_are_similar(title_lower, item_name_lower):
                         return True
             
-            return False
+            # Recorrer subdirectorios y comprobar archivos de vídeo
+            def walk(dir_path, depth):
+                if depth > max_depth:
+                    return False
+                for entry in dir_path.iterdir():
+                    try:
+                        if entry.is_dir():
+                            entry_name_lower = entry.name.lower()
+                            if self._titles_are_similar(title_lower, entry_name_lower):
+                                return True
+                            if walk(entry, depth + 1):
+                                return True
+                        else:
+                            if entry.suffix.lower() in video_exts:
+                                file_name_lower = entry.stem.lower()
+                                if self._titles_are_similar(title_lower, file_name_lower):
+                                    return True
+                    except Exception:
+                        continue
+                return False
+            
+            return walk(directory, 1)
             
         except Exception as e:
             self.logger.warning(f"Error buscando en directorio {directory}: {e}")
@@ -529,6 +561,7 @@ class ContentScanner:
     def _titles_are_similar(self, title1, title2):
         """
         Verifica si dos títulos son similares
+        MEJORADO: Comparación más estricta para evitar falsos positivos
         
         Args:
             title1: Primer título
@@ -537,21 +570,39 @@ class ContentScanner:
         Returns:
             bool: True si son similares
         """
-        # Normalizar títulos
-        t1 = re.sub(r'[^\w\s]', '', title1.lower())
-        t2 = re.sub(r'[^\w\s]', '', title2.lower())
+        # Normalizar títulos (eliminar acentos y puntuación)
+        import unicodedata
+        def normalize(text):
+            text_no_accents = ''.join(ch for ch in unicodedata.normalize('NFD', text) if unicodedata.category(ch) != 'Mn')
+            return re.sub(r'[^\w\s]', '', text_no_accents.lower())
         
-        # Verificar si uno contiene al otro (al menos 70% de coincidencia)
-        words1 = set(t1.split())
-        words2 = set(t2.split())
+        t1 = normalize(title1)
+        t2 = normalize(title2)
+        
+        # MEJORA 1: Verificar coincidencia exacta primero
+        if t1 == t2:
+            return True
+        
+        # MEJORA 2: Verificar si uno está completamente contenido en el otro
+        if t1 in t2 or t2 in t1:
+            return True
+        
+        # MEJORA 3: Comparación por palabras con umbral más estricto
+        words1 = set(word for word in t1.split() if len(word) > 2)  # Ignorar palabras muy cortas
+        words2 = set(word for word in t2.split() if len(word) > 2)
         
         if not words1 or not words2:
             return False
         
         intersection = words1.intersection(words2)
+        # CAMBIO CRÍTICO: Umbral más estricto (85% en lugar de 70%)
         similarity = len(intersection) / min(len(words1), len(words2))
         
-        return similarity >= 0.7
+        # MEJORA 4: Logging para debug
+        if similarity >= 0.7:  # Log cuando hay similitud alta pero no suficiente
+            self.logger.debug(f"   🔍 Similitud {similarity:.2f}: '{title1}' vs '{title2}'")
+        
+        return similarity >= 0.85  # Umbral más estricto
     
     def process_new_content(self, content_items):
         """
@@ -621,16 +672,33 @@ class ContentScanner:
             for section, score, quality_text in quality_sections:
                 self.logger.info(f"   🎯 Procesando calidad: {quality_text}")
                 
-                # Verificar tamaño mínimo para películas antes de procesar
+                # Verificar tamaño para películas usando tamaño REAL del HTML (tabla T2)
                 if self._is_movie(item):
-                    estimated_size_gb = self._estimate_movie_size_from_quality(quality_text)
-                    min_size_gb = self.settings.MINIMUM_MOVIE_SIZE_GB
+                    reference_size_mb = self._calculate_average_file_size(section)
+                    size_gb_real = (reference_size_mb / 1024.0) if reference_size_mb and reference_size_mb > 0 else None
                     
-                    if estimated_size_gb < min_size_gb:
-                        self.logger.warning(f"   🚫 Película rechazada por tamaño insuficiente: {estimated_size_gb:.1f}GB < {min_size_gb}GB")
-                        continue  # Probar siguiente calidad
+                    min_size_gb = self.settings.MINIMUM_MOVIE_SIZE_GB
+                    max_size_gb = getattr(self.settings, 'MAXIMUM_MOVIE_SIZE_GB', 0)
+
+                    # USAR TAMAÑO REAL DEL HTML - No más estimaciones
+                    if size_gb_real is not None and size_gb_real > 0:
+                        # Aplicar filtros de tamaño usando el tamaño real extraído del HTML
+                        if size_gb_real < min_size_gb:
+                            self.logger.warning(f"   🚫 Película rechazada por tamaño insuficiente: {size_gb_real:.2f}GB < {min_size_gb}GB (tamaño real del HTML)")
+                            continue  # Probar siguiente calidad
+
+                        if max_size_gb and max_size_gb > 0 and size_gb_real > max_size_gb:
+                            self.logger.warning(f"   🚫 Película rechazada por tamaño superior al máximo: {size_gb_real:.2f}GB > {max_size_gb}GB (tamaño real del HTML)")
+                            continue  # Probar siguiente calidad
+
+                        self.logger.info(f"   ✅ Tamaño de película aceptable: {size_gb_real:.2f}GB (tamaño real del HTML)")
                     else:
-                        self.logger.info(f"   ✅ Tamaño de película aceptable: {estimated_size_gb:.1f}GB >= {min_size_gb}GB")
+                        # Si no se puede extraer el tamaño real del HTML, usar estimación como fallback
+                        size_gb_estimated = self._estimate_movie_size_from_quality(quality_text)
+                        if size_gb_estimated < min_size_gb:
+                            self.logger.warning(f"   🚫 Película rechazada por tamaño estimado insuficiente: {size_gb_estimated:.1f}GB < {min_size_gb}GB (fallback)")
+                            continue
+                        self.logger.info(f"   ⚠️ Usando tamaño estimado (no se pudo extraer del HTML): {size_gb_estimated:.1f}GB")
                 
                 ed2k_links = self._process_content_quality_section(section, quality_text)
                 
@@ -667,6 +735,120 @@ class ContentScanner:
         quality_sections.sort(key=lambda x: x[1], reverse=True)
         
         return quality_sections
+
+    def _calculate_average_file_size(self, table):
+        """
+        Calcula un tamaño de referencia (MB) a partir de la tabla T2 asociada a una calidad.
+        Para contenido multi-archivo, prioriza el primer archivo y añade el resto con menor peso.
+        """
+        file_sizes = []
+        try:
+            rows = table.find_all('tr')
+            if not rows:
+                return 0
+            # Saltar cabecera si la primera fila no contiene enlaces
+            data_rows = rows[1:] if len(rows) > 1 else rows
+
+            if not data_rows:
+                return 0
+
+            first_row = data_rows[0]
+            first_size_mb = self._extract_file_size_from_row(first_row)
+            if first_size_mb > 0:
+                file_sizes.append(first_size_mb)
+                for row in data_rows[1:]:
+                    size_mb = self._extract_file_size_from_row(row)
+                    if size_mb > 0:
+                        file_sizes.append(size_mb * 0.3)
+            else:
+                # No se pudo extraer el tamaño del primer archivo, intentar con todos
+                for row in data_rows:
+                    size_mb = self._extract_file_size_from_row(row)
+                    if size_mb > 0:
+                        file_sizes.append(size_mb)
+
+            # Si no hay tamaños, estimar por nombre del primer archivo
+            if not file_sizes and data_rows:
+                file_link = data_rows[0].find('a')
+                if file_link:
+                    filename = file_link.get_text(strip=True)
+                    estimated_size = self._estimate_size_from_filename(filename)
+                    if estimated_size > 0:
+                        file_sizes.append(estimated_size)
+
+            return sum(file_sizes) / len(file_sizes) if file_sizes else 0
+        except Exception:
+            return 0
+
+    def _extract_file_size_from_row(self, row):
+        """
+        Extrae el tamaño del archivo (MB) desde una fila de la tabla T2.
+        Busca específicamente en la columna de tamaño (class="SIZE").
+        """
+        try:
+            # Buscar primero celdas con class="SIZE"
+            size_cells = row.find_all('td', class_='SIZE')
+            if size_cells:
+                # La primera celda SIZE debería ser el tamaño del archivo
+                for cell in size_cells:
+                    text = cell.get_text(strip=True)
+                    size_mb = self._parse_file_size(text)
+                    if size_mb > 0:
+                        self.logger.debug(f"Tamaño extraído de celda SIZE: {text} -> {size_mb} MB")
+                        return size_mb
+            
+            # Fallback: buscar en todas las celdas
+            cells = row.find_all('td')
+            for cell in cells:
+                text = cell.get_text(strip=True)
+                size_mb = self._parse_file_size(text)
+                if size_mb > 0:
+                    self.logger.debug(f"Tamaño extraído de celda genérica: {text} -> {size_mb} MB")
+                    return size_mb
+        except Exception as e:
+            self.logger.debug(f"Error extrayendo tamaño de fila: {e}")
+        return 0
+
+    def _parse_file_size(self, size_text):
+        """
+        Convierte un texto de tamaño (GB/MB/KB) a MB.
+        Maneja tanto formato español (coma decimal) como inglés (punto decimal).
+        """
+        try:
+            # Normalizar el texto: reemplazar comas por puntos para el parsing
+            normalized_text = size_text.replace(',', '.')
+            
+            # Buscar patrón de número seguido de unidad
+            match = re.search(r'(\d+(?:\.\d+)?)\s*(?:&nbsp;)?\s*(GB|MB|KB)', normalized_text, flags=re.IGNORECASE)
+            if match:
+                value = float(match.group(1))
+                unit = match.group(2).upper()
+                if unit == 'GB':
+                    return value * 1024  # Convertir GB a MB
+                if unit == 'MB':
+                    return value
+                if unit == 'KB':
+                    return value / 1024  # Convertir KB a MB
+        except Exception as e:
+            self.logger.debug(f"Error parseando tamaño '{size_text}': {e}")
+        return 0
+
+    def _estimate_size_from_filename(self, filename):
+        """
+        Estima tamaño (MB) basándose en nombre y calidad.
+        """
+        name = filename.lower()
+        if '2160p' in name or '4k' in name:
+            if 'x265' in name or 'hevc' in name:
+                return 8000
+            return 15000
+        if '1080p' in name:
+            if 'x265' in name or 'hevc' in name:
+                return 1500
+            return 2500
+        if '720p' in name:
+            return 1000
+        return 800
     
     def _calculate_quality_score(self, quality_text):
         """

@@ -2,7 +2,9 @@ import sys
 from PyQt6.QtWidgets import QApplication
 from ui.main_window import MainWindow
 from core.database.db_manager import DatabaseManager
+from config.settings import Settings
 from utils.logger import setup_logger
+from utils.db_backup import backup_sqlite_db
 
 def main():
     # Configurar logger
@@ -10,6 +12,9 @@ def main():
     logger.info("Iniciando Series Manager...")
     
     # Inicializar base de datos
+    backup_path = backup_sqlite_db(Settings.DB_PATH)
+    if backup_path:
+        logger.info(f"Backup DB creado: {backup_path}")
     db = DatabaseManager()
     db.initialize_database()
     

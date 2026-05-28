@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (
     QListWidgetItem
 )
 from PyQt6.QtCore import pyqtSignal
-from config.settings import Settings
+from config.settings import Settings, ENV_PATH
 import logging
 
 class SettingsWidget(QWidget):
@@ -585,7 +585,7 @@ class SettingsWidget(QWidget):
             # Leer configuración actual para preservar las rutas ya guardadas
             current_settings = {}
             try:
-                with open('.env', 'r') as f:
+                with open(ENV_PATH, 'r', encoding='utf-8') as f:
                     for line in f:
                         if '=' in line and not line.strip().startswith('#'):
                             key, value = line.strip().split('=', 1)
