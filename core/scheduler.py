@@ -913,12 +913,14 @@ class Scheduler(BackgroundJob):
             self.logger.error(f"Error en scan_wolfmax_categories: {e}")
             self._log(f"   ⚠️ Error en wolfmax category scan: {e}")
 
-    def scan_missing_resolutions(self, batch_size=300):
+    def scan_missing_resolutions(self, batch_size=1200, workers=4):
         """
-        Detecta la resolución real (con pymediainfo) de los episodios que
-        el parser de nombre no pudo clasificar. Procesa hasta `batch_size`
-        archivos por ciclo para no bloquear el scheduler demasiado tiempo.
+        Detecta la calidad real (MediaInfo: resolución, códec, HDR) de los
+        episodios cuyo nombre de archivo no la dice. Leer cada archivo por la
+        red tarda ~1-2 s: se leen varios a la vez, en tandas por ciclo.
         """
+        from concurrent.futures import ThreadPoolExecutor
+
         try:
             episodes = self.db.get_episodes_missing_resolution(limit=batch_size)
             if not episodes:
@@ -926,19 +928,26 @@ class Scheduler(BackgroundJob):
                 return
 
             self._log(
-                f"   🔬 Detectando resolución de {len(episodes)} archivo(s) con MediaInfo..."
+                f"   🔬 Detectando calidad de {len(episodes)} episodio(s) con MediaInfo..."
             )
             resolved = []
             failed_ids = []
-            for ep in episodes:
-                if not self.running:
-                    break
-                result = detect_resolution_from_file(ep['file_path'])
-                if result:
-                    resolved.append({'id': ep['id'], **result})
-                else:
-                    failed_ids.append(ep['id'])
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [(ep, pool.submit(detect_resolution_from_file, ep['file_path'])) for ep in episodes]
+                for ep, future in futures:
+                    if not self.running:
+                        pool.shutdown(cancel_futures=True)
+                        break
+                    try:
+                        result = future.result()
+                    except Exception:
+                        result = None
+                    if result:
+                        resolved.append({'id': ep['id'], **result})
+                    else:
+                        failed_ids.append(ep['id'])
 
+            # Las escrituras van en este hilo: la conexión SQLite es por hilo.
             if resolved:
                 self.db.batch_update_episode_resolutions(resolved)
             if failed_ids:
@@ -947,7 +956,7 @@ class Scheduler(BackgroundJob):
             pending = self.db.get_episodes_missing_resolution(limit=1)
             self._log(
                 f"   ✅ Resueltos: {len(resolved)} | No leíbles: {len(failed_ids)} | "
-                f"Pendientes: {'0' if not pending else 'más de 300'}"
+                f"Pendientes: {'0' if not pending else 'quedan más para el próximo ciclo'}"
             )
         except Exception as e:
             self.logger.error(f"Error en scan_missing_resolutions: {e}")
@@ -998,11 +1007,16 @@ class Scheduler(BackgroundJob):
             # serie con un episodio en 4K y el resto en 1080p también mejore.
             # Si aún no se conoce la resolución real (pendiente de
             # scan_missing_resolutions) no se evalúa: no hay con qué comparar.
+            profile = self.source_arbitration_service.profile
             for series in self.db.get_series_with_local_resolution_and_any_offer(self.db.get_episodic_categories()):
-                if series.get('min_local_resolution') is None:
+                known = [
+                    quality_from_local_episode(ep) for ep in self.db.get_local_episodes(series['id'])
+                    if ep.get('resolution_height')
+                ]
+                if not known:
                     continue
-                local = quality_from_local_episode({'resolution_height': series['min_local_resolution'], 'codec': None})
-                candidates.append((series, local))
+                # El peor episodio según el perfil (resolución, códec y HDR reales).
+                candidates.append((series, min(known, key=profile.rank)))
             # Películas, documentales, conciertos: la calidad medida del archivo.
             for item in self.item_quality_repository.upgrade_candidates(Settings.get_single_file_categories()):
                 local = quality_from_local_episode(item)

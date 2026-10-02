@@ -10,6 +10,26 @@ from config.settings import Settings
 from core.discovery.repository import ensure_placeholder_column
 
 
+def _keep_measured_quality(episode: dict, previous: dict | None) -> dict:
+    """Si el archivo es el mismo que en el escaneo anterior (misma ruta y
+    tamaño), conserva la calidad ya medida en vez de la deducida del nombre.
+    Si cambió de tamaño (sustituido, p. ej. por una mejora con el mismo
+    nombre) se descarta para que se vuelva a medir."""
+    if not previous:
+        return episode
+    old_size, new_size = previous.get('size_mb'), episode.get('size_mb')
+    if old_size is not None and new_size is not None and abs(old_size - new_size) > 0.01:
+        return episode
+    merged = dict(episode)
+    for key in ('resolution_height', 'codec', 'hdr'):
+        if previous.get(key) is not None:
+            merged[key] = previous[key]
+    if previous.get('resolution_height') is not None or previous.get('quality_rank') == -1:
+        # -1 = MediaInfo no pudo leerlo: no reintentarlo en cada ciclo.
+        merged['quality_rank'] = previous.get('quality_rank')
+    return merged
+
+
 class DatabaseManager:
     # DB_PATH suele ser una ruta de red (UNC). Cada QRunnable de
     # ui/workers/background_tasks.py crea su propio DatabaseManager y lo
@@ -1253,6 +1273,19 @@ class DatabaseManager:
         cursor = conn.cursor()
         
         try:
+            # La calidad medida con MediaInfo (scan_missing_resolutions) no se
+            # puede deducir del nombre del archivo: se recuerda antes de borrar
+            # para no perderla en cada escaneo. Antes se perdía siempre, y solo
+            # se conocía la calidad de los archivos que la llevan en el nombre.
+            measured = {
+                row['file_path'].lower(): dict(row)
+                for row in cursor.execute(
+                    'SELECT file_path, size_mb, resolution_height, codec, hdr, quality_rank '
+                    'FROM local_episodes WHERE series_id = ?',
+                    (series_id,),
+                ).fetchall()
+            }
+
             # Primero limpiar episodios existentes para esta serie
             cursor.execute('DELETE FROM local_episodes WHERE series_id = ?', (series_id,))
             
@@ -1276,6 +1309,7 @@ class DatabaseManager:
             
             # Insertar episodios únicos
             for episode in unique_episodes.values():
+                episode = _keep_measured_quality(episode, measured.get(str(episode['file_path']).lower()))
                 cursor.execute('''
                     INSERT INTO local_episodes
                     (series_id, season, episode, filename, file_path, resolution_height, codec, source, size_mb, quality_rank, hdr)
