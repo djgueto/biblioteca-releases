@@ -194,6 +194,22 @@ table.list tr.click:hover td { background: var(--bg-hover); }
 .pill.bad { background: rgba(242, 85, 90, .14); color: var(--bad); }
 .pill.accent { background: rgba(245, 185, 66, .15); color: var(--accent); }
 
+/* ---------- forms ---------- */
+.form { padding: 18px; display: grid; gap: 16px; }
+.field { display: grid; gap: 6px; }
+.field > span { font-weight: 600; font-size: 13px; }
+.field small { font-size: 12px; }
+.input {
+  background: var(--bg-elev-2); border: 1px solid var(--line); color: var(--text);
+  border-radius: var(--radius-sm); padding: 9px 12px; font: inherit; width: 100%;
+}
+.input.mono { font-family: var(--mono); font-size: 13px; }
+.input:focus { outline: 2px solid rgba(245, 185, 66, .45); outline-offset: 1px; }
+.check { display: flex; align-items: center; gap: 10px; font-weight: 600; cursor: pointer; }
+.check input { width: 16px; height: 16px; accent-color: var(--accent); }
+.inline-edit { display: flex; gap: 8px; margin-top: 10px; max-width: 640px; }
+.overview { color: var(--text-dim); max-width: 760px; margin: 0 0 14px; line-height: 1.6; }
+
 /* ---------- activity ---------- */
 .jobs { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
 .job { padding: 18px; }

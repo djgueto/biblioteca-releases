@@ -29,7 +29,9 @@ from core.download_clients import ED2K, TORRENT, build_download_dispatcher
 from core.library.roots import LibraryRoots, sync_library_roots
 from core.repositories import DecisionLogRepository, LibraryRepository, SeriesRepository, SourceOfferRepository
 from core.repositories.grab_history_repository import GrabHistoryRepository
+from core.services.factory import build_domain_services
 from core.services.quality_profile import TIERS, QualityProfile
+from core.tmdb.metadata import TmdbMetadataService, image_url
 from web.jobs import JobAlreadyRunning, JobManager
 
 logger = logging.getLogger(__name__)
@@ -45,6 +47,44 @@ class MonitoredUpdate(BaseModel):
 class QualityProfileUpdate(BaseModel):
     order: list[str]
     minimum: str
+
+
+class GeneralSettingsUpdate(BaseModel):
+    tmdb_api_key: str | None = None
+    omdb_api_key: str | None = None
+    wolfmax_enabled: bool | None = None
+    dontorrent_enabled: bool | None = None
+    dontorrent_url: str | None = None
+    torrent_watch_dir: str | None = None
+
+
+class HispashareUrlUpdate(BaseModel):
+    url: str | None = None
+
+
+def _mask(secret: str) -> str:
+    """Las claves nunca salen enteras hacia el navegador."""
+    secret = secret or ""
+    return f"••••••{secret[-4:]}" if len(secret) > 4 else ("••••" if secret else "")
+
+
+def _tmdb_key_works(key: str) -> bool:
+    import requests
+
+    try:
+        return requests.get("https://api.themoviedb.org/3/configuration", params={"api_key": key}, timeout=10).status_code == 200
+    except requests.RequestException:
+        return False
+
+
+def _omdb_key_works(key: str) -> bool:
+    import requests
+
+    try:
+        r = requests.get("https://www.omdbapi.com/", params={"apikey": key, "i": "tt0133093"}, timeout=10)
+        return r.status_code == 200 and r.json().get("Response") == "True"
+    except (requests.RequestException, ValueError):
+        return False
 
 
 class _LibraryCache:
@@ -141,18 +181,37 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
         item["offers"] = [_serialize_offer(o) for o in SourceOfferRepository(db).get_all_for_series(series_id)]
         item["history"] = DecisionLogRepository(db).list_for_series(series_id, limit=30)
         item["grabs"] = GrabHistoryRepository(db).list_for_series(series_id)
+        meta = TmdbMetadataService(db).for_item(item) if item.get("tmdb_id") else None
+        item["tmdb"] = {
+            "overview": meta.get("overview"),
+            "vote_average": meta.get("vote_average"),
+            "vote_count": meta.get("vote_count"),
+            "imdb_id": meta.get("imdb_id"),
+            "backdrop_url": image_url(meta.get("backdrop_path"), "w1280"),
+            "release_date": meta.get("release_date"),
+        } if meta else None
         return item
 
     @app.get("/api/series/{series_id}/cover")
     def series_cover(series_id: int):
         db = DatabaseManager()
-        repo = LibraryRepository(db)
         item = db.get_series_by_id(series_id)
-        cover_url = repo.cover_url(dict(item)) if item else ""
-        data = get_cover_bytes(series_id, cover_url) if cover_url else None
-        if not data:
-            raise HTTPException(404, "Sin carátula")
-        return Response(data, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=86400"})
+        if not item:
+            raise HTTPException(404, "No existe")
+        item = dict(item)
+        # Orden: cartel de TMDB en español/inglés/sin texto, la carátula de
+        # Hispashare, y solo si no hay otra cosa el de TMDB en otro idioma.
+        meta = (TmdbMetadataService(db).for_item(item) if item.get("tmdb_id") else None) or {}
+        candidates = [
+            image_url(meta.get("poster_path"), "w342"),
+            LibraryRepository(db).cover_url(item),
+            image_url(meta.get("poster_other_language"), "w342"),
+        ]
+        for cover_url in filter(None, candidates):
+            data = get_cover_bytes(series_id, cover_url)
+            if data:
+                return Response(data, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=86400"})
+        raise HTTPException(404, "Sin carátula")
 
     @app.put("/api/series/{series_id}/monitored")
     def set_monitored(series_id: int, body: MonitoredUpdate):
@@ -200,6 +259,65 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
             ],
             "check_interval_hours": Settings.CHECK_INTERVAL_HOURS,
         }
+
+    @app.get("/api/settings/general")
+    def get_general_settings():
+        return {
+            "tmdb_api_key": _mask(Settings.TMDB_API_KEY),
+            "omdb_api_key": _mask(Settings.OMDB_API_KEY),
+            "wolfmax_enabled": bool(getattr(Settings, "WOLFMAX_UPGRADE_ENABLED", False)),
+            "dontorrent_enabled": Settings.DONTORRENT_ENABLED,
+            "dontorrent_url": Settings.DONTORRENT_URL,
+            "torrent_watch_dir": Settings.get_torrent_watch_dir(),
+        }
+
+    @app.put("/api/settings/general")
+    def put_general_settings(body: GeneralSettingsUpdate):
+        values = {}
+        if body.tmdb_api_key is not None and body.tmdb_api_key.strip() != _mask(Settings.TMDB_API_KEY):
+            key = body.tmdb_api_key.strip()
+            if key and not _tmdb_key_works(key):
+                raise HTTPException(422, "TMDB rechaza esa API key")
+            values["TMDB_API_KEY"] = key
+        if body.omdb_api_key is not None and body.omdb_api_key.strip() != _mask(Settings.OMDB_API_KEY):
+            key = body.omdb_api_key.strip()
+            if key and not _omdb_key_works(key):
+                raise HTTPException(422, "OMDb (IMDb) rechaza esa API key")
+            values["OMDB_API_KEY"] = key
+        if body.wolfmax_enabled is not None:
+            values["WOLFMAX_UPGRADE_ENABLED"] = body.wolfmax_enabled
+        if body.dontorrent_enabled is not None:
+            values["DONTORRENT_ENABLED"] = body.dontorrent_enabled
+        if body.dontorrent_url is not None:
+            url = body.dontorrent_url.strip().rstrip("/")
+            if not url.startswith(("http://", "https://")):
+                raise HTTPException(422, "La dirección de DonTorrent debe empezar por https://")
+            values["DONTORRENT_URL"] = url
+        if body.torrent_watch_dir is not None:
+            values["TORRENT_WATCH_DIR"] = body.torrent_watch_dir.strip()
+        if values:
+            Settings.update_env(values)
+        return get_general_settings()
+
+    @app.put("/api/series/{series_id}/hispashare_url")
+    def set_hispashare_url(series_id: int, body: HispashareUrlUpdate):
+        url = (body.url or "").strip()
+        if url and not url.startswith(("http://", "https://")):
+            raise HTTPException(422, "El enlace debe empezar por https://")
+        db = DatabaseManager()
+        if not db.get_series_by_id(series_id):
+            raise HTTPException(404, "No existe")
+        # Mismo camino que la edición manual del escritorio (ManualUpdateTask).
+        services = build_domain_services(db)
+        changes = {"hispashare_url": url or None}
+        saved = services["series_repository"].save_manual_changes(series_id, changes, recalculate_missing=False)
+        services["reconciliation_service"].on_manual_update(
+            series_id, saved.get("previous_item") or {}, saved.get("updated_item") or {}, changes,
+            is_library=Settings.get_category_content_mode(
+                (saved.get("updated_item") or {}).get("content_category")) == "single_file",
+        )
+        library_cache.invalidate()
+        return {"id": series_id, "hispashare_url": url or None}
 
     @app.get("/api/settings/quality")
     def get_quality_profile():

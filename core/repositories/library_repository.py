@@ -110,7 +110,7 @@ class LibraryRepository:
         category = item.get("content_category")
         item["category_label"] = Settings.get_category_label(category)
         item["content_mode"] = Settings.get_category_content_mode(category)
-        item["has_cover"] = bool(self.cover_url(item))
+        item["has_cover"] = bool(item.get("tmdb_id")) or bool(self.cover_url(item))
         item["providers"] = sorted(set((item.get("providers") or "").split(",")) - {""})
         if item.get("hispashare_url") and "hispashare" not in item["providers"]:
             item["providers"].append("hispashare")

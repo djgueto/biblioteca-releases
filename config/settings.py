@@ -16,6 +16,9 @@ def _resolve_path(value: str) -> str:
 class Settings:
     # APIs
     TMDB_API_KEY = os.getenv("TMDB_API_KEY", "")
+    # IMDb no tiene API pública: OMDb (omdbapi.com) da sus notas con una clave
+    # gratuita. Sin clave se usan los datos oficiales de IMDb (descarga diaria).
+    OMDB_API_KEY = os.getenv("OMDB_API_KEY", "")
     
     # Hispashare
     HISPASHARE_USER = os.getenv("HISPASHARE_USER", "")
@@ -320,11 +323,30 @@ class Settings:
         return errors
     
     @classmethod
+    def update_env(cls, values: dict):
+        """Cambia solo estas claves en el .env (el resto se conserva tal cual)
+        y las aplica en memoria. Los booleanos se guardan como True/False."""
+        from dotenv import set_key
+
+        ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
+        ENV_PATH.touch(exist_ok=True)
+        for key, value in values.items():
+            text = str(value) if not isinstance(value, bool) else ("True" if value else "False")
+            set_key(str(ENV_PATH), key, text, quote_mode="never")
+            os.environ[key] = text
+            setattr(cls, key, value)
+
+    @classmethod
     def save_settings(cls, settings_dict):
-        """Guarda configuración en archivo .env"""
-        with open(ENV_PATH, 'w', encoding='utf-8') as f:
-            for key, value in settings_dict.items():
-                f.write(f"{key}={value}\n")
+        """Guarda configuración en el .env actualizando solo estas claves: las
+        que no conoce quien llama (ajustes añadidos desde la web, DonTorrent,
+        carpeta vigilada...) se conservan en vez de borrarse."""
+        from dotenv import set_key
+
+        ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
+        ENV_PATH.touch(exist_ok=True)
+        for key, value in settings_dict.items():
+            set_key(str(ENV_PATH), key, str(value), quote_mode="never")
     
     @classmethod
     def save_series_paths(cls, paths_list):

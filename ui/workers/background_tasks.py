@@ -4,57 +4,11 @@ from PyQt6.QtCore import QObject, QRunnable, pyqtSignal
 
 from config.settings import Settings
 from core.database.db_manager import DatabaseManager
-from core.events import EventBus
 from core.library.scanner import LibraryScanner
 from core.library.category_scanner import CategoryLibraryScanner
-from core.repositories import (
-    DecisionLogRepository,
-    SeriesRepository,
-    SourceOfferRepository,
-    SourceRepository,
-)
-from core.services import (
-    MissingEpisodesService,
-    ReconciliationService,
-    SourceMatchService,
-)
+from core.services.factory import build_domain_services as _build_domain_services
 from core.tmdb.api_client import TMDBClient
 from core.tmdb.auto_matcher import TMDBAutoMatcher
-
-
-def _build_domain_services(db):
-    series_repository = SeriesRepository(db)
-    source_repository = SourceRepository(db)
-    source_offer_repository = SourceOfferRepository(db)
-    decision_log_repository = DecisionLogRepository(db)
-    missing_episodes_service = MissingEpisodesService(
-        db,
-        series_repository,
-        decision_log_repository,
-    )
-    source_match_service = SourceMatchService(
-        db,
-        source_repository,
-        decision_log_repository,
-    )
-    reconciliation_service = ReconciliationService(
-        series_repository,
-        source_repository,
-        missing_episodes_service,
-        source_match_service,
-        decision_log_repository,
-        event_bus=EventBus(),
-        source_offer_repository=source_offer_repository,
-    )
-    return {
-        "series_repository": series_repository,
-        "source_repository": source_repository,
-        "source_offer_repository": source_offer_repository,
-        "decision_log_repository": decision_log_repository,
-        "missing_episodes_service": missing_episodes_service,
-        "source_match_service": source_match_service,
-        "reconciliation_service": reconciliation_service,
-    }
 
 
 class BackgroundTaskSignals(QObject):

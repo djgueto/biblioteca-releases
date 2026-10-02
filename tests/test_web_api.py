@@ -89,6 +89,8 @@ class TestWebApi(unittest.TestCase):
         self.patches = [
             patch.object(Settings, "DB_PATH", self.db_path),
             patch.object(Settings, "COVER_CACHE_DIR", os.path.join(self.tmp.name, "covers")),
+            # Nunca llamar a TMDB de verdad desde los tests.
+            patch.object(Settings, "TMDB_API_KEY", ""),
         ]
         for p in self.patches:
             p.start()
@@ -201,6 +203,54 @@ class TestWebApi(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["order"], order)
         self.assertEqual(self.client.put("/api/settings/quality", json={"order": ["2160p"], "minimum": "sd"}).status_code, 422)
+
+    def test_general_settings_write_only_changed_keys(self):
+        import config.settings as settings_module
+
+        env = Path(self.tmp.name) / "test.env"
+        env.write_text("# mi config\nTMDB_API_KEY=abcdef123456\nOTRA=1\n", encoding="utf-8")
+        with patch.object(settings_module, "ENV_PATH", env), \
+                patch.object(Settings, "TMDB_API_KEY", "abcdef123456"), \
+                patch.object(Settings, "DONTORRENT_URL", "https://dontorrent.moi"), \
+                patch.object(Settings, "DONTORRENT_ENABLED", False), \
+                patch.dict(os.environ, {}, clear=False):
+            data = self.client.get("/api/settings/general").json()
+            self.assertEqual(data["tmdb_api_key"], "••••••3456")  # nunca entera
+            r = self.client.put("/api/settings/general", json={
+                "tmdb_api_key": data["tmdb_api_key"],  # sin tocar
+                "dontorrent_enabled": True, "dontorrent_url": "https://dontorrent.nuevo/"})
+            self.assertEqual(r.status_code, 200)
+            text = env.read_text(encoding="utf-8")
+            self.assertIn("# mi config", text)
+            self.assertIn("TMDB_API_KEY=abcdef123456", text)
+            self.assertIn("DONTORRENT_ENABLED=True", text)
+            self.assertIn("DONTORRENT_URL=https://dontorrent.nuevo", text)
+            self.assertTrue(Settings.DONTORRENT_ENABLED)
+            with patch("web.app._tmdb_key_works", return_value=False):
+                self.assertEqual(self.client.put("/api/settings/general", json={"tmdb_api_key": "mala"}).status_code, 422)
+            self.assertEqual(self.client.put("/api/settings/general", json={"dontorrent_url": "dontorrent.x"}).status_code, 422)
+
+    def test_edit_hispashare_url(self):
+        url = "https://www.hispashare.org/?view=title&id=555"
+        self.assertEqual(self.client.put("/api/series/2/hispashare_url", json={"url": url}).status_code, 200)
+        detail = self.client.get("/api/series/2").json()
+        self.assertEqual(detail["hispashare_url"], url)
+        self.assertEqual(detail["cover_url"], "https://www.hispashare.org/images/titles/555/cover.jpg")
+        self.assertEqual(detail["history"][0]["decision_type"], "source_set_manual")
+        self.client.put("/api/series/2/hispashare_url", json={"url": ""})
+        self.assertFalse(self.client.get("/api/series/2").json()["hispashare_url"])
+        self.assertEqual(self.client.put("/api/series/2/hispashare_url", json={"url": "ftp://x"}).status_code, 422)
+
+    def test_cover_prefers_tmdb_poster(self):
+        from core.tmdb.metadata import TmdbMetaRepository
+
+        TmdbMetaRepository(DatabaseManager()).save({"tmdb_id": 10, "media_type": "tv", "poster_path": "/p.jpg"})
+        with patch("web.app.get_cover_bytes", side_effect=lambda sid, url: b"tmdb" if "image.tmdb.org" in url else b"h") as get:
+            r = self.client.get("/api/series/1/cover")
+        self.assertEqual(r.content, b"tmdb")
+        self.assertEqual(get.call_args.args[1], "https://image.tmdb.org/t/p/w342/p.jpg")
+        with patch("web.app.get_cover_bytes", side_effect=lambda sid, url: None if "tmdb" in url else b"h"):
+            self.assertEqual(self.client.get("/api/series/1/cover").content, b"h")  # respaldo Hispashare
 
     def test_spa_fallback_and_static(self):
         self.assertIn("app.js", self.client.get("/series/1").text)

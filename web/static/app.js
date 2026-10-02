@@ -193,6 +193,7 @@ function Library({ category, query, tick, categories }) {
 function SeriesDetail({ id, tick, toast }) {
   const { data: it, loading, error, reload } = useFetch(`/api/series/${id}`, [tick]);
   const [busy, setBusy] = useState(false);
+  const [editUrl, setEditUrl] = useState(null); // null = no se está editando
   if (loading && !it) return html`<div class="loading"><div class="spinner"></div></div>`;
   if (error) return html`<div class="empty">${error.message}</div>`;
 
@@ -211,9 +212,22 @@ function SeriesDetail({ id, tick, toast }) {
     setBusy(false);
   };
 
+  const saveUrl = async () => {
+    setBusy(true);
+    try {
+      await api.put(`/api/series/${it.id}/hispashare_url`, { url: editUrl.trim() || null });
+      toast(editUrl.trim() ? 'Enlace de Hispashare guardado' : 'Enlace de Hispashare quitado');
+      setEditUrl(null);
+      reload();
+    } catch (e) { toast('Error: ' + e.message); }
+    setBusy(false);
+  };
+  const tmdb = it.tmdb || {};
+  const heroBg = tmdb.backdrop_url || cover;
+
   return html`
     <div class="hero">
-      ${cover && html`<div class="hero-bg" style=${`background-image:url(${cover})`}></div>`}
+      ${heroBg && html`<div class="hero-bg" style=${`background-image:url(${heroBg})${tmdb.backdrop_url ? ';filter:blur(2px) saturate(1.1);opacity:.22' : ''}`}></div>`}
       <div><${Poster} item=${{ ...it, has_cover: !!cover, missing_count: 0, local_count: 0, max_resolution: best }} /></div>
       <div>
         <div class="faint">${it.category_label}</div>
@@ -224,7 +238,10 @@ function SeriesDetail({ id, tick, toast }) {
           ${it.needs_review ? html`<span class="pill" style="background:rgba(167,139,250,.15);color:var(--violet)">Revisar match</span>` : null}
           ${!it.monitored && html`<span class="pill">No vigilado</span>`}
           ${it.search_disabled ? html`<span class="pill bad">Búsqueda desactivada</span>` : null}
+          ${tmdb.vote_average ? html`<span>TMDB <b>${tmdb.vote_average.toFixed(1)}</b> <span class="faint">(${tmdb.vote_count} votos)</span></span>` : null}
+          ${tmdb.imdb_id && html`<a href=${`https://www.imdb.com/title/${tmdb.imdb_id}/`} target="_blank" rel="noopener"><b>IMDb</b> ${tmdb.imdb_id}</a>`}
         </div>
+        ${tmdb.overview && html`<p class="overview">${tmdb.overview}</p>`}
         <div class="path">${it.folder_path}</div>
         ${it.content_mode === 'episodic' && html`
           <div class="stats">
@@ -250,7 +267,16 @@ function SeriesDetail({ id, tick, toast }) {
             <${Icon} d=${it.monitored ? ICONS.eyeoff : ICONS.eye} /> ${it.monitored ? 'Dejar de vigilar' : 'Vigilar'}
           </button>
           ${it.hispashare_url && html`<a class="btn" href=${it.hispashare_url} target="_blank" rel="noopener">Abrir en Hispashare</a>`}
+          ${editUrl === null && html`<button class="btn" onClick=${() => setEditUrl(it.hispashare_url || '')}>${it.hispashare_url ? 'Cambiar enlace de Hispashare' : 'Añadir enlace de Hispashare'}</button>`}
         </div>
+        ${editUrl !== null && html`
+          <div class="inline-edit">
+            <input class="input mono" autofocus value=${editUrl} onInput=${(e) => setEditUrl(e.target.value)}
+              placeholder="https://www.hispashare.org/?view=title&id=…" onKeyDown=${(e) => e.key === 'Enter' && saveUrl()} />
+            <button class="btn primary" disabled=${busy} onClick=${saveUrl}>Guardar</button>
+            <button class="btn" disabled=${busy} onClick=${() => setEditUrl(null)}>Cancelar</button>
+          </div>
+          <div class="faint" style="font-size:12px;margin-top:6px">Déjalo vacío y guarda para quitar el enlace.</div>`}
       </div>
     </div>
 
@@ -477,6 +503,61 @@ function System() {
 }
 
 // ---------------------------------------------------------------- settings
+function Settings({ toast }) {
+  return html`<${GeneralSettings} toast=${toast} /><${QualitySettings} toast=${toast} />`;
+}
+
+function GeneralSettings({ toast }) {
+  const { data, reload } = useFetch('/api/settings/general');
+  const [form, setForm] = useState(null);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => { if (data) setForm({ ...data }); }, [data]);
+  if (!form) return html`<div class="loading"><div class="spinner"></div></div>`;
+  const set = (k) => (e) => setForm({ ...form, [k]: e.target.type === 'checkbox' ? e.target.checked : e.target.value });
+  const dirty = Object.keys(form).some((k) => form[k] !== data[k]);
+  const save = async () => {
+    setSaving(true);
+    try {
+      const changed = Object.fromEntries(Object.entries(form).filter(([k, v]) => v !== data[k]));
+      await api.put('/api/settings/general', changed);
+      toast('Ajustes guardados');
+      reload();
+    } catch (e) { toast('Error: ' + e.message); }
+    setSaving(false);
+  };
+  return html`
+    <div class="section" style="margin-top:0">
+      <h3>Claves de API</h3>
+      <div class="panel form">
+        <label class="field"><span>TMDB API key</span>
+          <input class="input mono" value=${form.tmdb_api_key} onInput=${set('tmdb_api_key')} placeholder="Pega aquí tu clave de themoviedb.org" />
+          <small class="faint">Carátulas, fechas de estreno, notas y episodios. Se comprueba al guardar.</small>
+        </label>
+        <label class="field"><span>IMDb (clave de OMDb)</span>
+          <input class="input mono" value=${form.omdb_api_key} onInput=${set('omdb_api_key')} placeholder="Opcional: clave gratuita de omdbapi.com" />
+          <small class="faint">IMDb no tiene API pública. Sin clave, las notas de IMDb se toman de sus datos oficiales que publica cada día.</small>
+        </label>
+      </div>
+    </div>
+    <div class="section">
+      <h3>Fuentes y descargas</h3>
+      <div class="panel form">
+        <label class="check"><input type="checkbox" checked=${form.wolfmax_enabled} onChange=${set('wolfmax_enabled')} /> Wolfmax4k</label>
+        <label class="check"><input type="checkbox" checked=${form.dontorrent_enabled} onChange=${set('dontorrent_enabled')} /> DonTorrent</label>
+        <label class="field"><span>Dirección de DonTorrent</span>
+          <input class="input mono" value=${form.dontorrent_url} onInput=${set('dontorrent_url')} />
+          <small class="faint">Cambia de dominio a menudo: actualízala aquí cuando ocurra.</small>
+        </label>
+        <label class="field"><span>Carpeta vigilada por el cliente torrent</span>
+          <input class="input mono" value=${form.torrent_watch_dir} onInput=${set('torrent_watch_dir')} />
+        </label>
+      </div>
+      <div class="actions" style="margin-top:14px">
+        <button class="btn primary" disabled=${!dirty || saving} onClick=${save}>${saving ? 'Comprobando…' : 'Guardar'}</button>
+      </div>
+    </div>`;
+}
+
 function QualitySettings({ toast }) {
   const { data, reload } = useFetch('/api/settings/quality');
   const [draft, setDraft] = useState(null);
@@ -504,7 +585,7 @@ function QualitySettings({ toast }) {
   };
 
   return html`
-    <div class="section" style="margin-top:0">
+    <div class="section">
       <h3>Perfil de calidad</h3>
       <p class="dim" style="margin:-4px 0 14px; max-width:720px">
         Da igual la fuente: siempre se descarga la mejor calidad según este orden (arriba = mejor),
@@ -562,7 +643,7 @@ function App() {
   else if (page === 'wanted') body = html`<${Wanted} query=${query} tick=${live.tick} />`;
   else if (page === 'activity') body = html`<${Activity} live=${live} toast=${toast} />`;
   else if (page === 'system') body = html`<${System} />`;
-  else if (page === 'settings') body = html`<${QualitySettings} toast=${toast} />`;
+  else if (page === 'settings') body = html`<${Settings} toast=${toast} />`;
   else body = html`<${Library} category=${arg || 'all'} query=${query} tick=${live.tick} categories=${categories || []} />`;
 
   return html`
