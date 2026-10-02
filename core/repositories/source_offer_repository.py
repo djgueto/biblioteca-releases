@@ -43,6 +43,29 @@ class SourceOfferRepository:
         )
         conn.commit()
 
+    def series_missing_without_offer(self, provider: str, categories: list[str]) -> list[dict]:
+        """Series vigiladas con episodios faltantes y sin oferta de `provider`
+        todavía: las que ese proveedor tiene que buscar."""
+        if not categories:
+            return []
+        placeholders = ",".join("?" for _ in categories)
+        rows = self.db.get_connection().execute(
+            f"""
+            SELECT DISTINCT s.id, s.name, s.tmdb_name, s.year, s.content_category, s.folder_path
+            FROM series s
+            JOIN missing_episodes me ON me.series_id = s.id AND me.status = 'missing'
+            WHERE COALESCE(s.monitored, 1) = 1
+              AND COALESCE(s.needs_review, 0) = 0
+              AND s.content_category IN ({placeholders})
+              AND NOT EXISTS (
+                  SELECT 1 FROM source_offers so WHERE so.series_id = s.id AND so.provider = ?
+              )
+            ORDER BY s.name
+            """,
+            (*categories, provider),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def upsert(self, series_id: int, offer: SourceOffer) -> None:
         conn = self.db.get_connection()
         cursor = conn.cursor()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from config.settings import Settings
 from core.download_clients import DownloadDispatcher, build_download_dispatcher
 from core.services.providers.base import SourceProvider
 from core.services.providers.wolfmax_provider import WolfmaxSourceProvider
@@ -10,6 +11,7 @@ def build_provider_registry(
     *,
     hispashare_driver=None,
     include_wolfmax: bool = True,
+    include_dontorrent: bool | None = None,
     dispatcher: DownloadDispatcher | None = None,
 ) -> dict[str, SourceProvider]:
     """Construye el registro de proveedores activos.
@@ -40,5 +42,20 @@ def build_provider_registry(
         from core.services.providers.hispashare_provider import HispashareSourceProvider
 
         providers["hispashare"] = HispashareSourceProvider(hispashare_driver, db_manager)
+
+    if include_dontorrent is None:
+        include_dontorrent = Settings.DONTORRENT_ENABLED
+    if include_dontorrent:
+        from core.dontorrent.client import DontorrentClient
+        from core.services.providers.dontorrent_provider import DontorrentSourceProvider
+
+        providers["dontorrent"] = DontorrentSourceProvider(
+            db_manager,
+            dispatcher,
+            DontorrentClient(Settings.DONTORRENT_URL),
+            match_threshold=Settings.DONTORRENT_MATCH_THRESHOLD,
+            max_downloads_per_cycle=Settings.DONTORRENT_MAX_DOWNLOADS_PER_CYCLE,
+            retry_days=Settings.GRAB_RETRY_DAYS,
+        )
 
     return providers

@@ -294,6 +294,25 @@ function SeriesDetail({ id, tick, toast }) {
         </div>
       </div>`}
 
+    ${it.grabs.length > 0 && html`
+      <div class="section">
+        <h3>Enviado a descargar</h3>
+        <div class="panel">
+          <table class="list">
+            <thead><tr><th>Fecha</th><th>Episodio</th><th>Proveedor</th><th>Archivo</th></tr></thead>
+            <tbody>
+              ${it.grabs.map((g) => html`
+                <tr>
+                  <td class="faint mono" style="width:150px">${fmtDate(g.created_at)}</td>
+                  <td class="mono">${g.season != null ? `${String(g.season).padStart(2, '0')}x${String(g.episode).padStart(2, '0')}` : '—'}</td>
+                  <td><b>${g.provider}</b></td>
+                  <td class="dim" title=${g.destination}>${g.release_title}</td>
+                </tr>`)}
+            </tbody>
+          </table>
+        </div>
+      </div>`}
+
     ${it.history.length > 0 && html`
       <div class="section">
         <h3>Historial</h3>

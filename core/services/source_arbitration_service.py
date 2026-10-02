@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from core.events.event_types import SOURCE_OFFER_UPDATED
-from core.services.providers.base import SourceOffer, SourceProvider
+from core.services.providers.base import ProviderUnavailable, SourceOffer, SourceProvider
 from core.services.quality import Quality, compare_quality
 
 
@@ -43,6 +43,8 @@ class SourceArbitrationService:
                 continue
             try:
                 fresh = provider.refresh_offer(item, known_offer.source_url)
+            except ProviderUnavailable:
+                continue  # se conserva la oferta conocida tal cual
             except Exception:
                 fresh = None
 

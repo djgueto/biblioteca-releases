@@ -28,6 +28,7 @@ from core.database.db_manager import DatabaseManager
 from core.download_clients import ED2K, TORRENT, build_download_dispatcher
 from core.library.roots import LibraryRoots, sync_library_roots
 from core.repositories import DecisionLogRepository, LibraryRepository, SeriesRepository, SourceOfferRepository
+from core.repositories.grab_history_repository import GrabHistoryRepository
 from web.jobs import JobAlreadyRunning, JobManager
 
 logger = logging.getLogger(__name__)
@@ -133,6 +134,7 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
         item["seasons"] = [seasons[k] for k in sorted(seasons)]
         item["offers"] = [_serialize_offer(o) for o in SourceOfferRepository(db).get_all_for_series(series_id)]
         item["history"] = DecisionLogRepository(db).list_for_series(series_id, limit=30)
+        item["grabs"] = GrabHistoryRepository(db).list_for_series(series_id)
         return item
 
     @app.get("/api/series/{series_id}/cover")
@@ -180,6 +182,8 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
                  "enabled": bool(Settings.HISPASHARE_USER)},
                 {"name": "wolfmax", "label": "Wolfmax4k", "protocol": TORRENT,
                  "enabled": bool(getattr(Settings, "WOLFMAX_UPGRADE_ENABLED", False))},
+                {"name": "dontorrent", "label": f"DonTorrent ({Settings.DONTORRENT_URL})", "protocol": TORRENT,
+                 "enabled": Settings.DONTORRENT_ENABLED},
             ],
             "tmdb_configured": bool(Settings.TMDB_API_KEY),
             "library_paths": LibraryRepository(DatabaseManager()).path_health(),

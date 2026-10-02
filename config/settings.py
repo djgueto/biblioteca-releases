@@ -269,6 +269,14 @@ class Settings:
     WOLFMAX_MAX_DOWNLOADS_PER_CYCLE = int(os.getenv("WOLFMAX_MAX_DOWNLOADS_PER_CYCLE", "2"))
     WOLFMAX_MATCH_THRESHOLD = float(os.getenv("WOLFMAX_MATCH_THRESHOLD", "0.70"))
 
+    # DonTorrent (el dominio cambia: se configura aquí)
+    DONTORRENT_ENABLED = os.getenv("DONTORRENT_ENABLED", "False").lower() == "true"
+    DONTORRENT_URL = os.getenv("DONTORRENT_URL", "https://dontorrent.moi")
+    DONTORRENT_MAX_DOWNLOADS_PER_CYCLE = int(os.getenv("DONTORRENT_MAX_DOWNLOADS_PER_CYCLE", "10"))
+    DONTORRENT_MATCH_THRESHOLD = float(os.getenv("DONTORRENT_MATCH_THRESHOLD", "0.80"))
+    # Días sin volver a pedir un episodio ya enviado al cliente torrent.
+    GRAB_RETRY_DAYS = int(os.getenv("GRAB_RETRY_DAYS", "7"))
+
     # Cliente torrent tipo "blackhole": los .torrent se dejan en esta carpeta
     # y el cliente torrent (vigilándola) se encarga de descargarlos.
     TORRENT_WATCH_DIR = os.getenv("TORRENT_WATCH_DIR", "")

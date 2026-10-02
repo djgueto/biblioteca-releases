@@ -29,7 +29,7 @@ from core.services import (
     SourceArbitrationService,
     SourceMatchService,
 )
-from core.services.providers import build_provider_registry
+from core.services.providers import ProviderUnavailable, build_provider_registry
 from core.services.quality import quality_from_local_episode
 from config.settings import Settings
 
@@ -198,6 +198,13 @@ class Scheduler(BackgroundJob):
             self._log("🔎 Buscando URLs en Hispashare...")
             self.search_hispashare(driver)
             
+            # 8.1. Proveedores sin catálogo propio (DonTorrent): buscar ficha
+            # para las series con faltantes que aún no tienen oferta suya.
+            self._progress(80, "🔎 Buscando en otras fuentes...")
+            self.discover_search_offers()
+            if not self.running:
+                return
+
             # 9. Descargar episodios faltantes
             self._progress(85, "⬇️ Procesando descargas...")
             self._log("⬇️ Procesando descargas de episodios faltantes...")
@@ -602,6 +609,39 @@ class Scheduler(BackgroundJob):
             content_mode='single_file',
             label_prefix=_prefix,
         )
+
+    def discover_search_offers(self):
+        """Pide oferta a los proveedores que buscan bajo demanda (los que no
+        tienen un catálogo que rastrear) para las series con faltantes que
+        aún no tienen una suya. Las que ya la tienen se revisan en
+        refresh_all_offers al procesar descargas."""
+        categories = self.db.get_episodic_categories()
+        for provider in self.providers.values():
+            if not getattr(provider, "discovers_by_search", False):
+                continue
+            pending = self.source_offer_repository.series_missing_without_offer(provider.name, categories)
+            if not pending:
+                continue
+            self._log(f"   🔎 [{provider.name}] {len(pending)} series con faltantes sin ficha todavía")
+            found = 0
+            for series in pending:
+                if not self.running:
+                    return
+                try:
+                    offer = provider.find_candidate(series, content_mode="episodic")
+                except ProviderUnavailable as e:
+                    self._log(f"   ⏸️ [{provider.name}] {e}; se sigue en el próximo ciclo")
+                    break
+                except Exception as e:
+                    self.logger.error(f"[{provider.name}] error buscando '{series['name']}': {e}")
+                    continue
+                if offer is None:
+                    continue
+                self.source_offer_repository.upsert(series["id"], offer)
+                found += 1
+                quality = f"{offer.quality.resolution_height}p" if offer.quality.resolution_height else "?"
+                self._log(f"      ✅ {series.get('tmdb_name') or series['name']} → {offer.title} [{quality}]")
+            self._log(f"   ✅ [{provider.name}] {found}/{len(pending)} series con ficha encontrada")
 
     def process_downloads(self, driver):
         """

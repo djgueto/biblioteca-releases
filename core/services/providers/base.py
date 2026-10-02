@@ -24,6 +24,12 @@ class DownloadHandle:
     payload: dict
 
 
+class ProviderUnavailable(RuntimeError):
+    """El proveedor no puede atender ahora (límite del sitio, caída...).
+    A diferencia de devolver None, no significa que la oferta haya
+    desaparecido: se conserva tal cual y se reintenta en el próximo ciclo."""
+
+
 class SourceProvider(Protocol):
     """Contrato que implementa cada fuente de descarga (Hispashare, Wolfmax,
     y las que se añadan en el futuro). Añadir un proveedor nuevo = una clase
