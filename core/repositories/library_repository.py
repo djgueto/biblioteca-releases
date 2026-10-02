@@ -23,7 +23,7 @@ class LibraryRepository:
             SELECT s.id, s.name, s.tmdb_name, s.tmdb_id, s.year, s.content_category,
                    s.folder_path, s.monitored, s.needs_review, s.confidence_score,
                    s.search_disabled, s.hispashare_url, s.hispashare_cover_url,
-                   s.updated_at,
+                   s.updated_at, COALESCE(s.placeholder, 0) AS placeholder,
                    COALESCE(me.missing_count, 0) AS missing_count,
                    COALESCE(le.local_count, 0) AS local_count,
                    COALESCE(le.max_resolution, iq.resolution_height) AS max_resolution,
@@ -114,6 +114,7 @@ class LibraryRepository:
         item["providers"] = sorted(set((item.get("providers") or "").split(",")) - {""})
         if item.get("hispashare_url") and "hispashare" not in item["providers"]:
             item["providers"].append("hispashare")
+        item["placeholder"] = bool(item.get("placeholder"))
         for key in ("monitored", "needs_review", "search_disabled"):
             item[key] = bool(item.get(key)) if item.get(key) is not None else key == "monitored"
         item.pop("hispashare_cover_url", None)

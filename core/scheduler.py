@@ -33,6 +33,7 @@ from core.services.providers import ProviderUnavailable, build_provider_registry
 from core.services.quality import quality_from_local_episode
 from core.services.quality_profile import TIERS, tier_of
 from core.repositories.item_quality_repository import ItemQualityRepository
+from core.repositories.grab_history_repository import GrabHistoryRepository
 from core.library.item_quality import detect_item_quality
 from config.settings import Settings
 
@@ -55,6 +56,7 @@ class Scheduler(BackgroundJob):
         self.source_offer_repository = SourceOfferRepository(self.db)
         self.decision_log_repository = DecisionLogRepository(self.db)
         self.item_quality_repository = ItemQualityRepository(self.db)
+        self.grab_history_repository = GrabHistoryRepository(self.db)
         self.missing_episodes_service = MissingEpisodesService(
             self.db,
             self.series_repository,
@@ -181,6 +183,13 @@ class Scheduler(BackgroundJob):
             self._log("🎬 Vinculando bibliotecas con TMDB...")
             db_series_list = self.db.get_all_series()
             self.match_tmdb(db_series_list)
+            if not self.running:
+                return
+
+            # 5.1. Novedades de TMDB/IMDb que cumplen las notas mínimas
+            self._progress(60, "🆕 Revisando novedades...")
+            self._log("🆕 Revisando novedades de TMDB/IMDb...")
+            self.run_discovery()
             
             # 6. Detectar episodios faltantes
             self._progress(65, "🔍 Detectando episodios faltantes...")
@@ -213,6 +222,9 @@ class Scheduler(BackgroundJob):
             self._progress(85, "⬇️ Procesando descargas...")
             self._log("⬇️ Procesando descargas de episodios faltantes...")
             self.process_downloads(driver)
+            if not self.running:
+                return
+            self.process_wanted_movies()
             if not self.running:
                 return
 
@@ -614,6 +626,68 @@ class Scheduler(BackgroundJob):
             content_mode='single_file',
             label_prefix=_prefix,
         )
+
+    def run_discovery(self):
+        try:
+            from core.discovery.service import DiscoveryService
+
+            DiscoveryService(self.db, log=self._log).run()
+        except Exception as e:
+            # Las novedades nunca deben tumbar el ciclo de la biblioteca.
+            self.logger.error(f"Error en novedades: {e}", exc_info=True)
+            self._log(f"   ⚠️ Error revisando novedades: {e}")
+
+    def process_wanted_movies(self):
+        """Películas/documentales "en camino" (novedades aprobadas): buscar
+        fuente en los proveedores que saben de películas y descargar la mejor
+        según el perfil de calidad."""
+        movie_providers = [p for p in self.providers.values() if getattr(p, "supports_movies", False)]
+        if not movie_providers:
+            return
+        categories = Settings.get_single_file_categories()
+        rows = self.db.get_connection().execute(
+            f"""SELECT id, name, tmdb_name, year, tmdb_id, content_category, folder_path, hispashare_url
+                FROM series WHERE COALESCE(placeholder, 0) = 1 AND COALESCE(monitored, 1) = 1
+                AND content_category IN ({','.join('?' for _ in categories)})""",
+            categories,
+        ).fetchall()
+        if not rows:
+            return
+        self._log(f"   🎬 {len(rows)} películas/documentales en camino")
+        for row in rows:
+            if not self.running:
+                return
+            item = dict(row)
+            if self.grab_history_repository.recently_grabbed_item(item["id"], Settings.GRAB_RETRY_DAYS):
+                continue  # ya enviada: esperando a que el cliente la descargue
+            for provider in movie_providers:
+                if self.source_offer_repository.get(item["id"], provider.name):
+                    continue
+                try:
+                    offer = provider.find_candidate(item, content_mode="single_file")
+                except ProviderUnavailable:
+                    continue
+                except Exception as e:
+                    self.logger.warning(f"[{provider.name}] error buscando '{item['name']}': {e}")
+                    continue
+                if offer:
+                    self.source_offer_repository.upsert(item["id"], offer)
+            offer = self.source_arbitration_service.best_offer(item["id"])
+            provider = self.providers.get(offer.provider) if offer else None
+            if provider is None:
+                continue
+            try:
+                handle = provider.resolve_download(item, offer, missing_only=True)
+            except Exception as e:
+                self._log(f"      ❌ {item['tmdb_name'] or item['name']}: {e}")
+                continue
+            if handle:
+                destinations = handle.payload.get("grabbed") or handle.payload.get("ed2k_links") or []
+                self.grab_history_repository.record(offer.provider, offer.source_url, item["id"], [],
+                                                    release_title=offer.title or item["name"],
+                                                    destination=", ".join(destinations)[:500])
+                self._log(f"      ✅ {item['tmdb_name'] or item['name']} → {offer.provider} "
+                          f"({TIERS.get(tier_of(offer.quality), '?')})")
 
     def discover_search_offers(self):
         """Pide oferta a los proveedores que buscan bajo demanda (los que no

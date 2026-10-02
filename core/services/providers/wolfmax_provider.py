@@ -16,6 +16,8 @@ class WolfmaxSourceProvider:
     driver Selenium por llamada) para exponerlos como SourceProvider."""
 
     name = "wolfmax"
+    # Sabe buscar y descargar películas sueltas (las novedades aprobadas).
+    supports_movies = True
 
     def __init__(self, db_manager, dispatcher: DownloadDispatcher | None = None):
         self.db = db_manager

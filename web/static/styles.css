@@ -205,6 +205,7 @@ table.list tr.click:hover td { background: var(--bg-hover); }
 }
 .input.mono { font-family: var(--mono); font-size: 13px; }
 .input:focus { outline: 2px solid rgba(245, 185, 66, .45); outline-offset: 1px; }
+.form-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 14px; }
 .check { display: flex; align-items: center; gap: 10px; font-weight: 600; cursor: pointer; }
 .check input { width: 16px; height: 16px; accent-color: var(--accent); }
 .inline-edit { display: flex; gap: 8px; margin-top: 10px; max-width: 640px; }

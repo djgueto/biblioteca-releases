@@ -52,6 +52,14 @@ class GrabHistoryRepository:
         ).fetchall()
         return {(r[0], r[1]) for r in rows}
 
+    def recently_grabbed_item(self, series_id: int, days: int) -> bool:
+        """¿Se envió algo de esta ficha (p. ej. la película entera) hace poco?"""
+        row = self.db.get_connection().execute(
+            "SELECT 1 FROM grab_history WHERE series_id = ? AND created_at >= datetime('now', ?) LIMIT 1",
+            (series_id, f"-{int(days)} days"),
+        ).fetchone()
+        return row is not None
+
     def list_for_series(self, series_id: int, limit: int = 50) -> list[dict]:
         rows = self.db.get_connection().execute(
             "SELECT provider, season, episode, release_title, destination, created_at FROM grab_history "

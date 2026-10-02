@@ -85,6 +85,7 @@ const ICONS = {
   eye: 'M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z|M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z',
   eyeoff: 'M17.9 17.9A10.7 10.7 0 0 1 12 20c-7 0-11-8-11-8a19.8 19.8 0 0 1 5.1-5.9|M9.9 4.2A10 10 0 0 1 12 4c7 0 11 8 11 8a19.6 19.6 0 0 1-2.2 3.2|M1 1l22 22',
   refresh: 'M21 12a9 9 0 1 1-2.6-6.4L21 8|M21 3v5h-5',
+  sparkle: 'M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z|M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9z',
   sliders: 'M4 21v-7|M4 10V3|M12 21v-9|M12 8V3|M20 21v-5|M20 12V3|M1 14h6|M9 8h6|M17 16h6',
 };
 
@@ -107,7 +108,8 @@ function Poster({ item }) {
       <div class="badges">
         <span>${q && html`<span class=${'badge' + (q === '4K' ? ' q4k' : '')}>${q}</span>`}</span>
         <span>
-          ${item.needs_review ? html`<span class="badge violet">Revisar</span>`
+          ${item.placeholder ? html`<span class="badge violet">En camino</span>`
+            : item.needs_review ? html`<span class="badge violet">Revisar</span>`
             : item.missing_count > 0 ? html`<span class="badge warn">−${item.missing_count}</span>` : null}
         </span>
       </div>
@@ -123,6 +125,7 @@ const FILTERS = [
   { id: 'review', label: 'Revisar match', test: (i) => i.needs_review },
   { id: 'nocover', label: 'Sin fuente', test: (i) => !i.providers.length },
   { id: 'unmonitored', label: 'No vigilados', test: (i) => !i.monitored },
+  { id: 'placeholder', label: 'En camino', test: (i) => i.placeholder },
 ];
 const SORTS = {
   name: { label: 'Nombre', fn: (a, b) => displayName(a).localeCompare(displayName(b), 'es') },
@@ -396,6 +399,108 @@ function Wanted({ query, tick }) {
     </div>`;
 }
 
+// ---------------------------------------------------------------- discovery
+const DISCOVERY_TABS = [
+  { id: 'approved', label: 'Buscando', hint: 'Cumplen tus notas: se descargan en cuanto aparezcan en alguna fuente, con la mejor calidad.' },
+  { id: 'waiting', label: 'En espera', hint: 'Aún sin estrenar o con pocos votos para fiarse de la nota. Se revisan en cada ciclo.' },
+  { id: 'rejected', label: 'Descartadas', hint: 'No llegan a las notas mínimas (o las descartaste tú). Puedes añadirlas igualmente.' },
+  { id: 'in_library', label: 'Ya en la biblioteca', hint: 'Novedades que ya tienes en disco.' },
+];
+
+function Rating({ label, value, votes }) {
+  if (value == null) return html`<span class="faint">${label} —</span>`;
+  const color = value >= 7 ? 'var(--ok)' : value >= 6 ? 'var(--accent)' : 'var(--bad)';
+  return html`<span><b style=${`color:${color}`}>${label} ${Number(value).toFixed(1)}</b> <span class="faint">(${votes ?? 0})</span></span>`;
+}
+
+function Discovery({ live, toast }) {
+  const [tab, setTab] = useState('approved');
+  const { data, loading, reload } = useFetch(`/api/discovery?status=${tab}`, [live.tick]);
+  const [busyId, setBusyId] = useState(null);
+  const running = live.jobs.find((j) => j.name === 'discovery' && j.running);
+  const counts = data?.counts || {};
+  const tabCount = (id) => ({ approved: counts.approved, waiting: counts.waiting, in_library: counts.in_library,
+    rejected: (counts.rejected || 0) + (counts.expired || 0) + (counts.dismissed || 0) })[id] || 0;
+
+  const act = async (id, verb) => {
+    setBusyId(id);
+    try { await api.post(`/api/discovery/${id}/${verb}`); toast(verb === 'approve' ? 'Añadida: se buscará en todas las fuentes' : 'Descartada'); reload(); }
+    catch (e) { toast('Error: ' + e.message); }
+    setBusyId(null);
+  };
+  const runNow = async () => {
+    try { await api.post('/api/jobs/discovery/start'); toast('Buscando novedades…'); } catch (e) { toast(e.message); }
+  };
+
+  return html`
+    <div class="toolbar">
+      ${DISCOVERY_TABS.map((t) => html`
+        <button class=${'chip' + (tab === t.id ? ' on' : '')} onClick=${() => setTab(t.id)}>${t.label} <span class="n">${tabCount(t.id)}</span></button>`)}
+      <span style="flex:1"></span>
+      <button class="btn primary" disabled=${!!running} onClick=${runNow}><${Icon} d=${ICONS.refresh} size=${15} /> ${running ? running.message : 'Buscar novedades ahora'}</button>
+    </div>
+    <p class="dim" style="margin:-4px 0 18px">${DISCOVERY_TABS.find((t) => t.id === tab).hint}</p>
+    ${loading && !data ? html`<div class="loading"><div class="spinner"></div></div>`
+      : !data.items.length ? html`<div class="empty">Nada por aquí todavía.${tab === 'approved' ? ' Pulsa "Buscar novedades ahora" o espera al siguiente ciclo.' : ''}</div>`
+      : html`
+        <div class="grid">
+          ${data.items.map((w) => html`
+            <div class="card" key=${w.id} onClick=${() => w.series_id && go('series/' + w.series_id)}>
+              <div class="poster" style=${w.poster_url ? '' : `background: linear-gradient(160deg, ${phColor(w.tmdb_id)}, #161922)`}>
+                ${w.poster_url ? html`<img loading="lazy" src=${w.poster_url} alt="" />` : html`<div class="ph">${w.title}</div>`}
+                <div class="badges"><span class="badge mute">${w.media_type === 'tv' ? 'Serie' : 'Película'}</span><span></span></div>
+              </div>
+              <div class="title" title=${w.title}>${w.title}</div>
+              <div class="sub"><span>${w.release_date || 'sin fecha'}</span><span>·</span><span>${w.category_label}</span></div>
+              <div class="sub" style="gap:10px;margin-top:2px"><${Rating} label="TMDB" value=${w.tmdb_rating} votes=${w.tmdb_votes} /><${Rating} label="IMDb" value=${w.imdb_rating} votes=${w.imdb_votes} /></div>
+              <div class="faint" style="font-size:11.5px;margin-top:3px;min-height:16px">${w.reason || ''}</div>
+              <div style="display:flex;gap:6px;margin-top:6px" onClick=${(e) => e.stopPropagation()}>
+                ${tab !== 'approved' && tab !== 'in_library' && html`<button class="btn small" disabled=${busyId === w.id} onClick=${() => act(w.id, 'approve')}>Añadir</button>`}
+                ${tab !== 'rejected' && tab !== 'in_library' && html`<button class="btn small danger" disabled=${busyId === w.id} onClick=${() => act(w.id, 'dismiss')}>Descartar</button>`}
+              </div>
+            </div>`)}
+        </div>`}`;
+}
+
+function DiscoverySettingsPanel({ toast }) {
+  const { data, reload } = useFetch('/api/settings/discovery');
+  const [form, setForm] = useState(null);
+  useEffect(() => { if (data) setForm({ ...data }); }, [data]);
+  if (!form) return null;
+  const num = (k) => (e) => setForm({ ...form, [k]: e.target.value === '' ? '' : Number(e.target.value) });
+  const toggleCat = (id) => setForm({ ...form, categories: form.categories.includes(id) ? form.categories.filter((c) => c !== id) : [...form.categories, id] });
+  const dirty = JSON.stringify({ ...form, all_categories: 0 }) !== JSON.stringify({ ...data, all_categories: 0 });
+  const save = async () => {
+    try { const { all_categories, ...body } = form; await api.put('/api/settings/discovery', body); toast('Ajustes de novedades guardados'); reload(); }
+    catch (e) { toast('Error: ' + e.message); }
+  };
+  return html`
+    <div class="section">
+      <h3>Novedades (TMDB + IMDb)</h3>
+      <div class="panel form">
+        <label class="check"><input type="checkbox" checked=${form.enabled} onChange=${(e) => setForm({ ...form, enabled: e.target.checked })} /> Buscar y descargar novedades automáticamente</label>
+        <div class="form-row">
+          <label class="field"><span>Nota mínima TMDB</span><input class="input" type="number" step="0.1" min="0" max="10" value=${form.min_tmdb} onInput=${num('min_tmdb')} /></label>
+          <label class="field"><span>Votos mínimos TMDB</span><input class="input" type="number" min="0" value=${form.min_tmdb_votes} onInput=${num('min_tmdb_votes')} /></label>
+          <label class="field"><span>Nota mínima IMDb</span><input class="input" type="number" step="0.1" min="0" max="10" value=${form.min_imdb} onInput=${num('min_imdb')} /></label>
+          <label class="field"><span>Votos mínimos IMDb</span><input class="input" type="number" min="0" value=${form.min_imdb_votes} onInput=${num('min_imdb_votes')} /></label>
+        </div>
+        <div class="form-row">
+          <label class="field"><span>Estrenos de los últimos (días)</span><input class="input" type="number" min="1" value=${form.days_back} onInput=${num('days_back')} /></label>
+          <label class="field"><span>Próximos estrenos (días)</span><input class="input" type="number" min="0" value=${form.days_ahead} onInput=${num('days_ahead')} /></label>
+          <label class="field"><span>Decidir con una sola nota tras (días)</span><input class="input" type="number" min="0" value=${form.imdb_grace_days} onInput=${num('imdb_grace_days')} /></label>
+        </div>
+        <div class="field"><span>Tipos que se siguen</span>
+          <div class="chips" style="margin:0">
+            ${form.all_categories.map((c) => html`<button class=${'chip' + (form.categories.includes(c.id) ? ' on' : '')} onClick=${() => toggleCat(c.id)}>${c.label}</button>`)}
+          </div>
+        </div>
+        <small class="faint">Con pocos votos la nota no es fiable: hasta reunir los votos mínimos la novedad queda "en espera".</small>
+      </div>
+      <div class="actions" style="margin-top:14px"><button class="btn primary" disabled=${!dirty} onClick=${save}>Guardar</button></div>
+    </div>`;
+}
+
 // ---------------------------------------------------------------- activity
 function JobCard({ job, toast }) {
   const [busy, setBusy] = useState(false);
@@ -504,7 +609,7 @@ function System() {
 
 // ---------------------------------------------------------------- settings
 function Settings({ toast }) {
-  return html`<${GeneralSettings} toast=${toast} /><${QualitySettings} toast=${toast} />`;
+  return html`<${GeneralSettings} toast=${toast} /><${QualitySettings} toast=${toast} /><${DiscoverySettingsPanel} toast=${toast} />`;
 }
 
 function GeneralSettings({ toast }) {
@@ -619,6 +724,7 @@ function QualitySettings({ toast }) {
 // ---------------------------------------------------------------- shell
 const NAV = [
   { id: 'library', label: 'Biblioteca', icon: ICONS.library },
+  { id: 'discovery', label: 'Novedades', icon: ICONS.sparkle },
   { id: 'wanted', label: 'Buscados', icon: ICONS.wanted },
   { id: 'activity', label: 'Actividad', icon: ICONS.activity },
   { id: 'settings', label: 'Ajustes', icon: ICONS.sliders },
@@ -635,7 +741,7 @@ function App() {
 
   const [page, arg] = route;
   const running = live.jobs.find((j) => j.running);
-  const titles = { library: 'Biblioteca', wanted: 'Buscados', activity: 'Actividad', settings: 'Ajustes', system: 'Sistema', series: '' };
+  const titles = { library: 'Biblioteca', discovery: 'Novedades', wanted: 'Buscados', activity: 'Actividad', settings: 'Ajustes', system: 'Sistema', series: '' };
   const searchable = page === 'library' || page === 'wanted';
 
   let body;
@@ -643,6 +749,7 @@ function App() {
   else if (page === 'wanted') body = html`<${Wanted} query=${query} tick=${live.tick} />`;
   else if (page === 'activity') body = html`<${Activity} live=${live} toast=${toast} />`;
   else if (page === 'system') body = html`<${System} />`;
+  else if (page === 'discovery') body = html`<${Discovery} live=${live} toast=${toast} />`;
   else if (page === 'settings') body = html`<${Settings} toast=${toast} />`;
   else body = html`<${Library} category=${arg || 'all'} query=${query} tick=${live.tick} categories=${categories || []} />`;
 

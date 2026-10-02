@@ -7,6 +7,7 @@ from pathlib import Path
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 from config.settings import Settings
+from core.discovery.repository import ensure_placeholder_column
 
 
 class DatabaseManager:
@@ -359,6 +360,7 @@ class DatabaseManager:
         except Exception:
             pass
 
+        ensure_placeholder_column(self)
         self.logger.info("Base de datos inicializada correctamente")
     
     # ========== SERIES ==========
@@ -1133,8 +1135,11 @@ class DatabaseManager:
         cursor = conn.cursor()
         
         try:
-            # Obtener todas las series con sus rutas
-            cursor.execute('SELECT id, name, folder_path, content_category FROM series')
+            # Obtener todas las series con sus rutas. Las fichas "en camino"
+            # (novedades aprobadas, placeholder=1) aún no tienen carpeta: no
+            # se tocan aquí, las resuelve DiscoveryService.reconcile_placeholders.
+            ensure_placeholder_column(self)
+            cursor.execute('SELECT id, name, folder_path, content_category FROM series WHERE COALESCE(placeholder, 0) = 0')
             all_series = cursor.fetchall()
             
             to_delete = []

@@ -42,6 +42,7 @@ class ItemQualityRepository:
             FROM series s
             LEFT JOIN item_quality iq ON iq.series_id = s.id
             WHERE s.content_category IN ({placeholders})
+              AND COALESCE(s.placeholder, 0) = 0
               AND (iq.series_id IS NULL OR iq.item_path != s.folder_path)
             ORDER BY s.id
             LIMIT ?
