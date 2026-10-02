@@ -85,6 +85,7 @@ const ICONS = {
   eye: 'M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z|M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z',
   eyeoff: 'M17.9 17.9A10.7 10.7 0 0 1 12 20c-7 0-11-8-11-8a19.8 19.8 0 0 1 5.1-5.9|M9.9 4.2A10 10 0 0 1 12 4c7 0 11 8 11 8a19.6 19.6 0 0 1-2.2 3.2|M1 1l22 22',
   refresh: 'M21 12a9 9 0 1 1-2.6-6.4L21 8|M21 3v5h-5',
+  sliders: 'M4 21v-7|M4 10V3|M12 21v-9|M12 8V3|M20 21v-5|M20 12V3|M1 14h6|M9 8h6|M17 16h6',
 };
 
 const qualityLabel = (h) => (!h ? null : h >= 2000 ? '4K' : h >= 1000 ? '1080p' : h >= 700 ? '720p' : 'SD');
@@ -462,11 +463,71 @@ function System() {
     </div>`;
 }
 
+// ---------------------------------------------------------------- settings
+function QualitySettings({ toast }) {
+  const { data, reload } = useFetch('/api/settings/quality');
+  const [draft, setDraft] = useState(null);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => { if (data) setDraft({ tiers: data.tiers, minimum: data.minimum }); }, [data]);
+  if (!draft) return html`<div class="loading"><div class="spinner"></div></div>`;
+
+  const move = (i, delta) => {
+    const tiers = [...draft.tiers];
+    const j = i + delta;
+    if (j < 0 || j >= tiers.length) return;
+    [tiers[i], tiers[j]] = [tiers[j], tiers[i]];
+    setDraft({ ...draft, tiers });
+  };
+  const minIndex = draft.tiers.findIndex((t) => t.id === draft.minimum);
+  const dirty = data && (draft.minimum !== data.minimum || draft.tiers.some((t, i) => t.id !== data.tiers[i].id));
+  const save = async () => {
+    setSaving(true);
+    try {
+      await api.put('/api/settings/quality', { order: draft.tiers.map((t) => t.id), minimum: draft.minimum });
+      toast('Perfil de calidad guardado');
+      reload();
+    } catch (e) { toast('Error: ' + e.message); }
+    setSaving(false);
+  };
+
+  return html`
+    <div class="section" style="margin-top:0">
+      <h3>Perfil de calidad</h3>
+      <p class="dim" style="margin:-4px 0 14px; max-width:720px">
+        Da igual la fuente: siempre se descarga la mejor calidad según este orden (arriba = mejor),
+        y si aparece una versión de un nivel superior a la que tienes, se mejora.
+        Lo que quede por debajo de la calidad mínima no se descarga.
+      </p>
+      <div class="panel">
+        <table class="list">
+          <thead><tr><th style="width:60px">#</th><th>Calidad</th><th>Mínima</th><th style="text-align:right">Orden</th></tr></thead>
+          <tbody>
+            ${draft.tiers.map((t, i) => html`
+              <tr style=${i > minIndex ? 'opacity:.45' : ''}>
+                <td class="faint mono">${i + 1}</td>
+                <td><b>${t.label}</b> ${i > minIndex ? html`<span class="pill" style="margin-left:8px">No se descarga</span>` : null}</td>
+                <td><input type="radio" name="minimum" checked=${draft.minimum === t.id} onChange=${() => setDraft({ ...draft, minimum: t.id })} /></td>
+                <td style="text-align:right; white-space:nowrap">
+                  <button class="btn small" disabled=${i === 0} onClick=${() => move(i, -1)} title="Subir">▲</button>
+                  <button class="btn small" disabled=${i === draft.tiers.length - 1} onClick=${() => move(i, 1)} title="Bajar" style="margin-left:6px">▼</button>
+                </td>
+              </tr>`)}
+          </tbody>
+        </table>
+      </div>
+      <div class="actions" style="margin-top:14px">
+        <button class="btn primary" disabled=${!dirty || saving} onClick=${save}>Guardar</button>
+        <button class="btn" disabled=${!dirty || saving} onClick=${() => setDraft({ tiers: data.tiers, minimum: data.minimum })}>Descartar cambios</button>
+      </div>
+    </div>`;
+}
+
 // ---------------------------------------------------------------- shell
 const NAV = [
   { id: 'library', label: 'Biblioteca', icon: ICONS.library },
   { id: 'wanted', label: 'Buscados', icon: ICONS.wanted },
   { id: 'activity', label: 'Actividad', icon: ICONS.activity },
+  { id: 'settings', label: 'Ajustes', icon: ICONS.sliders },
   { id: 'system', label: 'Sistema', icon: ICONS.system },
 ];
 
@@ -480,7 +541,7 @@ function App() {
 
   const [page, arg] = route;
   const running = live.jobs.find((j) => j.running);
-  const titles = { library: 'Biblioteca', wanted: 'Buscados', activity: 'Actividad', system: 'Sistema', series: '' };
+  const titles = { library: 'Biblioteca', wanted: 'Buscados', activity: 'Actividad', settings: 'Ajustes', system: 'Sistema', series: '' };
   const searchable = page === 'library' || page === 'wanted';
 
   let body;
@@ -488,6 +549,7 @@ function App() {
   else if (page === 'wanted') body = html`<${Wanted} query=${query} tick=${live.tick} />`;
   else if (page === 'activity') body = html`<${Activity} live=${live} toast=${toast} />`;
   else if (page === 'system') body = html`<${System} />`;
+  else if (page === 'settings') body = html`<${QualitySettings} toast=${toast} />`;
   else body = html`<${Library} category=${arg || 'all'} query=${query} tick=${live.tick} categories=${categories || []} />`;
 
   return html`

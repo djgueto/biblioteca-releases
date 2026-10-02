@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import functools
 import logging
 import re
 import unicodedata
@@ -9,7 +8,7 @@ from core.download_clients import TORRENT, DownloadDispatcher, Release
 from core.dontorrent.client import DontorrentClient, DontorrentRateLimited, SearchResult
 from core.repositories.grab_history_repository import GrabHistoryRepository
 from core.services.providers.base import DownloadHandle, SourceOffer
-from core.services.quality import compare_quality
+from core.services.quality_profile import QualityProfile
 from core.wolfmax.category_scanner import _normalize, _title_score
 
 logger = logging.getLogger(__name__)
@@ -64,6 +63,7 @@ class DontorrentSourceProvider:
         match_threshold: float = 0.8,
         max_downloads_per_cycle: int = 10,
         retry_days: int = 7,
+        profile: QualityProfile | None = None,
     ):
         self.db = db_manager
         self.dispatcher = dispatcher
@@ -72,6 +72,7 @@ class DontorrentSourceProvider:
         self.max_downloads = max_downloads_per_cycle
         self.retry_days = retry_days
         self.history = GrabHistoryRepository(db_manager)
+        self.profile = profile or QualityProfile()
         self._search_cache: dict[str, list[SearchResult]] = {}
         self._downloads = 0
         self._blocked = False
@@ -108,13 +109,11 @@ class DontorrentSourceProvider:
         missing = {(m["season"], m["episode"]) for m in self.db.get_missing_episodes_for_series(series_id)}
         return missing - self.history.recently_grabbed_episodes(series_id, self.retry_days)
 
-    @staticmethod
-    def _by_quality(candidates):
-        # Mejor calidad primero; a igual calidad, mejor coincidencia de título.
-        def cmp(a, b):
-            return compare_quality(b[0].quality, a[0].quality) or (b[1] > a[1]) - (b[1] < a[1])
-
-        return sorted(candidates, key=functools.cmp_to_key(cmp))
+    def _by_quality(self, candidates):
+        # Mejor calidad según el perfil primero (descartando las que no llegan
+        # al mínimo); a igual calidad, mejor coincidencia de título.
+        acceptable = [c for c in candidates if self.profile.is_acceptable(c[0].quality)]
+        return sorted(acceptable, key=lambda c: (self.profile.rank(c[0].quality), c[1]), reverse=True)
 
     def _offer_for(self, item: dict) -> SourceOffer | None:
         candidates = self._candidates(item)
@@ -127,7 +126,10 @@ class DontorrentSourceProvider:
         useful = [c for c in candidates if not seasons or c[0].season in seasons]
         if not useful:
             return None
-        result, score = self._by_quality(useful)[0]
+        ranked = self._by_quality(useful)
+        if not ranked:
+            return None
+        result, score = ranked[0]
         return SourceOffer(
             provider=self.name,
             source_url=result.url,

@@ -193,6 +193,15 @@ class TestWebApi(unittest.TestCase):
             gate.set()
             client.close()
 
+    def test_quality_profile_settings(self):
+        data = self.client.get("/api/settings/quality").json()
+        self.assertEqual(data["order"][0], "2160p_dv")
+        order = list(reversed(data["order"]))
+        r = self.client.put("/api/settings/quality", json={"order": order, "minimum": "720p"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["order"], order)
+        self.assertEqual(self.client.put("/api/settings/quality", json={"order": ["2160p"], "minimum": "sd"}).status_code, 422)
+
     def test_spa_fallback_and_static(self):
         self.assertIn("app.js", self.client.get("/series/1").text)
         self.assertEqual(self.client.get("/static/vendor/preact-htm.module.js").status_code, 200)

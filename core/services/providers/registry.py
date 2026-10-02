@@ -48,6 +48,7 @@ def build_provider_registry(
     if include_dontorrent:
         from core.dontorrent.client import DontorrentClient
         from core.services.providers.dontorrent_provider import DontorrentSourceProvider
+        from core.services.quality_profile import QualityProfile
 
         providers["dontorrent"] = DontorrentSourceProvider(
             db_manager,
@@ -56,6 +57,7 @@ def build_provider_registry(
             match_threshold=Settings.DONTORRENT_MATCH_THRESHOLD,
             max_downloads_per_cycle=Settings.DONTORRENT_MAX_DOWNLOADS_PER_CYCLE,
             retry_days=Settings.GRAB_RETRY_DAYS,
+            profile=QualityProfile.load(db_manager),
         )
 
     return providers

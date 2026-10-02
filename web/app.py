@@ -29,6 +29,7 @@ from core.download_clients import ED2K, TORRENT, build_download_dispatcher
 from core.library.roots import LibraryRoots, sync_library_roots
 from core.repositories import DecisionLogRepository, LibraryRepository, SeriesRepository, SourceOfferRepository
 from core.repositories.grab_history_repository import GrabHistoryRepository
+from core.services.quality_profile import TIERS, QualityProfile
 from web.jobs import JobAlreadyRunning, JobManager
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,11 @@ LIBRARY_CACHE_SECONDS = 30
 
 class MonitoredUpdate(BaseModel):
     monitored: bool
+
+
+class QualityProfileUpdate(BaseModel):
+    order: list[str]
+    minimum: str
 
 
 class _LibraryCache:
@@ -194,6 +200,18 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
             ],
             "check_interval_hours": Settings.CHECK_INTERVAL_HOURS,
         }
+
+    @app.get("/api/settings/quality")
+    def get_quality_profile():
+        profile = QualityProfile.load(DatabaseManager())
+        return {**profile.to_dict(), "tiers": [{"id": t, "label": TIERS[t]} for t in profile.order]}
+
+    @app.put("/api/settings/quality")
+    def put_quality_profile(body: QualityProfileUpdate):
+        if set(body.order) != set(TIERS) or len(body.order) != len(TIERS) or body.minimum not in TIERS:
+            raise HTTPException(422, "Perfil de calidad no válido")
+        QualityProfile(order=body.order, minimum=body.minimum).save(DatabaseManager())
+        return get_quality_profile()
 
     @app.get("/api/health", include_in_schema=False)
     def health():

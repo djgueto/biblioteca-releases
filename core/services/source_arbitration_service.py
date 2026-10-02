@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from core.events.event_types import SOURCE_OFFER_UPDATED
 from core.services.providers.base import ProviderUnavailable, SourceOffer, SourceProvider
-from core.services.quality import Quality, compare_quality
+from core.services.quality import Quality
+from core.services.quality_profile import QualityProfile
 
 
 class SourceArbitrationService:
@@ -16,11 +17,13 @@ class SourceArbitrationService:
         source_offer_repository,
         providers: dict[str, SourceProvider],
         event_bus=None,
+        profile: QualityProfile | None = None,
     ):
         self.db = db_manager
         self.source_offer_repository = source_offer_repository
         self.providers = providers
         self.event_bus = event_bus
+        self._profile = profile
 
     def refresh_all_offers(self, series_id: int, item: dict) -> list[SourceOffer]:
         """Revisita, para cada proveedor con una URL conocida (ya sea en
@@ -61,11 +64,22 @@ class SourceArbitrationService:
 
         return refreshed
 
+    @property
+    def profile(self) -> QualityProfile:
+        # Se lee en cada uso: los cambios hechos desde la web aplican sin
+        # reiniciar el ciclo.
+        if self._profile is not None:
+            return self._profile
+        return QualityProfile.load(self.db)
+
     def best_offer(self, series_id: int) -> SourceOffer | None:
-        return self.source_offer_repository.best_for_series(series_id)
+        """La mejor oferta disponible según el perfil de calidad, venga del
+        proveedor que venga (None si ninguna llega al mínimo)."""
+        offers = [o for o in self.source_offer_repository.get_all_for_series(series_id) if o.available]
+        return self.profile.best(offers)
 
     def should_upgrade(self, series_id: int, local: Quality) -> tuple[bool, SourceOffer | None]:
         best = self.best_offer(series_id)
         if best is None:
             return False, None
-        return compare_quality(best.quality, local) > 0, best
+        return self.profile.is_upgrade(local, best.quality), best
