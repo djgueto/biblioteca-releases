@@ -15,6 +15,7 @@ ENV PYTHONUNBUFFERED=1 \
     DB_PATH=/config/series_manager.db \
     COVER_CACHE_DIR=/config/cache/covers \
     LOG_FILE=/config/series_manager.log \
+    BACKUPS_DIR=/config/backups \
     TORRENT_WATCH_DIR=/watch \
     WEB_HOST=0.0.0.0 \
     WEB_PORT=9797

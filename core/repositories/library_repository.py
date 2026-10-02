@@ -74,15 +74,9 @@ class LibraryRepository:
         UNC de Windows usadas desde Docker, donde la biblioteca es /media):
         un ciclo de escaneo crearía duplicados de toda la biblioteca.
         """
-        def canon(path: str) -> str:
-            return (path or "").replace("\\", "/").rstrip("/").lower()
+        from core.library.roots import LibraryRoots, canon
 
-        roots = set()
-        for category in Settings.get_library_categories():
-            for root in Settings.get_paths_for_category(category):
-                roots.add(canon(self.db.normalize_path(root)))
-                roots.add(canon(root))
-        roots.discard("")
+        roots = {alias for root in LibraryRoots(self.db).configured() for alias in root.aliases}
 
         cursor = self.db.get_connection().cursor()
         cursor.execute("SELECT folder_path FROM series")

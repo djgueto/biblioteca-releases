@@ -3,6 +3,7 @@ import traceback
 from PyQt6.QtWidgets import QApplication, QMessageBox
 from ui.main_window import MainWindow
 from core.database.db_manager import DatabaseManager
+from core.library.roots import sync_library_roots
 from config.settings import Settings
 from utils.logger import setup_logger
 from utils.db_backup import backup_sqlite_db
@@ -45,6 +46,7 @@ def main():
             logger.info(f"Backup DB creado: {backup_path}")
         db = DatabaseManager()
         db.initialize_database()
+        sync_library_roots(db)
     except Exception as e:
         logger.error(f"Error inicializando la base de datos: {e}", exc_info=True)
         QMessageBox.critical(

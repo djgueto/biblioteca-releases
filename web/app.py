@@ -26,6 +26,7 @@ from config.settings import Settings
 from core.covers import get_cover_bytes
 from core.database.db_manager import DatabaseManager
 from core.download_clients import ED2K, TORRENT, build_download_dispatcher
+from core.library.roots import LibraryRoots, sync_library_roots
 from core.repositories import DecisionLogRepository, LibraryRepository, SeriesRepository, SourceOfferRepository
 from web.jobs import JobAlreadyRunning, JobManager
 
@@ -82,7 +83,9 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         if init_db:
-            DatabaseManager().initialize_database()
+            db = DatabaseManager()
+            db.initialize_database()
+            sync_library_roots(db)
         if os.getenv("WEB_SCHEDULER_AUTOSTART", "false").lower() == "true":
             if LibraryRepository(DatabaseManager()).path_health()["ok"]:
                 jobs.start("scheduler")
@@ -180,6 +183,11 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
             ],
             "tmdb_configured": bool(Settings.TMDB_API_KEY),
             "library_paths": LibraryRepository(DatabaseManager()).path_health(),
+            "library_roots": [
+                {"category": r.category, "label": Settings.get_category_label(r.category),
+                 "path": r.path, "accessible": Path(r.path).exists()}
+                for r in LibraryRoots(DatabaseManager()).configured()
+            ],
             "check_interval_hours": Settings.CHECK_INTERVAL_HOURS,
         }
 

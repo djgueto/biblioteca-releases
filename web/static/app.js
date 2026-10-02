@@ -401,6 +401,19 @@ function System() {
       </div>
     </div>
     <div class="section">
+      <h3>Bibliotecas</h3>
+      <div class="panel">
+        <table class="list">
+          <thead><tr><th>Biblioteca</th><th>Ruta</th><th>Estado</th></tr></thead>
+          <tbody>
+            ${data.library_roots.map((r) => html`
+              <tr><td><b>${r.label}</b></td><td class="mono dim">${r.path}</td>
+              <td>${r.accessible ? html`<span class="pill ok">Accesible</span>` : html`<span class="pill bad">No accesible</span>`}</td></tr>`)}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="section">
       <h3>Clientes de descarga</h3>
       <div class="panel">
         <table class="list">

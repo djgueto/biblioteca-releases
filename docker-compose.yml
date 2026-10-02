@@ -1,14 +1,19 @@
-# Despliegue en el NAS:   docker compose up -d --build
-# Interfaz:               http://IP-DEL-NAS:9797
+# Despliegue (en el equipo que hará de servidor):
+#   1. Copia esta carpeta del proyecto al equipo.
+#   2. Crea ./config y pon dentro una COPIA de series_manager.db y del .env
+#      (con la app de escritorio cerrada, para que la copia esté al día).
+#   3. Crea un archivo "nas.env" junto a este con el usuario de los NAS:
+#         NAS_USER=usuario
+#         NAS_PASS=contraseña
+#   4. docker compose --env-file nas.env up -d --build
+#   5. Abre http://IP-DEL-EQUIPO:9797
 #
-# /config  → .env, base de datos, caché de carátulas y log (persistente)
-# /media   → la carpeta Multimedia del NAS (la misma que Windows ve como Y:/Z:)
-# /watch   → carpeta vigilada por el cliente torrent (Transmission)
+# Las bibliotecas se reubican solas al arrancar: la BD recuerda que Series
+# estaba en Z:/SERIES y aquí está en /media/nas101/SERIES (con copia de
+# seguridad previa en ./config/backups).
 #
-# IMPORTANTE: la base de datos actual guarda rutas de Windows
-# (\\192.168.1.101\Multimedia\...). Hasta migrarlas a /media/..., la web
-# muestra la biblioteca pero NO deja iniciar el ciclo (crearía duplicados).
-# Usa una COPIA de series_manager.db en ./config, no la que usa el escritorio.
+# El equipo necesita el soporte de carpetas de red SMB (en Debian/Ubuntu:
+# `sudo apt install cifs-utils`; Synology, QNAP y Unraid ya lo traen).
 
 services:
   biblioteca:
@@ -19,24 +24,47 @@ services:
     ports:
       - "9797:9797"
     shm_size: "1gb"          # Chromium necesita más /dev/shm que los 64 MB por defecto
-    # user: "1026:100"       # Synology: UID/GID del usuario dueño de Multimedia
     environment:
       TZ: Europe/Madrid
       WEB_SCHEDULER_AUTOSTART: "false"
-      # Las rutas de biblioteca del .env de Windows (Y:/, Z:/) no existen aquí:
-      SERIES_PATH: /media/SERIES
-      MOVIES_PATH: /media/PELICULAS
-      MOVIES_PATHS: /media/PELICULAS DE ANIMACION
-      DOCUMENTARIES_PATH: /media/DOCUMENTALES
-      DOCUMENTARIES_PATHS: /media/DOCUMENTALES (series)
-      CARTOONS_PATH: /media/DIBUJOS
-      ANIMATED_MOVIES_PATH: /media/PELICULAS DE ANIMACION
-      DOCUSERIES_PATH: /media/DOCUMENTALES (series)
-      CONCERTS_PATH: /media/CONCIERTOS
-      MUSIC_PATH: /media/CONCIERTOS
-      # eMule/aMule: localhost dentro del contenedor no es tu PC
+      # Mismas bibliotecas y en el mismo orden que el .env de Windows
+      # (Y: = NAS .100, Z: = NAS .101):
+      SERIES_PATH: /media/nas101/SERIES
+      SERIES_PATHS: ""
+      MOVIES_PATH: /media/nas100/PELICULAS
+      MOVIES_PATHS: /media/nas100/PELICULAS DE ANIMACION
+      DOCUMENTARIES_PATH: /media/nas100/DOCUMENTALES
+      DOCUMENTARIES_PATHS: /media/nas100/DOCUMENTALES (series)
+      CONCERTS_PATH: /media/nas100/CONCIERTOS
+      CONCERTS_PATHS: ""
+      CARTOONS_PATH: /media/nas100/DIBUJOS
+      CARTOONS_PATHS: ""
+      MUSIC_PATH: /media/nas100/CONCIERTOS
+      MUSIC_PATHS: ""
+      ANIMATED_MOVIES_PATH: /media/nas100/PELICULAS DE ANIMACION
+      ANIMATED_MOVIES_PATHS: ""
+      DOCUSERIES_PATH: /media/nas100/DOCUMENTALES (series)
+      DOCUSERIES_PATHS: ""
+      # eMule/aMule: "localhost" dentro del contenedor no es tu PC.
       # EMULE_URL: http://192.168.1.X:4711
     volumes:
       - ./config:/config
-      - /volume1/Multimedia:/media
-      - /volume1/descargas/watch:/watch
+      - nas100:/media/nas100
+      - nas101:/media/nas101
+      # Carpeta que vigila el cliente torrent (si Transmission sigue en el
+      # PC, esta carpeta tiene que ser compartida y montada aquí también).
+      - ./watch:/watch
+
+volumes:
+  nas100:
+    driver: local
+    driver_opts:
+      type: cifs
+      device: //192.168.1.100/Multimedia
+      o: "username=${NAS_USER},password=${NAS_PASS},vers=3.0,uid=0,gid=0,file_mode=0664,dir_mode=0775"
+  nas101:
+    driver: local
+    driver_opts:
+      type: cifs
+      device: //192.168.1.101/Multimedia
+      o: "username=${NAS_USER},password=${NAS_PASS},vers=3.0,uid=0,gid=0,file_mode=0664,dir_mode=0775"
