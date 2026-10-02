@@ -21,12 +21,14 @@ def _keep_measured_quality(episode: dict, previous: dict | None) -> dict:
     if old_size is not None and new_size is not None and abs(old_size - new_size) > 0.01:
         return episode
     merged = dict(episode)
-    for key in ('resolution_height', 'codec', 'hdr'):
-        if previous.get(key) is not None:
-            merged[key] = previous[key]
-    if previous.get('resolution_height') is not None or previous.get('quality_rank') == -1:
-        # -1 = MediaInfo no pudo leerlo: no reintentarlo en cada ciclo.
-        merged['quality_rank'] = previous.get('quality_rank')
+    if previous.get('quality_source') == 'mediainfo':
+        # Medido del propio archivo: manda sobre lo que diga el nombre.
+        for key in ('resolution_height', 'codec', 'hdr', 'quality_rank', 'quality_source', 'measured_at'):
+            merged[key] = previous.get(key)
+    elif previous.get('quality_rank') == -1:
+        # MediaInfo no pudo leerlo: se respeta la espera antes de reintentar.
+        merged['quality_rank'] = -1
+        merged['measured_at'] = previous.get('measured_at')
     return merged
 
 
@@ -299,6 +301,10 @@ class DatabaseManager:
             ("ALTER TABLE local_episodes ADD COLUMN size_mb REAL", "size_mb"),
             ("ALTER TABLE local_episodes ADD COLUMN quality_rank INTEGER DEFAULT 0", "quality_rank"),
             ("ALTER TABLE local_episodes ADD COLUMN hdr TEXT", "hdr"),
+            # 'mediainfo' = calidad leída del propio archivo (la única fiable);
+            # 'filename' o NULL = deducida del nombre, provisional hasta medirla.
+            ("ALTER TABLE local_episodes ADD COLUMN quality_source TEXT", "quality_source"),
+            ("ALTER TABLE local_episodes ADD COLUMN measured_at TIMESTAMP", "measured_at"),
         ):
             try:
                 cursor.execute(column_sql)
@@ -1280,7 +1286,8 @@ class DatabaseManager:
             measured = {
                 row['file_path'].lower(): dict(row)
                 for row in cursor.execute(
-                    'SELECT file_path, size_mb, resolution_height, codec, hdr, quality_rank '
+                    'SELECT file_path, size_mb, resolution_height, codec, hdr, quality_rank, '
+                    'quality_source, measured_at '
                     'FROM local_episodes WHERE series_id = ?',
                     (series_id,),
                 ).fetchall()
@@ -1312,8 +1319,9 @@ class DatabaseManager:
                 episode = _keep_measured_quality(episode, measured.get(str(episode['file_path']).lower()))
                 cursor.execute('''
                     INSERT INTO local_episodes
-                    (series_id, season, episode, filename, file_path, resolution_height, codec, source, size_mb, quality_rank, hdr)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (series_id, season, episode, filename, file_path, resolution_height, codec, source, size_mb,
+                     quality_rank, hdr, quality_source, measured_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     series_id,
                     episode['season'],
@@ -1326,6 +1334,8 @@ class DatabaseManager:
                     episode.get('size_mb'),
                     episode.get('quality_rank', 0),
                     episode.get('hdr'),
+                    episode.get('quality_source') or ('filename' if episode.get('resolution_height') else None),
+                    episode.get('measured_at'),
                 ))
             
             conn.commit()
@@ -1564,10 +1574,14 @@ class DatabaseManager:
         rows = cursor.fetchall()
         return [dict(r) for r in rows]
 
+    UNREADABLE_RETRY_DAYS = 7
+
     def get_episodes_missing_resolution(self, limit=300):
         """
-        Episodios sin resolución real detectada, candidatos a escanear con MediaInfo.
-        Excluye los que ya se intentaron y fallaron (quality_rank = -1).
+        Episodios cuya calidad aún no se ha leído del propio archivo con
+        MediaInfo (lo que diga el nombre no cuenta). Los que no se pudieron
+        leer (quality_rank = -1: archivo inaccesible, NAS apagado...) se
+        reintentan pasados UNREADABLE_RETRY_DAYS días.
         """
         conn = self.get_connection()
         cur = conn.cursor()
@@ -1575,13 +1589,27 @@ class DatabaseManager:
             '''
             SELECT id, file_path, filename
             FROM local_episodes
-            WHERE resolution_height IS NULL
-              AND COALESCE(quality_rank, 0) >= 0
+            WHERE COALESCE(quality_source, '') != 'mediainfo'
+              AND (COALESCE(quality_rank, 0) >= 0
+                   OR measured_at IS NULL
+                   OR measured_at < datetime('now', ?))
+            ORDER BY COALESCE(quality_rank, 0) = -1, id
             LIMIT ?
             ''',
-            (limit,),
+            (f"-{self.UNREADABLE_RETRY_DAYS} days", limit),
         )
         return [dict(r) for r in cur.fetchall()]
+
+    def count_episode_quality(self) -> dict:
+        row = self.get_connection().execute(
+            '''
+            SELECT COUNT(*),
+                   SUM(quality_source = 'mediainfo'),
+                   SUM(COALESCE(quality_source, '') != 'mediainfo' AND quality_rank = -1)
+            FROM local_episodes
+            '''
+        ).fetchone()
+        return {"total": row[0] or 0, "measured": row[1] or 0, "unreadable": row[2] or 0}
 
     def mark_episode_resolution_unreadable(self, episode_ids: list[int]):
         """Marca episodios cuyo archivo no pudo leerse para no reintentar cada ciclo."""
@@ -1591,7 +1619,8 @@ class DatabaseManager:
         try:
             placeholders = ','.join(['?'] * len(episode_ids))
             conn.execute(
-                f'UPDATE local_episodes SET quality_rank = -1 WHERE id IN ({placeholders})',
+                f'UPDATE local_episodes SET quality_rank = -1, measured_at = CURRENT_TIMESTAMP '
+                f'WHERE id IN ({placeholders})',
                 episode_ids,
             )
             conn.commit()
@@ -1614,16 +1643,19 @@ class DatabaseManager:
                     '''
                     UPDATE local_episodes
                     SET resolution_height = ?,
-                        codec = COALESCE(?, codec),
+                        codec = ?,
                         quality_rank = ?,
-                        hdr = COALESCE(?, hdr)
+                        hdr = ?,
+                        quality_source = 'mediainfo',
+                        measured_at = CURRENT_TIMESTAMP
                     WHERE id = ?
                     ''',
                     (
+                        # Lo leído del archivo manda sobre lo deducido del nombre.
                         item['resolution_height'],
                         item.get('codec'),
                         item.get('quality_rank', 0),
-                        item.get('hdr'),
+                        item.get('hdr') or 'sdr',
                         item['id'],
                     ),
                 )

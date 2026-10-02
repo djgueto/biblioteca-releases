@@ -44,13 +44,33 @@ class TestEpisodeQualityPersistence(unittest.TestCase):
     def test_rescan_keeps_measured_quality(self):
         self.db.insert_local_episodes(1, [_ep(1), _ep(2), _ep(3)])  # el siguiente escaneo
         self.assertEqual(self._row(1), {"resolution_height": 2160, "codec": "x265", "hdr": "hdr10", "quality_rank": 4})
+        self.assertEqual(self._row(2)["hdr"], "sdr")  # MediaInfo no vio HDR: SDR, no "desconocido"
         self.assertEqual(self._row(2)["resolution_height"], 1080)
         self.assertEqual(self._row(3)["quality_rank"], -1)  # ilegible: no se reintenta
         self.assertEqual(len(self.db.get_episodes_missing_resolution()), 0)
 
+    def test_filename_quality_is_provisional_and_overridden(self):
+        self.db.insert_local_episodes(1, [_ep(4, resolution_height=720, codec="x264", quality_rank=2)])
+        row = dict(self.db.get_connection().execute(
+            "SELECT id, quality_source FROM local_episodes WHERE episode = 4").fetchone())
+        self.assertEqual(row["quality_source"], "filename")
+        self.assertIn(row["id"], [e["id"] for e in self.db.get_episodes_missing_resolution()])  # se medirá igual
+        self.db.batch_update_episode_resolutions([{"id": row["id"], "resolution_height": 1080, "codec": "x265",
+                                                   "quality_rank": 3, "hdr": None}])
+        self.assertEqual(self._row(4), {"resolution_height": 1080, "codec": "x265", "hdr": "sdr", "quality_rank": 3})
+
+    def test_unreadable_is_retried_after_a_week(self):
+        conn = self.db.get_connection()
+        self.assertNotIn(self._id(3), [e["id"] for e in self.db.get_episodes_missing_resolution()])
+        conn.execute("UPDATE local_episodes SET measured_at = datetime('now', '-8 days') WHERE episode = 3")
+        self.assertIn(self._id(3), [e["id"] for e in self.db.get_episodes_missing_resolution()])
+
+    def test_coverage_counts(self):
+        self.assertEqual(self.db.count_episode_quality(), {"total": 3, "measured": 2, "unreadable": 1})
+
     def test_replaced_file_is_measured_again(self):
         self.db.insert_local_episodes(1, [_ep(1, size=4000.0), _ep(2), _ep(3)])
-        self.assertIsNone(self._row(1)["resolution_height"])
+        self.assertIsNone(self._row(1)["resolution_height"])  # sin nombre con calidad: a medir
         self.assertEqual([e["id"] for e in self.db.get_episodes_missing_resolution()], [self._id(1)])
 
 

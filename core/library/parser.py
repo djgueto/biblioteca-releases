@@ -8,6 +8,16 @@ except ImportError:
     _MEDIAINFO_AVAILABLE = False
 
 
+def mediainfo_available() -> bool:
+    """pymediainfo instalado y con la librería MediaInfo del sistema."""
+    if not _MEDIAINFO_AVAILABLE:
+        return False
+    try:
+        return bool(_MediaInfo.can_parse())
+    except Exception:
+        return False
+
+
 def _detect_hdr_from_track(track) -> str | None:
     """Inspecciona los atributos hdr_format* que expone pymediainfo (cuando
     el fichero MediaInfo los detecta) para clasificar el HDR real del

@@ -38,11 +38,20 @@ class TestDetection(unittest.TestCase):
         self.assertEqual(main_video_file(str(folder)).name, "Dune.2021.2160p.mkv")
         self.assertIsNone(main_video_file(str(self.base / "no_existe")))
 
-    def test_falls_back_to_filename_when_mediainfo_cannot_read(self):
+    def test_filename_is_not_trusted(self):
+        # Aunque el nombre diga "2160p HDR x265", si MediaInfo no puede leer
+        # el archivo no se da por buena esa calidad.
         f = self.base / "Dune (2021) 2160p HDR x265.mkv"
         f.write_bytes(b"no es un video")
-        path, quality, source = detect_item_quality(str(f))
-        self.assertEqual((quality, source), ({"resolution_height": 2160, "codec": "x265", "hdr": "hdr10"}, "filename"))
+        self.assertEqual(detect_item_quality(str(f))[1:], (None, None))
+
+    def test_mediainfo_result_is_used(self):
+        f = self.base / "Dune (2021) 720p.mkv"  # el nombre miente
+        f.write_bytes(b"x")
+        with patch("core.library.item_quality.detect_resolution_from_file",
+                   return_value={"resolution_height": 2160, "codec": "x265", "hdr": None, "quality_rank": 4}):
+            self.assertEqual(detect_item_quality(str(f))[1:],
+                             ({"resolution_height": 2160, "codec": "x265", "hdr": "sdr"}, "mediainfo"))
 
     def test_unreadable_without_quality_in_name(self):
         f = self.base / "Dune (2021).mkv"
@@ -96,9 +105,9 @@ class TestSchedulerUpgrades(unittest.TestCase):
             INSERT INTO series (id, name, folder_path, content_category) VALUES
               (1, 'Dune', '/m/Dune.mkv', 'movies'),
               (2, 'Serie', '/s/Serie', 'series');
-            INSERT INTO local_episodes (series_id, season, episode, filename, file_path, resolution_height) VALUES
-              (2, 1, 1, 'e1', '/s/Serie/e1.mkv', 2160),
-              (2, 1, 2, 'e2', '/s/Serie/e2.mkv', 1080);
+            INSERT INTO local_episodes (series_id, season, episode, filename, file_path, resolution_height, quality_source) VALUES
+              (2, 1, 1, 'e1', '/s/Serie/e1.mkv', 2160, 'mediainfo'),
+              (2, 1, 2, 'e2', '/s/Serie/e2.mkv', 1080, 'mediainfo');
         """)
         conn.commit()
         with patch("core.scheduler.DatabaseManager", return_value=self.db):
@@ -137,9 +146,41 @@ class TestSchedulerUpgrades(unittest.TestCase):
 
     def test_scan_item_qualities(self):
         self.db.get_connection().execute("INSERT INTO series (id, name, folder_path, content_category) VALUES (3, 'Coco', '/m/Coco.mkv', 'movies')")
-        with patch("core.scheduler.detect_item_quality", return_value=("/m/Coco.mkv", {"resolution_height": 720}, "filename")):
+        with patch("core.library.quality_scan.mediainfo_available", return_value=True),                 patch("core.library.quality_scan.detect_item_quality",
+                      return_value=("/m/Coco.mkv", {"resolution_height": 720, "codec": "x264", "hdr": "sdr"}, "mediainfo")):
             self.scheduler.scan_item_qualities()
-        self.assertEqual(self.scheduler.item_quality_repository.get(3), Quality(720))
+        self.assertEqual(self.scheduler.item_quality_repository.get(3), Quality(720, "x264", Hdr.SDR))
+
+    def test_series_quality_from_filename_is_ignored(self):
+        self.db.get_connection().execute("UPDATE local_episodes SET quality_source = 'filename'")
+        self.scheduler.process_upgrades(driver=None)
+        upgraded = [c.args[0]["id"] for c in self.provider.resolve_download.call_args_list]
+        self.assertEqual(upgraded, [1])  # solo la película (medida); la serie no tiene nada medido
+
+
+class TestQualityScanJob(unittest.TestCase):
+    def test_runs_batches_until_done_and_reports(self):
+        from core.library import quality_scan_job
+
+        episode_results = iter([{"measured": 200, "unreadable": 0, "pending": True},
+                                {"measured": 50, "unreadable": 3, "pending": False}])
+        item_results = iter([{"measured": 10, "unreadable": 1, "pending": False}])
+        events = []
+        with patch.object(quality_scan_job, "DatabaseManager"),                 patch.object(quality_scan_job, "measure_episodes", side_effect=lambda db, **kw: next(episode_results)),                 patch.object(quality_scan_job, "measure_items", side_effect=lambda db, **kw: next(item_results)),                 patch.object(quality_scan_job, "coverage", return_value={"episodes": {"measured": 5, "total": 10},
+                                                                          "items": {"measured": 5, "total": 10}}):
+            job = quality_scan_job.QualityScanJob()
+            job.event_bus.subscribe("TASK_FINISHED", events.append)
+            job.run()
+        self.assertEqual(events[0]["result"], {"measured": 260, "unreadable": 4})
+
+    def test_mediainfo_missing_is_reported_not_marked_unreadable(self):
+        from core.library.quality_scan import MediaInfoUnavailable, measure_episodes
+
+        db = MagicMock()
+        with patch("core.library.quality_scan.mediainfo_available", return_value=False):
+            with self.assertRaises(MediaInfoUnavailable):
+                measure_episodes(db, limit=10)
+        db.mark_episode_resolution_unreadable.assert_not_called()
 
 
 if __name__ == "__main__":

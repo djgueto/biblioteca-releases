@@ -36,7 +36,9 @@ class LibraryRepository:
                 GROUP BY series_id
             ) me ON me.series_id = s.id
             LEFT JOIN (
-                SELECT series_id, COUNT(*) AS local_count, MAX(resolution_height) AS max_resolution
+                SELECT series_id, COUNT(*) AS local_count,
+                       -- solo la calidad leída del archivo: el nombre no es fiable
+                       MAX(CASE WHEN quality_source = 'mediainfo' THEN resolution_height END) AS max_resolution
                 FROM local_episodes GROUP BY series_id
             ) le ON le.series_id = s.id
             LEFT JOIN (
@@ -44,7 +46,7 @@ class LibraryRepository:
                 FROM source_offers WHERE available = 1
                 GROUP BY series_id
             ) so ON so.series_id = s.id
-            LEFT JOIN item_quality iq ON iq.series_id = s.id AND iq.unreadable = 0
+            LEFT JOIN item_quality iq ON iq.series_id = s.id AND iq.unreadable = 0 AND iq.source = 'mediainfo'
             ORDER BY COALESCE(NULLIF(s.tmdb_name, ''), s.name) COLLATE NOCASE
         ''')
         return [self._present(dict(row)) for row in cursor.fetchall()]

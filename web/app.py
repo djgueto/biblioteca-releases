@@ -29,6 +29,8 @@ from core.discovery.repository import WantedRepository
 from core.discovery.rules import APPROVED, DISMISSED, EXPIRED, IN_LIBRARY, REJECTED, WAITING, DiscoverySettings
 from core.discovery.service import DiscoveryService
 from core.download_clients import ED2K, TORRENT, build_download_dispatcher
+from core.library.parser import mediainfo_available
+from core.library.quality_scan import coverage as quality_coverage
 from core.library.roots import LibraryRoots, sync_library_roots
 from core.repositories import DecisionLogRepository, LibraryRepository, SeriesRepository, SourceOfferRepository
 from core.repositories.grab_history_repository import GrabHistoryRepository
@@ -175,7 +177,13 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
         seasons: dict[int, dict] = {}
         for ep in db.get_local_episodes(series_id):
             season = seasons.setdefault(ep["season"], {"season": ep["season"], "local": [], "missing": []})
-            season["local"].append({k: ep.get(k) for k in ("episode", "filename", "resolution_height", "codec", "hdr", "size_mb")})
+            measured = ep.get("quality_source") == "mediainfo"
+            season["local"].append({
+                "episode": ep.get("episode"), "filename": ep.get("filename"), "size_mb": ep.get("size_mb"),
+                "measured": measured,
+                # Sin analizar con MediaInfo no se muestra calidad: el nombre no es fiable.
+                **{k: (ep.get(k) if measured else None) for k in ("resolution_height", "codec", "hdr")},
+            })
         for ep in db.get_missing_episodes_for_series(series_id):
             season = seasons.setdefault(ep["season"], {"season": ep["season"], "local": [], "missing": []})
             season["missing"].append({k: ep.get(k) for k in ("episode", "name", "air_date")})
@@ -255,6 +263,8 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
             ],
             "tmdb_configured": bool(Settings.TMDB_API_KEY),
             "library_paths": LibraryRepository(DatabaseManager()).path_health(),
+            "quality_coverage": quality_coverage(DatabaseManager()),
+            "mediainfo_available": mediainfo_available(),
             "library_roots": [
                 {"category": r.category, "label": Settings.get_category_label(r.category),
                  "path": r.path, "accessible": Path(r.path).exists()}

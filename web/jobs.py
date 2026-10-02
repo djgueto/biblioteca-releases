@@ -31,18 +31,21 @@ logger = logging.getLogger(__name__)
 JOB_LABELS = {
     "scheduler": "Ciclo automático",
     "discovery": "Buscar novedades",
+    "quality_scan": "Analizar calidad",
     "tmdb_recalc": "Recalcular TMDB",
 }
 
 
 def _default_factories() -> dict[str, Callable[[EventBus], BackgroundJob]]:
     from core.discovery.job import DiscoveryJob
+    from core.library.quality_scan_job import QualityScanJob
     from core.scheduler import Scheduler
     from core.tmdb.recalc_job import TMDBRecalcJob
 
     return {
         "scheduler": lambda bus: Scheduler(event_bus=bus),
         "discovery": lambda bus: DiscoveryJob(event_bus=bus),
+        "quality_scan": lambda bus: QualityScanJob(event_bus=bus),
         "tmdb_recalc": lambda bus: TMDBRecalcJob(event_bus=bus),
     }
 

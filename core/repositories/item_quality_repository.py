@@ -43,8 +43,11 @@ class ItemQualityRepository:
             LEFT JOIN item_quality iq ON iq.series_id = s.id
             WHERE s.content_category IN ({placeholders})
               AND COALESCE(s.placeholder, 0) = 0
-              AND (iq.series_id IS NULL OR iq.item_path != s.folder_path)
-            ORDER BY s.id
+              AND (iq.series_id IS NULL
+                   OR iq.item_path != s.folder_path
+                   OR COALESCE(iq.source, '') != 'mediainfo' AND iq.unreadable = 0
+                   OR iq.unreadable = 1 AND iq.checked_at < datetime('now', '-7 days'))
+            ORDER BY iq.series_id IS NOT NULL, s.id
             LIMIT ?
             """,
             (*categories, limit),
@@ -68,6 +71,20 @@ class ItemQualityRepository:
         )
         conn.commit()
 
+    def counts(self, categories: list[str]) -> dict:
+        if not categories:
+            return {"total": 0, "measured": 0, "unreadable": 0}
+        placeholders = ",".join("?" for _ in categories)
+        row = self.db.get_connection().execute(
+            f"""
+            SELECT COUNT(*), SUM(iq.source = 'mediainfo' AND iq.unreadable = 0), SUM(iq.unreadable = 1)
+            FROM series s LEFT JOIN item_quality iq ON iq.series_id = s.id
+            WHERE s.content_category IN ({placeholders}) AND COALESCE(s.placeholder, 0) = 0
+            """,
+            categories,
+        ).fetchone()
+        return {"total": row[0] or 0, "measured": row[1] or 0, "unreadable": row[2] or 0}
+
     def get(self, series_id: int) -> Quality | None:
         row = self.db.get_connection().execute(
             "SELECT resolution_height, codec, hdr FROM item_quality WHERE series_id = ? AND unreadable = 0",
@@ -87,7 +104,7 @@ class ItemQualityRepository:
             SELECT s.id, s.name, s.tmdb_name, s.year, s.hispashare_url, s.tmdb_id, s.content_category, s.folder_path,
                    iq.resolution_height, iq.codec, iq.hdr
             FROM series s
-            JOIN item_quality iq ON iq.series_id = s.id AND iq.unreadable = 0
+            JOIN item_quality iq ON iq.series_id = s.id AND iq.unreadable = 0 AND iq.source = 'mediainfo'
             WHERE COALESCE(s.monitored, 1) = 1
               AND s.content_category IN ({placeholders})
               AND (

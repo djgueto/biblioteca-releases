@@ -290,6 +290,7 @@ function SeriesDetail({ id, tick, toast }) {
             <span><span class="ep">1</span>En disco</span>
             <span><span class="ep q4k">1</span>En 4K</span>
             <span><span class="ep missing">1</span>Falta</span>
+            <span><span class="ep unmeasured">1</span>Calidad sin analizar</span>
           </span>
         </h3>
         <div class="panel">
@@ -308,8 +309,8 @@ function SeriesDetail({ id, tick, toast }) {
                 </div>
                 <div class="eps">
                   ${eps.map((e) => html`
-                    <span class=${'ep' + (!e.ok ? ' missing' : e.resolution_height >= 2000 ? ' q4k' : '')}
-                      title=${e.ok ? `${e.filename}${e.resolution_height ? ' · ' + qualityLabel(e.resolution_height) : ''}` : `Falta${e.name ? ': ' + e.name : ''}${e.air_date ? ' · ' + e.air_date : ''}`}>
+                    <span class=${'ep' + (!e.ok ? ' missing' : e.resolution_height >= 2000 ? ' q4k' : '') + (e.ok && !e.measured ? ' unmeasured' : '')}
+                      title=${e.ok ? `${e.filename} · ${e.measured ? [qualityLabel(e.resolution_height), e.codec, hdrLabel(e.hdr)].filter(Boolean).join(' · ') : 'calidad sin analizar'}` : `Falta${e.name ? ': ' + e.name : ''}${e.air_date ? ' · ' + e.air_date : ''}`}>
                       ${e.episode}
                     </span>`)}
                 </div>
@@ -596,6 +597,13 @@ function System() {
         <table class="list"><tbody>
           <tr><td>TMDB</td><td>${data.tmdb_configured ? html`<span class="pill ok">API key configurada</span>` : html`<span class="pill bad">Falta API key</span>`}</td></tr>
           <tr><td>Intervalo del ciclo automático</td><td>${data.check_interval_hours} h</td></tr>
+          <tr><td>Calidad analizada con MediaInfo</td><td>
+            ${!data.mediainfo_available ? html`<span class="pill bad">MediaInfo no disponible</span>` : html`
+              <span class="mono">${data.quality_coverage.episodes.measured}/${data.quality_coverage.episodes.total}</span> episodios ·
+              <span class="mono">${data.quality_coverage.items.measured}/${data.quality_coverage.items.total}</span> películas y documentales
+              ${(data.quality_coverage.episodes.unreadable + data.quality_coverage.items.unreadable) > 0 && html`<span class="faint"> · ${data.quality_coverage.episodes.unreadable + data.quality_coverage.items.unreadable} sin poder leer (se reintentan en 7 días)</span>`}
+              <button class="btn small" style="margin-left:10px" onClick=${() => api.post('/api/jobs/quality_scan/start').then(() => go('activity'), (e) => alert(e.message))}>Analizar ahora</button>`}
+          </td></tr>
           <tr><td>Rutas de biblioteca</td><td>
             ${data.library_paths.ok
               ? html`<span class="pill ok">Coinciden</span>`

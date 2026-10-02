@@ -13,7 +13,6 @@ from core.hispashare.searcher import HispashareSearcher
 from core.hispashare.content_scanner import ContentScanner
 from core.wolfmax.category_scanner import WolfmaxCategoryScanner, WOLFMAX_CATEGORY_URLS, _normalize, _title_score
 from core.wolfmax.downloader import is_current_url as is_current_wolfmax_url
-from core.library.parser import detect_resolution_from_file
 from core.database.db_manager import DatabaseManager
 from core.events import SOURCE_URL_SAVED, TMDB_MATCHED
 from core.jobs import BackgroundJob
@@ -34,7 +33,7 @@ from core.services.quality import quality_from_local_episode
 from core.services.quality_profile import TIERS, tier_of
 from core.repositories.item_quality_repository import ItemQualityRepository
 from core.repositories.grab_history_repository import GrabHistoryRepository
-from core.library.item_quality import detect_item_quality
+from core.library.quality_scan import MediaInfoUnavailable, measure_episodes, measure_items
 from config.settings import Settings
 
 class Scheduler(BackgroundJob):
@@ -913,85 +912,30 @@ class Scheduler(BackgroundJob):
             self.logger.error(f"Error en scan_wolfmax_categories: {e}")
             self._log(f"   ⚠️ Error en wolfmax category scan: {e}")
 
-    def scan_missing_resolutions(self, batch_size=1200, workers=4):
-        """
-        Detecta la calidad real (MediaInfo: resolución, códec, HDR) de los
-        episodios cuyo nombre de archivo no la dice. Leer cada archivo por la
-        red tarda ~1-2 s: se leen varios a la vez, en tandas por ciclo.
-        """
-        from concurrent.futures import ThreadPoolExecutor
+    def scan_missing_resolutions(self, batch_size=1200):
+        """Analiza con MediaInfo una tanda de episodios cuya calidad aún no se
+        ha leído del propio archivo (lo que diga el nombre no cuenta)."""
+        self._scan_quality("episodios", measure_episodes, batch_size)
 
+    def scan_item_qualities(self, batch_size=600):
+        """Igual para películas, documentales y conciertos."""
+        self._scan_quality("películas/documentales", measure_items, batch_size)
+
+    def _scan_quality(self, label, measure, batch_size):
         try:
-            episodes = self.db.get_episodes_missing_resolution(limit=batch_size)
-            if not episodes:
-                self._log("   ✅ Todas las resoluciones ya detectadas")
-                return
-
-            self._log(
-                f"   🔬 Detectando calidad de {len(episodes)} episodio(s) con MediaInfo..."
-            )
-            resolved = []
-            failed_ids = []
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                futures = [(ep, pool.submit(detect_resolution_from_file, ep['file_path'])) for ep in episodes]
-                for ep, future in futures:
-                    if not self.running:
-                        pool.shutdown(cancel_futures=True)
-                        break
-                    try:
-                        result = future.result()
-                    except Exception:
-                        result = None
-                    if result:
-                        resolved.append({'id': ep['id'], **result})
-                    else:
-                        failed_ids.append(ep['id'])
-
-            # Las escrituras van en este hilo: la conexión SQLite es por hilo.
-            if resolved:
-                self.db.batch_update_episode_resolutions(resolved)
-            if failed_ids:
-                self.db.mark_episode_resolution_unreadable(failed_ids)
-
-            pending = self.db.get_episodes_missing_resolution(limit=1)
-            self._log(
-                f"   ✅ Resueltos: {len(resolved)} | No leíbles: {len(failed_ids)} | "
-                f"Pendientes: {'0' if not pending else 'quedan más para el próximo ciclo'}"
-            )
-        except Exception as e:
-            self.logger.error(f"Error en scan_missing_resolutions: {e}")
-            self._log(f"   ⚠️ Error detectando resoluciones: {e}")
-
-    def scan_item_qualities(self, batch_size=600, workers=4):
-        """Mide la calidad real (MediaInfo) de películas, documentales y
-        conciertos que aún no la tienen. Leer cada archivo por la red tarda
-        ~2 s, así que se leen varios a la vez y en tandas por ciclo."""
-        from concurrent.futures import ThreadPoolExecutor
-
-        pending = self.item_quality_repository.pending(Settings.get_single_file_categories(), limit=batch_size)
-        if not pending:
+            result = measure(self.db, limit=batch_size, should_stop=lambda: not self.running)
+        except MediaInfoUnavailable as e:
+            self._log(f"   ⚠️ {e}")
             return
-        self._log(f"   🔬 Midiendo calidad de {len(pending)} películas/documentales...")
-        measured = unreadable = 0
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = [(item, pool.submit(detect_item_quality, item["folder_path"])) for item in pending]
-            for item, future in futures:
-                if not self.running:
-                    pool.shutdown(cancel_futures=True)
-                    return
-                try:
-                    file_path, quality, source = future.result()
-                except Exception as e:
-                    self.logger.warning(f"No se pudo medir '{item['name']}': {e}")
-                    continue
-                # Las escrituras van en este hilo: la conexión SQLite es por hilo.
-                self.item_quality_repository.save(item["id"], item["folder_path"], file_path=file_path,
-                                                  quality=quality, source=source)
-                if quality:
-                    measured += 1
-                else:
-                    unreadable += 1
-        self._log(f"   ✅ Calidad medida: {measured} | sin poder leer: {unreadable}")
+        except Exception as e:
+            self.logger.error(f"Error analizando calidad de {label}: {e}")
+            self._log(f"   ⚠️ Error analizando calidad de {label}: {e}")
+            return
+        if result["measured"] or result["unreadable"]:
+            self._log(
+                f"   🔬 Calidad de {label}: {result['measured']} analizados | {result['unreadable']} sin poder leer"
+                + (" | quedan más para el próximo ciclo" if result["pending"] else "")
+            )
 
     def process_upgrades(self, driver):
         """
@@ -1009,9 +953,10 @@ class Scheduler(BackgroundJob):
             # scan_missing_resolutions) no se evalúa: no hay con qué comparar.
             profile = self.source_arbitration_service.profile
             for series in self.db.get_series_with_local_resolution_and_any_offer(self.db.get_episodic_categories()):
+                # Solo cuenta la calidad leída del archivo con MediaInfo.
                 known = [
                     quality_from_local_episode(ep) for ep in self.db.get_local_episodes(series['id'])
-                    if ep.get('resolution_height')
+                    if ep.get('quality_source') == 'mediainfo' and ep.get('resolution_height')
                 ]
                 if not known:
                     continue

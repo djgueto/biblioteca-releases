@@ -103,9 +103,9 @@ class TestWebApi(unittest.TestCase):
                     'https://www.hispashare.org/?view=title&id=77');
             INSERT INTO series (id, name, folder_path, content_category, year, monitored)
             VALUES (2, 'Peli B', '/media/movies/b.mkv', 'movies', 2021, 0);
-            INSERT INTO local_episodes (series_id, season, episode, filename, file_path, resolution_height)
-            VALUES (1, 1, 1, 'a.s01e01.mkv', '/media/series/a/1.mkv', 2160),
-                   (1, 1, 2, 'a.s01e02.mkv', '/media/series/a/2.mkv', 1080);
+            INSERT INTO local_episodes (series_id, season, episode, filename, file_path, resolution_height, quality_source)
+            VALUES (1, 1, 1, 'a.s01e01.mkv', '/media/series/a/1.mkv', 2160, 'mediainfo'),
+                   (1, 1, 2, 'a.s01e02.mkv', '/media/series/a/2.mkv', 1080, 'mediainfo');
             INSERT INTO missing_episodes (series_id, series_name, season, episode, name, air_date, status)
             VALUES (1, 'Serie A', 1, 3, 'Tercero', '2026-01-01', 'missing');
         """)
