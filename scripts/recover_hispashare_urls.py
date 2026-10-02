@@ -24,7 +24,8 @@ def recover(db_path: Path, log_path: Path) -> tuple[int, int, int]:
     missing_names = 0
     multi_match_names = 0
 
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=60.0)
+    conn.execute("PRAGMA busy_timeout = 60000")
     try:
         cur = conn.cursor()
         for name, url in pairs.items():

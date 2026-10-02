@@ -18,13 +18,14 @@ class ContentScanner:
     Escáner automático de nuevo contenido en Hispashare con filtros específicos
     """
     
-    def __init__(self, driver, db_manager):
+    def __init__(self, driver, db_manager, should_stop=None):
         self.driver = driver
         self.db_manager = db_manager
         self.logger = logging.getLogger(__name__)
         self.parser = EpisodeParser()
         self.emule_client = EmuleClient()
         self.settings = Settings()
+        self.should_stop = should_stop or (lambda: False)
         
         # URLs de búsqueda por páginas (dinámico basado en configuración)
         num_pages = self.settings.CONTENT_DISCOVERY_PAGES
@@ -45,6 +46,59 @@ class ContentScanner:
             'languages': ['spanish', 'catalan'],      # Solo español y catalán
             'year': current_year                      # Solo contenido del año actual
         }
+        self.category_profiles = self._build_category_profiles()
+
+    def _build_category_profiles(self):
+        return {
+            'series': {
+                'label': Settings.get_category_label('series'),
+                'content_mode': 'episodic',
+                'genre_tokens': ['series >'],
+                'keywords': [],
+            },
+            'cartoons': {
+                'label': Settings.get_category_label('cartoons'),
+                'content_mode': 'episodic',
+                'genre_tokens': ['series >'],
+                'keywords': ['animacion', 'animación', 'anime', 'dibujos'],
+            },
+            'docuseries': {
+                'label': Settings.get_category_label('docuseries'),
+                'content_mode': 'episodic',
+                'genre_tokens': ['series >', 'documentales >'],
+                'keywords': ['docuserie', 'documental'],
+            },
+            'movies': {
+                'label': Settings.get_category_label('movies'),
+                'content_mode': 'single_file',
+                'genre_tokens': ['películas >'],
+                'keywords': [],
+            },
+            'animated_movies': {
+                'label': Settings.get_category_label('animated_movies'),
+                'content_mode': 'single_file',
+                'genre_tokens': ['películas >'],
+                'keywords': ['animacion', 'animación', 'anime'],
+            },
+            'documentaries': {
+                'label': Settings.get_category_label('documentaries'),
+                'content_mode': 'single_file',
+                'genre_tokens': ['documentales >'],
+                'keywords': ['documental'],
+            },
+            'concerts': {
+                'label': Settings.get_category_label('concerts'),
+                'content_mode': 'single_file',
+                'genre_tokens': ['música >', 'musica >'],
+                'keywords': ['concierto', 'concert', 'live'],
+            },
+            'music': {
+                'label': Settings.get_category_label('music'),
+                'content_mode': 'single_file',
+                'genre_tokens': ['música >', 'musica >'],
+                'keywords': [],
+            },
+        }
     
     def scan_new_content(self):
         """
@@ -58,26 +112,51 @@ class ContentScanner:
         all_content = []
         
         for page_num, url in enumerate(self.search_urls, 1):
+            if self.should_stop():
+                self.logger.info("🛑 Barrido cancelado por solicitud de parada")
+                break
             self.logger.info(f"📄 Escaneando página {page_num}: {url}")
             
             try:
                 content_items = self._scan_page(url)
-                filtered_items = self._apply_filters(content_items)
+                categorized_items = self._categorize_content_items(content_items)
+                filtered_items = self._apply_filters(categorized_items)
                 
                 self.logger.info(f"   📊 Página {page_num}: {len(content_items)} elementos encontrados, {len(filtered_items)} pasaron filtros")
                 
                 all_content.extend(filtered_items)
                 
             except Exception as e:
+                if self.should_stop():
+                    self.logger.info("🛑 Barrido cancelado por solicitud de parada")
+                    break
                 self.logger.error(f"❌ Error escaneando página {page_num}: {e}")
                 continue
         
         # Verificar duplicados en bibliotecas existentes
         unique_content = self._check_existing_content(all_content)
+
+        for category in Settings.get_library_categories():
+            category_items = [item for item in unique_content if item.get('library_category') == category]
+            if category_items:
+                self.logger.info(
+                    f"   📚 {Settings.get_category_label(category)}: {len(category_items)} candidatos nuevos"
+                )
         
         self.logger.info(f"✅ Barrido completado: {len(unique_content)} elementos únicos encontrados")
         
         return unique_content
+
+    def _categorize_content_items(self, content_items):
+        categorized = []
+        for item in content_items:
+            category = self._classify_library_category(item)
+            if not category:
+                continue
+            item['library_category'] = category
+            item['content_mode'] = Settings.get_category_content_mode(category)
+            categorized.append(item)
+        return categorized
     
     def _scan_page(self, url):
         """
@@ -90,7 +169,21 @@ class ContentScanner:
             list: Lista de elementos de contenido encontrados
         """
         try:
-            self.driver.get(url)
+            if self.should_stop():
+                return []
+
+            for attempt in range(1, 4):
+                if self.should_stop():
+                    return []
+                try:
+                    self.driver.get(url)
+                    break
+                except Exception as e:
+                    if self.should_stop():
+                        return []
+                    if attempt >= 3:
+                        raise
+                    time.sleep(1.5 * attempt)
             
             # Esperar a que la página cargue
             WebDriverWait(self.driver, 10).until(
@@ -118,6 +211,8 @@ class ContentScanner:
             return content_items
             
         except Exception as e:
+            if self.should_stop():
+                return []
             self.logger.error(f"Error escaneando página {url}: {e}")
             return []
     
@@ -238,44 +333,41 @@ class ContentScanner:
             bool: True si pasa todos los filtros
         """
         try:
-            self.logger.info(f"🔍 Evaluando filtros para: {item['title'][:50]}...")
+            category = item.get('library_category')
+            category_label = Settings.get_category_label(category) if category else "Sin categoría"
+            self.logger.info(f"🔍 Evaluando filtros para [{category_label}]: {item['title'][:50]}...")
             self.logger.info(f"   Año: {item['year']} (requerido: {self.filters['year']})")
-            self.logger.info(f"   Puntuación: {item.get('rating', 'N/A')} (mínimo: 5.5)")
+            self.logger.info(f"   Puntuación: {item.get('rating', 'N/A')} (mínimo: {self.settings.CONTENT_SCAN_MIN_RATING})")
             self.logger.info(f"   Género: {item['genre'][:100]}...")
             self.logger.info(f"   Formato: {item['format'][:100]}...")
             self.logger.info(f"   Calidad: {item['quality'][:100]}...")
             self.logger.info(f"   Idiomas: {item['languages'][:100]}...")
             
-            # Filtro de puntuación mínima (5.5)
+            if not category:
+                self.logger.info("   ❌ No se pudo clasificar en una biblioteca")
+                return False
+
+            profile = self.category_profiles.get(category, {})
+            genre_text = item['genre'].lower()
+            combined_text = f"{genre_text} {(item.get('title') or '').lower()}"
+            if not self._matches_category_profile(profile, genre_text, combined_text):
+                self.logger.info(f"   ❌ El contenido no encaja con la biblioteca {category_label}")
+                return False
+
+            # Filtro de puntuación mínima
             rating = item.get('rating')
             if rating is None:
                 self.logger.info(f"   ❌ Sin puntuación disponible")
                 return False
-            elif rating < 5.5:
-                self.logger.info(f"   ❌ Puntuación muy baja: {rating} < 5.5")
+            elif rating < self.settings.CONTENT_SCAN_MIN_RATING:
+                self.logger.info(f"   ❌ Puntuación muy baja: {rating} < {self.settings.CONTENT_SCAN_MIN_RATING}")
                 return False
             else:
-                self.logger.info(f"   ✅ Puntuación aceptable: {rating} >= 5.5")
+                self.logger.info(f"   ✅ Puntuación aceptable: {rating} >= {self.settings.CONTENT_SCAN_MIN_RATING}")
             
             # Filtro de año (solo 2025)
             if item['year'] != self.filters['year']:
                 self.logger.info(f"   ❌ Año no coincide: {item['year']} != {self.filters['year']}")
-                return False
-            
-            # Filtro de género (debe contener uno de los géneros permitidos)
-            genre_text = item['genre'].lower()
-            genre_found = False
-            is_movie = False
-            for genre in self.filters['genres']:
-                if genre.lower() in genre_text:
-                    genre_found = True
-                    if genre.lower() == 'películas':
-                        is_movie = True
-                    self.logger.info(f"   ✅ Género encontrado: {genre}")
-                    break
-            
-            if not genre_found:
-                self.logger.info(f"   ❌ Género no encontrado en: {genre_text}")
                 return False
             
             # Filtro de idioma (debe contener español o catalán, puede tener otros idiomas adicionales)
@@ -301,22 +393,22 @@ class ContentScanner:
             # Filtro de formato (preferir 2160p, aceptar 1080p)
             format_text = item['format'].lower()
             quality_text = item['quality'].lower()
-            combined_text = format_text + " " + quality_text
+            combined_quality_text = format_text + " " + quality_text
             
             format_found = False
             for fmt in self.filters['preferred_formats']:
-                if fmt.lower() in combined_text:
+                if fmt.lower() in combined_quality_text:
                     format_found = True
                     self.logger.info(f"   ✅ Formato encontrado: {fmt}")
                     break
             
             if not format_found:
-                self.logger.info(f"   ❌ Formato no encontrado en: {combined_text}")
+                self.logger.info(f"   ❌ Formato no encontrado en: {combined_quality_text}")
                 return False
             
-            # Filtro de tamaño para películas (mínimo y máximo estimados)
-            if is_movie:
-                estimated_size_gb = self._estimate_movie_size_from_quality(combined_text)
+            # Filtro de tamaño para contenido de archivo único visual
+            if item.get('content_mode') == 'single_file':
+                estimated_size_gb = self._estimate_movie_size_from_quality(combined_quality_text)
                 min_size_gb = self.settings.MINIMUM_MOVIE_SIZE_GB
                 max_size_gb = getattr(self.settings, 'MAXIMUM_MOVIE_SIZE_GB', 0)
 
@@ -403,36 +495,90 @@ class ContentScanner:
         try:
             # Limpiar título para búsqueda
             clean_title = self._clean_title_for_search(item['title'])
-            
-            # Determinar tipo de contenido
-            genre_text = item['genre'].lower()
-            
-            # Verificar según el tipo de contenido
-            if 'películas' in genre_text or 'pelicula' in genre_text:
-                return self._movie_exists_in_library(clean_title)
-            elif 'documentales' in genre_text or 'documental' in genre_text:
-                return self._documentary_exists_in_library(clean_title)
-            elif 'música' in genre_text or 'musica' in genre_text:
-                return self._music_exists_in_library(clean_title)
-            elif 'series' in genre_text or 'serie' in genre_text:
+
+            category = item.get('library_category') or self._classify_library_category(item)
+            if category == 'series':
                 return self._series_exists_in_library(clean_title)
-            else:
-                # Por defecto, buscar en todas las bibliotecas
-                return (self._series_exists_in_library(clean_title) or
-                        self._movie_exists_in_library(clean_title) or
-                        self._documentary_exists_in_library(clean_title) or
-                        self._music_exists_in_library(clean_title))
+            if category == 'movies':
+                return self._movie_exists_in_library(clean_title)
+            if category == 'documentaries':
+                return self._documentary_exists_in_library(clean_title)
+            if category == 'cartoons':
+                return self._cartoons_exists_in_library(clean_title)
+            if category == 'animated_movies':
+                return self._animated_movies_exists_in_library(clean_title)
+            if category == 'docuseries':
+                return self._docuseries_exists_in_library(clean_title)
+            if category == 'concerts':
+                return self._concerts_exists_in_library(clean_title)
+            if category == 'music':
+                return self._music_exists_in_library(clean_title)
+
+            # Por defecto, buscar en todas las bibliotecas
+            return (
+                self._series_exists_in_library(clean_title) or
+                self._movie_exists_in_library(clean_title) or
+                self._documentary_exists_in_library(clean_title) or
+                self._cartoons_exists_in_library(clean_title) or
+                self._animated_movies_exists_in_library(clean_title) or
+                self._docuseries_exists_in_library(clean_title) or
+                self._concerts_exists_in_library(clean_title) or
+                self._music_exists_in_library(clean_title)
+            )
             
         except Exception as e:
             self.logger.warning(f"Error verificando contenido existente: {e}")
             return False
+
+    def _classify_library_category(self, item):
+        genre_text = (item.get('genre') or '').lower()
+        title_text = (item.get('title') or '').lower()
+        combined_text = f"{genre_text} {title_text}"
+
+        is_series = 'series' in genre_text or 'serie' in genre_text
+        is_movie = 'películas' in genre_text or 'pelicula' in genre_text
+        is_documentary = 'documentales' in genre_text or 'documental' in genre_text
+        is_music = 'música' in genre_text or 'musica' in genre_text
+        is_animation = 'animación' in combined_text or 'animacion' in combined_text or 'anime' in combined_text
+        is_concert = 'concierto' in combined_text or 'concert' in combined_text or 'live' in combined_text
+
+        if is_series and ('documental' in combined_text or 'docuserie' in combined_text):
+            return 'docuseries'
+        if is_series and is_animation:
+            return 'cartoons'
+        if is_movie and is_animation:
+            return 'animated_movies'
+        if is_music and is_concert:
+            return 'concerts'
+        if is_documentary:
+            return 'documentaries'
+        if is_movie:
+            return 'movies'
+        if is_series:
+            return 'series'
+        if is_music:
+            return 'music'
+        return None
+
+    def _matches_category_profile(self, profile, genre_text, combined_text):
+        if not profile:
+            return False
+
+        genre_tokens = profile.get('genre_tokens', [])
+        keywords = profile.get('keywords', [])
+
+        genre_match = any(token in genre_text for token in genre_tokens) if genre_tokens else True
+        keyword_match = any(keyword in combined_text for keyword in keywords) if keywords else True
+
+        if genre_tokens and keywords:
+            return genre_match and keyword_match
+        return genre_match and keyword_match
     
     def _series_exists_in_library(self, clean_title):
         """Verifica si una serie ya existe en la biblioteca"""
         try:
             # Buscar en series existentes en la base de datos
-            existing_series = self.db_manager.search_series_by_name(clean_title)
-            if existing_series:
+            if self._db_match_exists(clean_title):
                 return True
             
             # Buscar en archivos locales por nombre similar
@@ -449,7 +595,9 @@ class ContentScanner:
     def _movie_exists_in_library(self, clean_title):
         """Verifica si una película ya existe en la biblioteca"""
         try:
-            library_paths = self.settings.get_movies_paths()
+            if self._db_match_exists(clean_title, ['movies', 'animated_movies']):
+                return True
+            library_paths = self.settings.get_movies_paths() + self.settings.get_animated_movies_paths()
             for library_path in library_paths:
                 if self._search_in_directory(Path(library_path), clean_title):
                     return True
@@ -461,7 +609,9 @@ class ContentScanner:
     def _documentary_exists_in_library(self, clean_title):
         """Verifica si un documental ya existe en la biblioteca"""
         try:
-            library_paths = self.settings.get_documentaries_paths()
+            if self._db_match_exists(clean_title, ['documentaries', 'docuseries']):
+                return True
+            library_paths = self.settings.get_documentaries_paths() + self.settings.get_docuseries_paths()
             for library_path in library_paths:
                 if self._search_in_directory(Path(library_path), clean_title):
                     return True
@@ -469,10 +619,68 @@ class ContentScanner:
         except Exception as e:
             self.logger.warning(f"Error verificando documental existente: {e}")
             return False
+
+    def _cartoons_exists_in_library(self, clean_title):
+        """Verifica si dibujos ya existen en la biblioteca."""
+        try:
+            if self._db_match_exists(clean_title, ['cartoons']):
+                return True
+            library_paths = self.settings.get_cartoons_paths()
+            for library_path in library_paths:
+                if self._search_in_directory(Path(library_path), clean_title):
+                    return True
+            return False
+        except Exception as e:
+            self.logger.warning(f"Error verificando dibujos existentes: {e}")
+            return False
+
+    def _animated_movies_exists_in_library(self, clean_title):
+        """Verifica si una película de animación ya existe en la biblioteca."""
+        try:
+            if self._db_match_exists(clean_title, ['animated_movies']):
+                return True
+            library_paths = self.settings.get_animated_movies_paths()
+            for library_path in library_paths:
+                if self._search_in_directory(Path(library_path), clean_title):
+                    return True
+            return False
+        except Exception as e:
+            self.logger.warning(f"Error verificando película animada existente: {e}")
+            return False
+
+    def _docuseries_exists_in_library(self, clean_title):
+        """Verifica si un documental en serie ya existe en la biblioteca."""
+        try:
+            if self._db_match_exists(clean_title, ['docuseries']):
+                return True
+            library_paths = self.settings.get_docuseries_paths()
+            for library_path in library_paths:
+                if self._search_in_directory(Path(library_path), clean_title):
+                    return True
+            return False
+        except Exception as e:
+            self.logger.warning(f"Error verificando docuserie existente: {e}")
+            return False
+
+    def _concerts_exists_in_library(self, clean_title):
+        """Verifica si un concierto ya existe en la biblioteca."""
+        try:
+            if self._db_match_exists(clean_title, ['concerts']):
+                return True
+            library_paths = self.settings.get_concerts_paths()
+            for library_path in library_paths:
+                if self._search_in_directory(Path(library_path), clean_title):
+                    return True
+            return False
+        except Exception as e:
+            self.logger.warning(f"Error verificando concierto existente: {e}")
+            return False
     
     def _music_exists_in_library(self, clean_title):
         """Verifica si música ya existe en la biblioteca"""
         try:
+            if self._db_match_exists(clean_title, ['music']):
+                return True
             library_paths = self.settings.get_music_paths()
             for library_path in library_paths:
                 if self._search_in_directory(Path(library_path), clean_title):
@@ -582,28 +790,49 @@ class ContentScanner:
         # MEJORA 1: Verificar coincidencia exacta primero
         if t1 == t2:
             return True
-        
-        # MEJORA 2: Verificar si uno está completamente contenido en el otro
-        if t1 in t2 or t2 in t1:
-            return True
-        
-        # MEJORA 3: Comparación por palabras con umbral más estricto
-        words1 = set(word for word in t1.split() if len(word) > 2)  # Ignorar palabras muy cortas
-        words2 = set(word for word in t2.split() if len(word) > 2)
-        
+
+        # NOTA: NO se usa "uno contenido en el otro" como criterio de similitud.
+        # Eso trataba franquicias/secuelas como el mismo título (p.ej. "Toy Story"
+        # quedaba "contenido en" "Toy Story 3"), marcándolas como ya poseídas y
+        # dejándolas fuera para siempre de la búsqueda/descarga automática.
+
+        # MEJORA 3: Comparación por palabras tipo Jaccard (intersección / unión),
+        # simétrica en ambos sentidos: una palabra o número distintivo presente
+        # en un título pero no en el otro (p.ej. "3", "II", un año) penaliza la
+        # similitud sin importar cuál de los dos títulos sea más largo.
+        words1 = set(word for word in t1.split() if len(word) > 2 or word.isdigit())
+        words2 = set(word for word in t2.split() if len(word) > 2 or word.isdigit())
+
         if not words1 or not words2:
             return False
-        
-        intersection = words1.intersection(words2)
-        # CAMBIO CRÍTICO: Umbral más estricto (85% en lugar de 70%)
-        similarity = len(intersection) / min(len(words1), len(words2))
-        
+
+        intersection = words1 & words2
+        union = words1 | words2
+        similarity = len(intersection) / len(union)
+
         # MEJORA 4: Logging para debug
         if similarity >= 0.7:  # Log cuando hay similitud alta pero no suficiente
             self.logger.debug(f"   🔍 Similitud {similarity:.2f}: '{title1}' vs '{title2}'")
-        
+
         return similarity >= 0.85  # Umbral más estricto
-    
+
+    def _db_match_exists(self, clean_title, categories=None):
+        """
+        Comprueba si algún título ya guardado en BD corresponde realmente al
+        título buscado, en vez de confiar ciegamente en el filtro LIKE '%...%'
+        de search_series_by_name (que trata "Toy Story" y "Toy Story 3" como
+        el mismo resultado por pura coincidencia de subcadena).
+        """
+        candidates = self.db_manager.search_series_by_name(clean_title, categories) or []
+        for candidate in candidates:
+            candidate_name = candidate.get('name') or ''
+            candidate_tmdb_name = candidate.get('tmdb_name') or ''
+            if candidate_name and self._titles_are_similar(clean_title, candidate_name):
+                return True
+            if candidate_tmdb_name and self._titles_are_similar(clean_title, candidate_tmdb_name):
+                return True
+        return False
+
     def process_new_content(self, content_items):
         """
         Procesa el nuevo contenido encontrado, accediendo a cada URL y descargando
@@ -617,9 +846,16 @@ class ContentScanner:
         self.logger.info(f"🎬 Procesando {len(content_items)} elementos de nuevo contenido...")
         
         all_ed2k_links = []
+        grouped_items = {}
+        for item in content_items:
+            grouped_items.setdefault(item.get('library_category', 'sin_categoria'), []).append(item)
+
+        for category, items in grouped_items.items():
+            self.logger.info(f"📚 Procesando categoría {Settings.get_category_label(category)}: {len(items)} elementos")
         
         for i, item in enumerate(content_items, 1):
-            self.logger.info(f"📥 Procesando {i}/{len(content_items)}: {item['title'][:50]}...")
+            category_label = Settings.get_category_label(item.get('library_category', ''))
+            self.logger.info(f"📥 Procesando {i}/{len(content_items)} [{category_label}]: {item['title'][:50]}...")
             
             try:
                 ed2k_links = self._process_content_item(item)
@@ -1261,6 +1497,13 @@ class ContentScanner:
             if not self.emule_client.is_configured():
                 self.logger.warning("eMule no está configurado para envío automático")
                 return
+
+            links_to_send = list(ed2k_links or [])
+            if self.db_manager:
+                links_to_send = self.db_manager.filter_new_ed2k_links(links_to_send)
+                if not links_to_send:
+                    self.logger.info("No hay enlaces nuevos para enviar a eMule (ya enviados anteriormente)")
+                    return
             
             # Guardar enlaces en archivo
             downloads_dir = Path("downloads")
@@ -1275,18 +1518,28 @@ class ContentScanner:
                 f.write(f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
                 f.write("-" * 50 + "\n\n")
                 
-                for i, link in enumerate(ed2k_links, 1):
+                for i, link in enumerate(links_to_send, 1):
                     f.write(f"{i}. {link}\n")
             
             self.logger.info(f"Enlaces guardados en: {links_file}")
             
             # Enviar a eMule
-            result = self.emule_client.add_multiple_ed2k_links(ed2k_links)
+            result = self.emule_client.add_multiple_ed2k_links(links_to_send)
             
             if result['success']:
                 self.logger.info(f"✅ {result['added']}/{result['total']} enlaces enviados a eMule")
+                if result.get('failed_links'):
+                    self.logger.warning(
+                        f"⚠️ {len(result['failed_links'])} enlaces no se pudieron añadir a aMule y se reintentarán en el próximo ciclo"
+                    )
+                if self.db_manager:
+                    sent_links = result.get('added_links', links_to_send)
+                    self.db_manager.mark_ed2k_links_sent(sent_links, kind=content_type)
             else:
-                self.logger.warning(f"❌ Error enviando enlaces a eMule: {result.get('message', 'Error desconocido')}")
+                self.logger.warning(
+                    f"❌ Error enviando enlaces a eMule: {result.get('message', 'Error desconocido')}. "
+                    f"Errores: {result.get('errors', [])[:3]}"
+                )
                 
         except Exception as e:
             self.logger.error(f"Error enviando enlaces a eMule: {e}")

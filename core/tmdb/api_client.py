@@ -36,10 +36,32 @@ class TMDBClient:
             return data['results']
         
         return []
+
+    def search_movies(self, query):
+        """Buscar peliculas por titulo"""
+        data = self._make_request('search/movie', {'query': query})
+
+        if data and 'results' in data:
+            return data['results']
+
+        return []
+
+    def search_multi(self, query):
+        """Busqueda multiple para categorias de archivo unico con menos cobertura en TMDB."""
+        data = self._make_request('search/multi', {'query': query})
+
+        if data and 'results' in data:
+            return data['results']
+
+        return []
     
     def get_series_details(self, series_id):
         """Obtener detalles completos de una serie"""
         return self._make_request(f'tv/{series_id}')
+
+    def get_movie_details(self, movie_id):
+        """Obtener detalles completos de una pelicula"""
+        return self._make_request(f'movie/{movie_id}')
     
     def get_season_details(self, series_id, season_number):
         """Obtener detalles de una temporada"""

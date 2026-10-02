@@ -139,6 +139,14 @@ class HispashareDownloader:
         for file_path in series_path.rglob('*'):
             if file_path.is_file() and file_path.suffix.lower() in video_extensions:
                 episode_info = self.parser.parse_episode(file_path.name)
+                # Si el nombre del archivo no tiene info de episodio, probar carpetas padre
+                if not episode_info:
+                    for parent in file_path.parents:
+                        if parent == series_path:
+                            break
+                        episode_info = self.parser.parse_episode(parent.name)
+                        if episode_info:
+                            break
                 if episode_info:
                     season = episode_info['season']
                     episode = episode_info['episode']
@@ -521,6 +529,65 @@ class HispashareDownloader:
         
         self.logger.warning("No se encontraron episodios faltantes en ninguna calidad")
         return []
+
+    def _quality_rank_from_text(self, quality_text):
+        value = (quality_text or "").lower()
+        if any(k in value for k in ['2160p', '4k', 'uhd', 'ultra']):
+            return 4
+        if '1080p' in value:
+            return 3
+        if '720p' in value:
+            return 2
+        if any(k in value for k in ['576p', '480p']):
+            return 1
+        return 0
+
+    def _target_quality_rank(self):
+        target = getattr(Settings, 'UPGRADE_TARGET_QUALITY', '2160p')
+        return self._quality_rank_from_text(target)
+
+    def process_upgrade_page(self, hispashare_url, episodes_to_upgrade, target_rank):
+        try:
+            if not episodes_to_upgrade:
+                return []
+
+            self.logger.info(f"Procesando página de upgrades: {hispashare_url}")
+            self.driver.get(hispashare_url)
+            WebDriverWait(self.driver, 10).until(
+                EC.presence_of_element_located((By.CLASS_NAME, "WIN1_CONTAINER"))
+            )
+
+            page_source = self.driver.page_source
+            soup = BeautifulSoup(page_source, 'html.parser')
+
+            quality_sections = self._get_quality_sections_with_scores(soup)
+            if not quality_sections:
+                self.logger.warning("No se encontraron secciones de calidad para upgrades")
+                return []
+
+            candidates = []
+            for section, file_size, quality_text in quality_sections:
+                rank = self._quality_rank_from_text(quality_text)
+                if rank >= target_rank:
+                    candidates.append((section, file_size, quality_text, rank))
+
+            if not candidates:
+                self.logger.info("No hay secciones que cumplan la calidad objetivo para upgrades")
+                return []
+
+            candidates.sort(key=lambda x: (x[3], x[1]), reverse=True)
+
+            for section, file_size, quality_text, _ in candidates:
+                self.logger.info(f"🔼 Buscando upgrades en calidad: {quality_text} (tamaño: {file_size:.2f} MB)")
+                links = self._process_quality_section(section, episodes_to_upgrade, quality_text)
+                if links:
+                    return links
+
+            return []
+
+        except Exception as e:
+            self.logger.error(f"Error procesando página de upgrades: {e}")
+            return []
     
     def _check_language_compatibility(self, section_parent):
         """
@@ -645,34 +712,53 @@ class HispashareDownloader:
         episode_rows = section.find_all('tr')[1:]  # Saltar header
         
         checkboxes_to_select = []
+        all_checkboxes_in_section = []
+        parsed_episode_rows = 0
+        rows_with_checkbox = 0
+        part_like_rows = 0
         
         for row in episode_rows:
             # Extraer información del episodio
             checkbox = row.find('input', type='checkbox')
             if not checkbox:
                 continue
+            rows_with_checkbox += 1
             
             episode_link = row.find('a')
             if not episode_link:
                 continue
             
             episode_title = episode_link.text.strip()
+            title_lower = episode_title.lower()
+            if re.search(r'(?:\bpart\s*\d+\b|\.rar\b|\.r\d\d\b|\.zip\b|\.7z\b)', title_lower):
+                part_like_rows += 1
+            checkbox_id = checkbox.get('id')
+            if checkbox_id:
+                all_checkboxes_in_section.append(checkbox_id)
             
             # Parsear temporada y episodio del título
             episode_info = self.parser.parse_episode(episode_title)
             if not episode_info:
                 continue
+            parsed_episode_rows += 1
             
             season = episode_info['season']
             episode = episode_info['episode']
             
             # Verificar si este episodio está en la lista de faltantes
             if season in missing_episodes and episode in missing_episodes[season]:
-                checkbox_id = checkbox.get('id')
                 if checkbox_id:
                     checkboxes_to_select.append(checkbox_id)
                     self.logger.info(f"Episodio faltante encontrado{quality_info}: {episode_title}")
         
+        if not checkboxes_to_select:
+            if parsed_episode_rows == 0 and part_like_rows >= 3 and all_checkboxes_in_section:
+                self.logger.info(
+                    f"Detectado posible paquete comprimido por partes{quality_info}: "
+                    f"{part_like_rows} filas tipo 'part/rar/zip' sin numeración SxxExx. Seleccionando todo el paquete."
+                )
+                checkboxes_to_select = all_checkboxes_in_section
+
         # Seleccionar checkboxes de episodios faltantes
         if checkboxes_to_select:
             self.logger.info(f"Seleccionando {len(checkboxes_to_select)} episodios en calidad{quality_info}")
@@ -805,7 +891,15 @@ class HispashareDownloader:
                                     if line not in ed2k_links:  # Evitar duplicados
                                         ed2k_links.append(line)
                                         self.logger.info(f"Enlace ed2k obtenido{quality_info}: {line[:80]}...")
-                        
+
+                        if len(ed2k_links) < len(checkbox_ids):
+                            self.logger.warning(
+                                f"Discrepancia en el popup de enlaces{quality_info}: "
+                                f"se seleccionaron {len(checkbox_ids)} episodios pero solo se obtuvieron "
+                                f"{len(ed2k_links)} enlaces ed2k. Los episodios sin enlace seguirán "
+                                f"apareciendo como faltantes y se reintentarán en el próximo ciclo."
+                            )
+
                         # Cerrar el popup
                         try:
                             close_button = self.driver.find_element(By.XPATH, "//div[@class='X']")
@@ -888,13 +982,119 @@ class HispashareDownloader:
         
         if ed2k_links:
             self.logger.info(f"Se obtuvieron {len(ed2k_links)} enlaces ed2k para {series['name']}")
-            
+
             # Guardar enlaces en la base de datos o archivo
             self._save_ed2k_links(series_id, ed2k_links)
-        
+
+        self._persist_quality_offer(series_id, series['hispashare_url'])
         return ed2k_links
-    
-    def _save_ed2k_links(self, series_id, ed2k_links):
+
+    def download_upgrade_episodes(self, series_id):
+        series = self.db_manager.get_series_by_id(series_id)
+        if not series or not series.get('hispashare_url'):
+            return []
+
+        target_rank = self._target_quality_rank()
+        if target_rank <= 0:
+            return []
+
+        candidates = self.db_manager.get_upgrade_candidates_for_series(series_id, target_rank)
+        if not candidates:
+            return []
+
+        episodes_to_upgrade = {}
+        for row in candidates:
+            season = row.get('season')
+            episode = row.get('episode')
+            if season is None or episode is None:
+                continue
+            episodes_to_upgrade.setdefault(season, []).append(episode)
+
+        for season in episodes_to_upgrade:
+            episodes_to_upgrade[season] = sorted(set(episodes_to_upgrade[season]))
+
+        self.logger.info(f"Episodios candidatos a upgrade para {series['name']}: {episodes_to_upgrade}")
+
+        links = self.process_upgrade_page(series['hispashare_url'], episodes_to_upgrade, target_rank)
+        if links:
+            self._save_ed2k_links(series_id, links, kind="upgrade")
+
+        self._persist_quality_offer(series_id, series['hispashare_url'])
+        return links
+
+    def get_best_quality(self, hispashare_url):
+        """Visita la página de descarga y devuelve la mejor Quality conocida
+        (solo lee la sección de mayor tamaño de referencia, sin seleccionar
+        episodios). No tiene efectos secundarios sobre missing_episodes/ed2k.
+        """
+        from core.services.quality import parse_quality_text
+        try:
+            self.driver.get(hispashare_url)
+            WebDriverWait(self.driver, 10).until(
+                EC.presence_of_element_located((By.CLASS_NAME, "WIN1_CONTAINER"))
+            )
+            soup = BeautifulSoup(self.driver.page_source, 'html.parser')
+            quality_sections = self._get_quality_sections_with_scores(soup)
+            if not quality_sections:
+                return None
+            _, _, quality_text = quality_sections[0]
+            return parse_quality_text(quality_text)
+        except Exception as e:
+            self.logger.warning(f"No se pudo obtener la calidad de {hispashare_url}: {e}")
+            return None
+
+    def _persist_quality_offer(self, series_id, hispashare_url):
+        """Actualiza source_offers con la calidad actual de Hispashare para
+        esta serie, de forma que el arbitraje multi-proveedor pueda comparar
+        Hispashare frente a otras fuentes sin depender de una revalidación
+        manual desde la UI."""
+        try:
+            quality = self.get_best_quality(hispashare_url)
+            if quality is None:
+                return
+            self.db_manager.upsert_source_offer(
+                series_id, 'hispashare', hispashare_url,
+                resolution_height=quality.resolution_height,
+                codec=quality.codec,
+                hdr=quality.hdr.name.lower(),
+                match_score=1.0,
+            )
+        except Exception as e:
+            self.logger.warning(f"No se pudo persistir la oferta de calidad Hispashare: {e}")
+
+    def _get_retryable_stale_links(self, ed2k_links, new_links):
+        """De los enlaces ya enviados anteriormente (ed2k_history), devuelve
+        los que llevan más de ED2K_RETRY_AFTER_DAYS sin completarse y que
+        además ya no están en la cola activa de aMule (es decir, no es que
+        sigan descargando despacio: se atascaron o se perdieron). El
+        llamador solo pasa enlaces de episodios que siguen faltando
+        localmente, así que "viejo + fuera de la cola" es la señal de que
+        el envío anterior nunca llegó a buen puerto."""
+        if not self.settings.ED2K_RETRY_ENABLED or not self.db_manager:
+            return []
+
+        stale_links = self.db_manager.get_stale_ed2k_links(ed2k_links, self.settings.ED2K_RETRY_AFTER_DAYS)
+        stale_links = [link for link in stale_links if link not in new_links]
+        if not stale_links:
+            return []
+
+        queue_page = self.emule_client.get_active_download_page()
+        if queue_page is None:
+            self.logger.debug("No se pudo verificar la cola de aMule; se omite el reintento de enlaces atascados en este ciclo")
+            return []
+
+        retry_links = [
+            link for link in stale_links
+            if not self.emule_client.is_link_active_in_queue(link, queue_page)
+        ]
+        if retry_links:
+            self.logger.info(
+                f"🔁 Reintentando {len(retry_links)} enlace(s) atascado(s) "
+                f"(sin completarse tras {self.settings.ED2K_RETRY_AFTER_DAYS}+ días y ausentes de la cola de aMule)"
+            )
+        return retry_links
+
+    def _save_ed2k_links(self, series_id, ed2k_links, kind="missing"):
         """
         Guarda los enlaces ed2k y opcionalmente los envía a eMule
         
@@ -903,6 +1103,15 @@ class HispashareDownloader:
             ed2k_links: Lista de enlaces ed2k
         """
         try:
+            links_to_process = ed2k_links
+            if self.db_manager:
+                new_links = self.db_manager.filter_new_ed2k_links(ed2k_links)
+                retry_links = self._get_retryable_stale_links(ed2k_links, new_links)
+                links_to_process = new_links + retry_links
+                if not links_to_process:
+                    self.logger.info("No hay enlaces nuevos para procesar (ya enviados anteriormente)")
+                    return
+
             # Crear directorio de descargas si no existe
             downloads_dir = Path("downloads")
             downloads_dir.mkdir(exist_ok=True)
@@ -930,11 +1139,18 @@ class HispashareDownloader:
             # Enviar a eMule si está configurado y habilitado
             if self.settings.EMULE_AUTO_SEND:
                 if self.emule_client.is_configured():
-                    self.logger.info(f"Enviando {len(ed2k_links)} enlaces a eMule...")
-                    result = self.emule_client.add_multiple_ed2k_links(ed2k_links)
+                    self.logger.info(f"Enviando {len(links_to_process)} enlaces a eMule...")
+                    result = self.emule_client.add_multiple_ed2k_links(links_to_process)
                     
                     if result['success']:
                         self.logger.info(f"✅ {result['added']}/{result['total']} enlaces enviados a eMule")
+                        if result.get('failed_links'):
+                            self.logger.warning(
+                                f"⚠️ {len(result['failed_links'])} enlaces no se pudieron añadir a aMule y se reintentarán en el próximo ciclo"
+                            )
+                        if self.db_manager:
+                            sent_links = result.get('added_links', links_to_process)
+                            self.db_manager.mark_ed2k_links_sent(sent_links, kind=kind, series_id=series_id)
                     else:
                         self.logger.warning(f"❌ Error enviando enlaces a eMule: {result.get('message', 'Error desconocido')}")
                 else:

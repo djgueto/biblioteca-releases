@@ -41,6 +41,17 @@ ENV/
 
 # Logs
 *.log
+*.log.*
+media_encoder_log.txt
+
+# Backups de BD con sufijo (series_manager.db.bak_<motivo>_<fecha>)
+*.db.bak*
+
+# Caché y artefactos de depuración
+cache/
+.dbg/
+debug-*.md
+scripts/*.jsonl
 
 # Configuración
 .env

@@ -6,29 +6,47 @@ from config.settings import Settings
 
 
 class LibraryScanner:
-    def __init__(self, series_paths=None, db_manager=None):
+    def __init__(self, series_paths=None, db_manager=None, content_category='series'):
         # Si no se proporcionan rutas, usar las configuradas
         if series_paths is None:
-            series_paths = Settings.get_series_paths()
+            series_paths = Settings.get_paths_for_category(content_category)
         
         # Convertir a lista si es una sola ruta
         if isinstance(series_paths, (str, Path)):
             series_paths = [series_paths]
         
         self.series_paths = [Path(path) for path in series_paths]
+        self.content_category = content_category
         self.logger = logging.getLogger(__name__)
         self.parser = EpisodeParser()
         self.db_manager = db_manager
+        self._name_index = None
+        self._skip_paths = set()
+
+    @classmethod
+    def scan_all_episodic_categories(cls, db_manager=None):
+        all_series = []
+        for category in ('series', 'cartoons', 'docuseries'):
+            scanner = cls(db_manager=db_manager, content_category=category)
+            all_series.extend(scanner.scan(skip_cleanup=True))
+        return all_series
     
-    def scan(self):
+    def scan(self, skip_cleanup=False):
         """Escanear todas las rutas de series configuradas"""
         # Limpiar series que ya no existen (solo si tenemos db_manager)
-        if self.db_manager:
+        if self.db_manager and not skip_cleanup:
             self.logger.info("Limpiando series eliminadas...")
             deleted_count = self.db_manager.cleanup_deleted_series()
             if deleted_count > 0:
                 self.logger.info(f"Se eliminaron {deleted_count} series que ya no existen")
-        
+
+        # Cargar una vez el índice de nombres de esta categoría en vez de una
+        # query por carpeta (ver scan_series) — antes N carpetas = N queries.
+        if self.db_manager:
+            self._name_index = self.db_manager.get_series_names_by_category([self.content_category])
+            # Series no monitorizadas: no se reescanean
+            self._skip_paths = self.db_manager.get_unmonitored_folder_paths()
+
         all_series = []
         
         for series_path in self.series_paths:
@@ -65,7 +83,16 @@ class LibraryScanner:
             # Ignorar carpetas ocultas o del sistema
             if series_folder.name.startswith('.'):
                 continue
+
+            # Ignorar carpetas temporales dejadas por un rename de solo-mayúsculas
+            # interrumpido o en curso por otro escaneo concurrente (ver scan_series).
+            if series_folder.name.endswith('__casefix_tmp'):
+                continue
             
+            if self._skip_paths and str(series_folder.resolve()).lower() in self._skip_paths:
+                self.logger.debug(f"Omitida (no monitorizada): {series_folder.name}")
+                continue
+
             self.logger.info(f"Escaneando: {series_folder.name}")
             
             series_data = self.scan_series(series_folder)
@@ -102,21 +129,48 @@ class LibraryScanner:
     
     def scan_series(self, series_folder):
         """Escanear una serie específica"""
-        # Verificar si existe en BD con otro nombre (diferencia de mayúsculas/minúsculas) y renombrar si es necesario
-        if self.db_manager:
+        # Verificar si existe en BD con otro nombre (diferencia de mayúsculas/minúsculas) y renombrar si es necesario.
+        # Usa el índice cargado una vez en scan() en vez de una query por carpeta.
+        if self.db_manager and self._name_index:
             try:
-                existing_series = self.db_manager.search_series_by_name(series_folder.name)
-                # Filtrar coincidencia exacta insensible a mayúsculas
-                matches = [s for s in existing_series if s['name'].lower() == series_folder.name.lower()]
-                
-                if matches:
-                    db_name = matches[0]['name']
-                    # Si el nombre en disco difiere del de BD solo en mayúsculas/minúsculas
-                    if db_name != series_folder.name:
+                db_name = self._name_index.get(series_folder.name.lower())
+                # Si el nombre en disco difiere del de BD solo en mayúsculas/minúsculas
+                if db_name and db_name != series_folder.name:
+                    new_folder = series_folder.parent / db_name
+                    if new_folder.exists():
+                        # El destino ya existe como carpeta real y distinta (p.ej. el
+                        # share SMB expone dos carpetas que solo difieren en mayúsculas
+                        # como entradas independientes). No se fusiona/sobrescribe
+                        # automáticamente: requiere resolución manual.
+                        self.logger.warning(
+                            f"No se renombra '{series_folder.name}' a '{db_name}': "
+                            f"ya existe una carpeta distinta con ese nombre en disco. "
+                            f"Revisa manualmente si son duplicados."
+                        )
+                    else:
                         self.logger.info(f"Renombrando carpeta '{series_folder.name}' a '{db_name}' para coincidir con la base de datos")
-                        new_folder = series_folder.parent / db_name
-                        series_folder.rename(new_folder)
-                        series_folder = new_folder
+                        if db_name.lower() == series_folder.name.lower():
+                            # Cambio de solo mayúsculas/minúsculas: en sistemas de archivos
+                            # case-insensitive (Windows/SMB) un rename directo entre nombres
+                            # que solo difieren en casing falla con WinError 183, ya que el
+                            # SO lo ve como renombrar X a X. Se usa un nombre intermedio.
+                            temp_folder = series_folder.parent / f"{series_folder.name}__casefix_tmp"
+                            series_folder.rename(temp_folder)
+                            if new_folder.exists():
+                                # Colisión aparecida durante el propio rename (carrera
+                                # con otro escaneo concurrente): deshacer y dejar como
+                                # estaba en vez de quedarse a medias con el nombre temporal.
+                                self.logger.warning(
+                                    f"Colisión detectada renombrando '{series_folder.name}': "
+                                    f"'{db_name}' apareció durante el proceso. Revirtiendo."
+                                )
+                                temp_folder.rename(series_folder)
+                            else:
+                                temp_folder.rename(new_folder)
+                                series_folder = new_folder
+                        else:
+                            series_folder.rename(new_folder)
+                            series_folder = new_folder
             except Exception as e:
                 self.logger.warning(f"No se pudo renombrar la carpeta '{series_folder.name}': {e}")
 
@@ -126,6 +180,7 @@ class LibraryScanner:
         series_data = {
             'name': series_name,
             'folder_path': str(series_folder),
+            'content_category': self.content_category,
             'seasons': {},
             'episodes': []
         }
@@ -185,22 +240,43 @@ class LibraryScanner:
         
         return season_folders
     
+    def _parse_episode_with_fallback(self, file_path, root_folder, default_season=None):
+        """Parsear episodio desde el nombre del archivo; si falla, probar carpetas padre."""
+        episode_info = self.parser.parse_episode(file_path.name, default_season)
+        if episode_info:
+            return episode_info
+        # Intentar con nombres de carpetas intermedias (excluye la raíz de la serie)
+        for parent in file_path.parents:
+            if parent == root_folder:
+                break
+            episode_info = self.parser.parse_episode(parent.name, default_season)
+            if episode_info:
+                episode_info['filename'] = file_path.name
+                return episode_info
+        return None
+
     def scan_season_folder(self, season_folder, season_num):
         """Escanear carpeta de temporada"""
         episodes = []
-        
+
         for file_path in season_folder.iterdir():
             if not file_path.is_file():
                 continue
-            
+
             # Solo archivos de video
             if not self.is_video_file(file_path):
                 continue
-            
-            episode_info = self.parser.parse_episode(file_path.name, season_num)
-            
+
+            episode_info = self._parse_episode_with_fallback(file_path, season_folder, season_num)
+
             if episode_info:
                 episode_info['file_path'] = str(file_path)
+                quality = self.parser.parse_quality(file_path.name)
+                episode_info.update(quality)
+                try:
+                    episode_info['size_mb'] = round(file_path.stat().st_size / (1024 * 1024), 2)
+                except Exception:
+                    episode_info['size_mb'] = None
                 episodes.append(episode_info)
         
         return episodes
@@ -223,14 +299,20 @@ class LibraryScanner:
                 continue
             processed_files.add(file_key)
             
-            episode_info = self.parser.parse_episode(file_path.name)
-            
+            episode_info = self._parse_episode_with_fallback(file_path, series_folder)
+
             if episode_info:
                 episode_info['file_path'] = str(file_path)
+                quality = self.parser.parse_quality(file_path.name)
+                episode_info.update(quality)
+                try:
+                    episode_info['size_mb'] = round(file_path.stat().st_size / (1024 * 1024), 2)
+                except Exception:
+                    episode_info['size_mb'] = None
                 episodes.append(episode_info)
-        
+
         return episodes
-    
+
     def is_video_file(self, file_path):
         """Verificar si es un archivo de video"""
         video_extensions = {

@@ -1,0 +1,33 @@
+from .background_tasks import (
+    AutoMatchTask,
+    CoverUrlResolveTask,
+    DownloadsRefreshTask,
+    EmuleSendTask,
+    ImmediateHispashareSearchTask,
+    LibraryRefreshTask,
+    LibrarySnapshotTask,
+    ManualScanTask,
+    ManualUpdateTask,
+    MissingRefreshTask,
+    SearchReactivateTask,
+    SeriesMonitoredTask,
+    SeriesRefreshTask,
+    TMDBRescanTask,
+)
+
+__all__ = [
+    "AutoMatchTask",
+    "CoverUrlResolveTask",
+    "DownloadsRefreshTask",
+    "EmuleSendTask",
+    "ImmediateHispashareSearchTask",
+    "LibraryRefreshTask",
+    "LibrarySnapshotTask",
+    "ManualScanTask",
+    "ManualUpdateTask",
+    "MissingRefreshTask",
+    "SearchReactivateTask",
+    "SeriesMonitoredTask",
+    "SeriesRefreshTask",
+    "TMDBRescanTask",
+]

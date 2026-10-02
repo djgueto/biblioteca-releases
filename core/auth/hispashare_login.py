@@ -7,6 +7,7 @@ from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
 import logging
 import time
+from pathlib import Path
 
 
 class HispashareAuth:
@@ -39,7 +40,8 @@ class HispashareAuth:
         
         try:
             # Usar webdriver-manager para ChromeDriver
-            service = Service(ChromeDriverManager().install())
+            driver_path = self._resolve_chromedriver_path(ChromeDriverManager().install())
+            service = Service(driver_path)
             self.driver = webdriver.Chrome(service=service, options=options)
             self.driver.implicitly_wait(10)
         except Exception as e:
@@ -52,6 +54,38 @@ class HispashareAuth:
             except Exception as e2:
                 self.logger.error(f"Error con ChromeDriver del sistema: {e2}")
                 raise Exception(f"No se pudo inicializar ChromeDriver: {e}")
+
+    def _is_windows_executable(self, path: Path) -> bool:
+        try:
+            if not path.is_file():
+                return False
+            with open(path, "rb") as f:
+                return f.read(2) == b"MZ"
+        except Exception:
+            return False
+
+    def _resolve_chromedriver_path(self, installed_path: str) -> str:
+        p = Path(installed_path)
+
+        if p.is_dir():
+            for candidate in sorted(p.rglob("chromedriver*.exe")):
+                if self._is_windows_executable(candidate):
+                    return str(candidate)
+            return installed_path
+
+        if p.suffix.lower() == ".exe" and self._is_windows_executable(p):
+            return str(p)
+
+        parent = p.parent if p.parent else Path(".")
+        for candidate in sorted(parent.glob("chromedriver*.exe")):
+            if self._is_windows_executable(candidate):
+                return str(candidate)
+
+        for candidate in sorted(parent.rglob("chromedriver*.exe")):
+            if self._is_windows_executable(candidate):
+                return str(candidate)
+
+        return installed_path
     
     def login(self):
         """Iniciar sesión en Hispashare"""

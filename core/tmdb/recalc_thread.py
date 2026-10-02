@@ -2,6 +2,14 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 from config.settings import Settings
 from core.database.db_manager import DatabaseManager
+from core.events import EventBus
+from core.repositories import (
+    DecisionLogRepository,
+    SeriesRepository,
+    SourceOfferRepository,
+    SourceRepository,
+)
+from core.services import MissingEpisodesService, ReconciliationService, SourceMatchService
 from core.tmdb.api_client import TMDBClient
 from core.tmdb.auto_matcher import TMDBAutoMatcher
 
@@ -30,7 +38,23 @@ class TMDBRecalcThread(QThread):
             tmdb = TMDBClient(Settings.TMDB_API_KEY)
             matcher = TMDBAutoMatcher(tmdb)
 
-            series_list = db.get_all_series()
+            series_repository = SeriesRepository(db)
+            source_repository = SourceRepository(db)
+            source_offer_repository = SourceOfferRepository(db)
+            decision_log_repository = DecisionLogRepository(db)
+            missing_episodes_service = MissingEpisodesService(db, series_repository, decision_log_repository)
+            source_match_service = SourceMatchService(db, source_repository, decision_log_repository)
+            reconciliation_service = ReconciliationService(
+                series_repository,
+                source_repository,
+                missing_episodes_service,
+                source_match_service,
+                decision_log_repository,
+                event_bus=EventBus(),
+                source_offer_repository=source_offer_repository,
+            )
+
+            series_list = db.get_all_series(db.get_episodic_categories())
             total = len(series_list)
             updated = 0
             failed = 0
@@ -45,7 +69,8 @@ class TMDBRecalcThread(QThread):
 
                 name = series.get("name", "")
                 series_id = series.get("id")
-                self.progress_signal.emit(int((idx - 1) * 100 / total), f"🎬 TMDB: {idx}/{total} {name}")
+                category_label = Settings.get_category_label(series.get("content_category", "series"))
+                self.progress_signal.emit(int((idx - 1) * 100 / total), f"🎬 TMDB: {idx}/{total} [{category_label}] {name}")
 
                 try:
                     tmdb_id = series.get("tmdb_id")
@@ -71,7 +96,12 @@ class TMDBRecalcThread(QThread):
                             'confidence_score': score,
                             'needs_review': score < Settings.AUTO_MATCH_THRESHOLD
                         }
-                        db.update_tmdb_match(series_id, match_data)
+                        update_result = series_repository.update_tmdb_identity(series_id, match_data)
+                        reconciliation_service.on_tmdb_changed(
+                            series_id,
+                            update_result.get("previous_item") or {},
+                            update_result.get("updated_item") or {},
+                        )
                         updated += 1
                         self.series_updated_signal.emit(series_id)
                         continue
@@ -91,7 +121,12 @@ class TMDBRecalcThread(QThread):
                         self.log_signal.emit(f"⚠️ Sin match TMDB para '{name}'")
                         continue
 
-                    db.update_tmdb_match(series_id, match_result)
+                    update_result = series_repository.update_tmdb_identity(series_id, match_result)
+                    reconciliation_service.on_tmdb_changed(
+                        series_id,
+                        update_result.get("previous_item") or {},
+                        update_result.get("updated_item") or {},
+                    )
                     updated += 1
                     self.series_updated_signal.emit(series_id)
                     self.log_signal.emit(

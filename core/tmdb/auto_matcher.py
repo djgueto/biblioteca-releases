@@ -11,6 +11,12 @@ class TMDBAutoMatcher:
     def __init__(self, api_client):
         self.api = api_client
         self.logger = logging.getLogger(__name__)
+
+    def match_content(self, local_item):
+        category = (local_item or {}).get('content_category', 'series')
+        if Settings.get_category_content_mode(category) == 'episodic':
+            return self.match_series(local_item)
+        return self.match_single_file(local_item)
     
     def match_series(self, local_series):
         """
@@ -69,8 +75,50 @@ class TMDBAutoMatcher:
         
         return {
             'tmdb_id': best_match['id'],
-            'name': best_match['name'],
+            'name': self.get_result_title(best_match),
             'year': year,
+            'confidence_score': best_score,
+            'needs_review': best_score < Settings.AUTO_MATCH_THRESHOLD
+        }
+
+    def match_single_file(self, local_item):
+        normalized_name = self.normalize_name(local_item.get('name', ''))
+
+        self.logger.debug(f"Buscando archivo unico: {normalized_name}")
+
+        results = self.api.search_movies(normalized_name)
+        if not results:
+            results = [
+                result for result in self.api.search_multi(normalized_name)
+                if result.get('media_type') in ('movie', None)
+            ]
+
+        if not results:
+            self.logger.warning(f"No se encontraron resultados para: {local_item.get('name', '')}")
+            return None
+
+        scored_results = []
+        for result in results[:10]:
+            score = self.calculate_single_file_match_score(local_item, result)
+            scored_results.append((result, score))
+
+            self.logger.debug(
+                f"  - {self.get_result_title(result)} ({self.get_result_year(result) or ''}): {score:.2%}"
+            )
+
+        scored_results.sort(key=lambda x: x[1], reverse=True)
+        best_match, best_score = scored_results[0]
+
+        if best_score < 0.45:
+            self.logger.warning(
+                f"Score muy bajo ({best_score:.2%}) para archivo unico: {local_item.get('name', '')}"
+            )
+            return None
+
+        return {
+            'tmdb_id': best_match['id'],
+            'name': self.get_result_title(best_match),
+            'year': self.get_result_year(best_match),
             'confidence_score': best_score,
             'needs_review': best_score < Settings.AUTO_MATCH_THRESHOLD
         }
@@ -155,6 +203,36 @@ class TMDBAutoMatcher:
                 best = max(best, sim)
 
         return best
+
+    def calculate_single_file_match_score(self, local_item, tmdb_result):
+        local_name = local_item.get('name', '')
+
+        name_similarity = self.calculate_name_similarity(local_name, self.get_result_title(tmdb_result))
+        local_year = self.extract_year(local_item)
+        year_score = self.calculate_year_match(local_year, tmdb_result)
+        date_score = self.calculate_date_relevance(tmdb_result)
+
+        popularity = tmdb_result.get('popularity', 0)
+        popularity_score = min(1.0, popularity / 100) if popularity else 0.0
+
+        w_name = 0.78
+        w_year = 0.18 if local_year else 0.0
+        w_date = 0.03
+        w_pop = 0.01
+        denom = w_name + w_year + w_date + w_pop
+        w_name, w_year, w_date, w_pop = (
+            w_name / denom,
+            w_year / denom,
+            w_date / denom,
+            w_pop / denom,
+        )
+
+        return (
+            (name_similarity * w_name)
+            + (year_score * w_year)
+            + (date_score * w_date)
+            + (popularity_score * w_pop)
+        )
     
     def calculate_season_match(self, local_series, tmdb_id):
         """Calcular coincidencia de temporadas con mayor precisión"""
@@ -293,16 +371,11 @@ class TMDBAutoMatcher:
         if not local_year:
             return 0.5
 
-        first_air_date = tmdb_result.get('first_air_date', '') if tmdb_result else ''
-        if not first_air_date or len(first_air_date) < 4:
+        result_year = self.get_result_year(tmdb_result)
+        if not result_year:
             return 0.5
 
-        try:
-            tmdb_year = int(first_air_date[:4])
-        except (ValueError, TypeError):
-            return 0.5
-
-        diff = abs(tmdb_year - local_year)
+        diff = abs(result_year - local_year)
         if diff == 0:
             return 1.0
         if diff == 1:
@@ -313,7 +386,7 @@ class TMDBAutoMatcher:
 
     def calculate_fast_score(self, local_series, tmdb_details) -> float:
         local_name = (local_series or {}).get('name', '')
-        name_similarity = self.calculate_name_similarity(local_name, (tmdb_details or {}).get('name', ''))
+        name_similarity = self.calculate_name_similarity(local_name, self.get_result_title(tmdb_details))
         local_year = self.extract_year(local_series)
         year_score = self.calculate_year_match(local_year, tmdb_details)
         date_score = self.calculate_date_relevance(tmdb_details)
@@ -330,17 +403,16 @@ class TMDBAutoMatcher:
     
     def calculate_date_relevance(self, tmdb_result):
         """Calcular relevancia temporal - priorizar series recientes"""
-        first_air_date = tmdb_result.get('first_air_date', '')
-        
-        if not first_air_date or len(first_air_date) < 4:
+        result_year = self.get_result_year(tmdb_result)
+
+        if not result_year:
             return 0.5  # Score neutro si no hay fecha
         
         try:
-            series_year = int(first_air_date[:4])
             current_year = datetime.now().year
             
             # Calcular años de diferencia
-            years_diff = current_year - series_year
+            years_diff = current_year - result_year
             
             # Bonus para series muy recientes (últimos 5 años)
             if years_diff <= 5:
@@ -357,3 +429,21 @@ class TMDBAutoMatcher:
                 
         except (ValueError, TypeError):
             return 0.5  # Score neutro si hay error en la fecha
+
+    def get_result_title(self, tmdb_result):
+        if not tmdb_result:
+            return ''
+        return tmdb_result.get('name') or tmdb_result.get('title') or ''
+
+    def get_result_year(self, tmdb_result):
+        if not tmdb_result:
+            return None
+
+        date_value = tmdb_result.get('first_air_date') or tmdb_result.get('release_date') or ''
+        if not date_value or len(date_value) < 4:
+            return None
+
+        try:
+            return int(date_value[:4])
+        except (ValueError, TypeError):
+            return None

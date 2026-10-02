@@ -17,7 +17,8 @@ def backup_sqlite_db(db_path: str, backups_dir: str = "backups", keep_last: int 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     dest = backups_path / f"{src.stem}_{timestamp}.db"
 
-    src_conn = sqlite3.connect(str(src))
+    src_conn = sqlite3.connect(str(src), timeout=60.0)
+    src_conn.execute("PRAGMA busy_timeout = 60000")
     try:
         dest_conn = sqlite3.connect(str(dest))
         try:

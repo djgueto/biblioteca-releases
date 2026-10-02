@@ -6,14 +6,31 @@ import re
 
 from core.auth.hispashare_login import HispashareAuth
 from core.library.scanner import LibraryScanner
+from core.library.category_scanner import CategoryLibraryScanner
 from core.tmdb.api_client import TMDBClient
 from core.tmdb.auto_matcher import TMDBAutoMatcher
 from core.hispashare.searcher import HispashareSearcher
-from core.hispashare.downloader import HispashareDownloader
 from core.hispashare.content_scanner import ContentScanner
+from core.wolfmax.category_scanner import WolfmaxCategoryScanner, WOLFMAX_CATEGORY_URLS, _normalize, _title_score
+from core.wolfmax.downloader import is_current_url as is_current_wolfmax_url
+from core.library.parser import detect_resolution_from_file
 from core.database.db_manager import DatabaseManager
+from core.events import EventBus
+from core.repositories import (
+    DecisionLogRepository,
+    SeriesRepository,
+    SourceOfferRepository,
+    SourceRepository,
+)
+from core.services import (
+    MissingEpisodesService,
+    ReconciliationService,
+    SourceArbitrationService,
+    SourceMatchService,
+)
+from core.services.providers import build_provider_registry
+from core.services.quality import quality_from_local_episode
 from config.settings import Settings
-
 
 class SchedulerThread(QThread):
     progress_signal = pyqtSignal(int, str)
@@ -29,7 +46,41 @@ class SchedulerThread(QThread):
         self.running = True
         self.logger = logging.getLogger(__name__)
         self.db = DatabaseManager()
+        self.event_bus = EventBus()
+        self.series_repository = SeriesRepository(self.db)
+        self.source_repository = SourceRepository(self.db)
+        self.source_offer_repository = SourceOfferRepository(self.db)
+        self.decision_log_repository = DecisionLogRepository(self.db)
+        self.missing_episodes_service = MissingEpisodesService(
+            self.db,
+            self.series_repository,
+            self.decision_log_repository,
+        )
+        self.source_match_service = SourceMatchService(
+            self.db,
+            self.source_repository,
+            self.decision_log_repository,
+        )
+        self.reconciliation_service = ReconciliationService(
+            self.series_repository,
+            self.source_repository,
+            self.missing_episodes_service,
+            self.source_match_service,
+            self.decision_log_repository,
+            event_bus=self.event_bus,
+            source_offer_repository=self.source_offer_repository,
+        )
         self.current_driver = None  # Mantener referencia al driver actual
+        # Se (re)construyen en cada execute_cycle(): HispashareSourceProvider
+        # necesita el driver Selenium+login de ese ciclo concreto, así que no
+        # pueden vivir en __init__ (el driver se cierra al final de cada ciclo).
+        self.providers = {}
+        self.source_arbitration_service = SourceArbitrationService(
+            self.db,
+            self.source_offer_repository,
+            self.providers,
+            event_bus=self.event_bus,
+        )
     
     def run(self):
         """Ejecutar ciclo principal"""
@@ -42,12 +93,12 @@ class SchedulerThread(QThread):
                 hours = Settings.CHECK_INTERVAL_HOURS
                 self.log_signal.emit(f"⏰ Próximo ciclo en {hours} horas")
                 
-                # Dormir en intervalos pequeños para poder detener el thread
+                # Dormir en intervalos pequeños para poder detener el thread rápido
                 sleep_time = hours * 3600
                 elapsed = 0
                 while elapsed < sleep_time and self.running:
-                    time.sleep(60)  # Dormir 1 minuto
-                    elapsed += 60
+                    time.sleep(1)
+                    elapsed += 1
                 
             except Exception as e:
                 self.logger.error(f"Error en ciclo: {e}", exc_info=True)
@@ -74,12 +125,25 @@ class SchedulerThread(QThread):
             self.log_signal.emit("🔐 Iniciando sesión en Hispashare...")
             driver = self.login_hispashare()
             self.current_driver = driver  # Mantener referencia
+            # Reconstruir el registro de proveedores con el driver de este
+            # ciclo: HispashareSourceProvider no puede sobrevivir a un ciclo
+            # porque el driver se cierra en el finally de execute_cycle.
+            self.providers.clear()
+            self.providers.update(build_provider_registry(
+                self.db,
+                hispashare_driver=driver,
+                include_wolfmax=getattr(Settings, 'WOLFMAX_UPGRADE_ENABLED', False),
+            ))
+            if not self.running:
+                return
             
             # 2. Limpiar series eliminadas
             self.progress_signal.emit(15, "🧹 Limpiando series eliminadas...")
             self.log_signal.emit("🧹 Limpiando series eliminadas del disco...")
             cleaned_count = self.db.cleanup_deleted_series()
             self.log_signal.emit(f"   ✅ {cleaned_count} series eliminadas")
+            if not self.running:
+                return
             
             # 2.1. Limpiar episodios faltantes huérfanos
             self.log_signal.emit("🧹 Limpiando episodios faltantes huérfanos...")
@@ -91,40 +155,43 @@ class SchedulerThread(QThread):
             self.log_signal.emit("📁 Escaneando biblioteca local...")
             series_list = self.scan_library()
             self.log_signal.emit(f"   ✅ {len(series_list)} series encontradas")
+            if not self.running:
+                return
+
+            self.log_signal.emit("🎞️ Escaneando bibliotecas de archivo unico...")
+            single_file_items = self.scan_single_file_library()
+            self.log_signal.emit(f"   ✅ {len(single_file_items)} elementos de archivo unico encontrados")
+            if not self.running:
+                return
             
-            # 4. Limpiar duplicados de episodios
-            self.progress_signal.emit(35, "🔧 Limpiando duplicados...")
-            self.log_signal.emit("🔧 Limpiando episodios duplicados...")
-            cleaned_count = self.db.cleanup_duplicate_episodes()
-            self.log_signal.emit(f"   ✅ {cleaned_count} duplicados eliminados")
-            
-            # 4b. Limpiar duplicados de series
+            # 4. Limpiar duplicados de series tras la sincronización de escaneos
+            self.progress_signal.emit(35, "🔧 Consolidando duplicados...")
             self.log_signal.emit("🔧 Limpiando series duplicadas...")
             cleaned_series = self.db.cleanup_duplicate_series()
             self.log_signal.emit(f"   ✅ {cleaned_series} series duplicadas eliminadas")
             
-            # 5. Insertar/actualizar series en BD
-            self.progress_signal.emit(45, "💾 Actualizando base de datos...")
-            self.log_signal.emit("💾 Actualizando series en base de datos...")
-            for series in series_list:
-                self.db.insert_or_update_series(series)
-            
-            # 6. Vincular con TMDB
+            # 5. Vincular con TMDB
+            self.progress_signal.emit(45, "💾 Sincronización completada...")
+            self.log_signal.emit("💾 Base de datos sincronizada durante el escaneo")
             self.progress_signal.emit(55, "🎬 Vinculando con TMDB...")
-            self.log_signal.emit("🎬 Vinculando series con TMDB...")
+            self.log_signal.emit("🎬 Vinculando bibliotecas con TMDB...")
             db_series_list = self.db.get_all_series()
             self.match_tmdb(db_series_list)
             
-            # 7. Detectar episodios faltantes
+            # 6. Detectar episodios faltantes
             self.progress_signal.emit(65, "🔍 Detectando episodios faltantes...")
             self.log_signal.emit("🔍 Detectando episodios faltantes...")
             missing_count = self.detect_missing()
             self.log_signal.emit(f"   ✅ {missing_count} episodios faltantes detectados")
 
-            # 7.1. Buscar URLs para series nuevas sin episodios faltantes
+            # 6.1. Buscar URLs para series nuevas sin episodios faltantes
             self.progress_signal.emit(70, "🔎 Buscando URLs para series nuevas...")
             self.log_signal.emit("🔎 Buscando URLs en Hispashare para series nuevas sin episodios faltantes...")
             self.search_hispashare_for_new_series(driver)
+
+            self.progress_signal.emit(73, "🔎 Buscando URLs de bibliotecas...")
+            self.log_signal.emit("🔎 Buscando URLs en Hispashare para bibliotecas de archivo unico...")
+            self.search_hispashare_for_single_file_items(driver)
 
             # 8. Buscar en Hispashare
             self.progress_signal.emit(75, "🔎 Buscando en Hispashare...")
@@ -135,11 +202,29 @@ class SchedulerThread(QThread):
             self.progress_signal.emit(85, "⬇️ Procesando descargas...")
             self.log_signal.emit("⬇️ Procesando descargas de episodios faltantes...")
             self.process_downloads(driver)
+            if not self.running:
+                return
+
+            # 9.1. Detectar resolución real de archivos sin metadatos en el nombre
+            self.progress_signal.emit(88, "🔬 Detectando resoluciones reales...")
+            self.scan_missing_resolutions()
+
+            # 9.2. Mejorar calidad (upgrades) de episodios existentes
+            if getattr(Settings, 'UPGRADE_ENABLED', False):
+                self.progress_signal.emit(90, "🔼 Mejorando calidad...")
+                self.log_signal.emit("🔼 Buscando upgrades de calidad (ej. 2160p)...")
+                self.process_upgrades(driver)
             
             # 10. Barrido de nuevo contenido en Hispashare
-            self.progress_signal.emit(95, "🔍 Buscando nuevo contenido...")
+            self.progress_signal.emit(93, "🔍 Buscando nuevo contenido...")
             self.log_signal.emit("🔍 Iniciando barrido de nuevo contenido en Hispashare...")
             self.scan_new_content(driver)
+
+            # 11. Descubrimiento de contenido en Wolfmax4k
+            if getattr(Settings, 'WOLFMAX_UPGRADE_ENABLED', False):
+                self.progress_signal.emit(97, "🐺 Sincronizando catálogo Wolfmax4k...")
+                self.log_signal.emit("🐺 Escaneando categorías Wolfmax4k...")
+                self.scan_wolfmax_categories()
             
             self.progress_signal.emit(100, "✅ Ciclo completado")
             self.log_signal.emit("✅ CICLO COMPLETADO CON ÉXITO")
@@ -182,8 +267,7 @@ class SchedulerThread(QThread):
     def scan_library(self):
         """Escanear biblioteca de series"""
         try:
-            scanner = LibraryScanner(db_manager=self.db)
-            series_list = scanner.scan()
+            series_list = LibraryScanner.scan_all_episodic_categories(db_manager=self.db)
             
             # Limpiar duplicados existentes antes de procesar nuevas series
             self.log_signal.emit("🧹 Limpiando episodios duplicados...")
@@ -200,6 +284,33 @@ class SchedulerThread(QThread):
         except Exception as e:
             self.logger.error(f"Error en scan: {e}")
             raise
+
+    def scan_single_file_library(self):
+        """Escanear bibliotecas de contenido de archivo unico."""
+        try:
+            discovered_items = []
+
+            for category in Settings.get_single_file_categories():
+                scanner = CategoryLibraryScanner(
+                    category,
+                    Settings.get_paths_for_category(category),
+                    skip_paths=self.db.get_unmonitored_folder_paths(),
+                )
+                items = scanner.scan()
+                for item in items:
+                    item_data = {
+                        'name': item.get('name', ''),
+                        'folder_path': item.get('path', ''),
+                        'content_category': category,
+                    }
+                    self.db.insert_or_update_series(item_data)
+                    discovered_items.append(item_data)
+
+            return discovered_items
+
+        except Exception as e:
+            self.logger.error(f"Error escaneando bibliotecas de archivo unico: {e}")
+            raise
     
     def match_tmdb(self, series_list):
         """Vincular series con TMDB"""
@@ -213,32 +324,59 @@ class SchedulerThread(QThread):
                 if series.get('tmdb_id'):
                     continue
                 
-                self.log_signal.emit(f"   🔗 Matching: {series['name']}...")
-                
-                match_result = matcher.match_series(series)
-                
-                if match_result:
-                    series['tmdb_id'] = match_result['tmdb_id']
-                    series['year'] = match_result['year']
-                    series['confidence_score'] = match_result['confidence_score']
-                    series['needs_review'] = match_result['needs_review']
-                    
-                    self.db.update_tmdb_match(series['id'], match_result)
-                    matched += 1
-                    
-                    # Emitir señal para actualizar la interfaz en tiempo real
-                    self.tmdb_matched_signal.emit(series['id'], match_result)
-                    
-                    confidence_emoji = "✅" if match_result['confidence_score'] >= 0.85 else "⚠️"
-                    self.log_signal.emit(
-                        f"      {confidence_emoji} {match_result['name']} "
-                        f"({match_result['year']}) - "
-                        f"Confianza: {match_result['confidence_score']:.1%}"
-                    )
-                else:
-                    self.log_signal.emit(f"      ❌ No se encontró match")
+                content_type = Settings.get_category_label(series.get('content_category', 'series'))
+                self.log_signal.emit(f"   🔗 Matching [{content_type}]: {series['name']}...")
+
+                try:
+                    match_result = matcher.match_content(series)
+
+                    if match_result:
+                        series['tmdb_id'] = match_result['tmdb_id']
+                        series['year'] = match_result['year']
+                        series['confidence_score'] = match_result['confidence_score']
+                        series['needs_review'] = match_result['needs_review']
+
+                        update_result = self.series_repository.update_tmdb_identity(series['id'], match_result)
+                        self.reconciliation_service.on_tmdb_changed(
+                            series['id'],
+                            update_result.get('previous_item') or {},
+                            update_result.get('updated_item') or {},
+                            is_library=(
+                                Settings.get_category_content_mode(series.get('content_category', 'series'))
+                                == 'single_file'
+                            ),
+                            rebuild_missing=False,
+                        )
+                        self.decision_log_repository.append(
+                            series['id'],
+                            'tmdb_scheduler_matched',
+                            'TMDB asignado desde el scheduler',
+                            {
+                                'tmdb_id': match_result.get('tmdb_id'),
+                                'name': match_result.get('name'),
+                                'year': match_result.get('year'),
+                                'confidence_score': match_result.get('confidence_score'),
+                            },
+                        )
+                        matched += 1
+
+                        # Emitir señal para actualizar la interfaz en tiempo real
+                        self.tmdb_matched_signal.emit(series['id'], match_result)
+
+                        confidence_emoji = "✅" if match_result['confidence_score'] >= 0.85 else "⚠️"
+                        self.log_signal.emit(
+                            f"      {confidence_emoji} {match_result['name']} "
+                            f"({match_result['year']}) - "
+                            f"Confianza: {match_result['confidence_score']:.1%}"
+                        )
+                    else:
+                        self.log_signal.emit(f"      ❌ No se encontró match")
+                except Exception as series_error:
+                    self.logger.error(f"Error haciendo match TMDB de '{series.get('name')}': {series_error}")
+                    self.log_signal.emit(f"      ❌ Error en match: {series_error}")
+                    continue
             
-            self.log_signal.emit(f"   ✅ {matched} series vinculadas con TMDB")
+            self.log_signal.emit(f"   ✅ {matched} elementos vinculados con TMDB")
             
         except Exception as e:
             self.logger.error(f"Error en match_tmdb: {e}")
@@ -247,35 +385,29 @@ class SchedulerThread(QThread):
     def detect_missing(self):
         """Detectar episodios faltantes"""
         try:
-            tmdb_client = TMDBClient(Settings.TMDB_API_KEY)
-            series_list = self.db.get_series_with_tmdb()
-            
-            total_missing = 0
-            
-            for series in series_list:
-                # Limpiar episodios faltantes existentes para esta serie antes de recalcular
-                self.db.clear_missing_episodes(series['id'])
-                
-                # Obtener episodios de TMDB (solo los ya emitidos)
-                tmdb_episodes = tmdb_client.get_all_episodes(series['tmdb_id'], only_aired=True)
-                
-                # Obtener episodios locales
-                local_episodes = self.db.get_local_episodes(series['id'])
-                
-                # Comparar y detectar faltantes
-                missing = self.compare_episodes(tmdb_episodes, local_episodes)
-                
-                # Guardar faltantes en BD
-                for episode in missing:
-                    episode['series_id'] = series['id']
-                    episode['series_name'] = series['name']
-                    self.db.insert_missing_episode(episode)
-                    total_missing += 1
-                
-                if missing:
-                    self.log_signal.emit(f"      📺 {series['name']}: {len(missing)} episodios faltantes")
-            
-            return total_missing
+            result = self.missing_episodes_service.rebuild_for_categories(
+                self.db.get_episodic_categories()
+            )
+            for series_result in result.get("series_results", []):
+                missing_count = int(series_result.get("missing_count", 0))
+                if missing_count:
+                    self.log_signal.emit(
+                        f"      📺 {series_result.get('series_name', 'Serie')}: "
+                        f"{missing_count} episodios faltantes"
+                    )
+                series_id = series_result.get("series_id")
+                if series_id is not None:
+                    self.series_updated_signal.emit(series_id)
+            self.log_signal.emit(
+                f"   ✅ Recalculados faltantes para {result.get('recalculated_series', 0)} series"
+            )
+            skipped = result.get("skipped_needs_review", 0)
+            if skipped:
+                self.log_signal.emit(
+                    f"   ⏸️ {skipped} series con match de baja confianza omitidas "
+                    f"(pendientes de revisión manual)"
+                )
+            return int(result.get("total_missing", 0))
             
         except Exception as e:
             self.logger.error(f"Error en detect_missing: {e}")
@@ -329,112 +461,75 @@ class SchedulerThread(QThread):
 
         return query, year
     
-    def search_hispashare(self, driver):
-        """Buscar series en Hispashare - solo las que tienen episodios faltantes"""
+    def _search_hispashare_pass(
+        self,
+        driver,
+        series_list,
+        *,
+        method_name,
+        empty_message,
+        count_label,
+        found_label,
+        save_reason,
+        content_mode=None,
+        label_prefix=None,
+    ):
+        """Recorre una lista de series/items pendientes de URL y busca en Hispashare.
+
+        Comparte la lógica que antes estaba triplicada entre search_hispashare(),
+        search_hispashare_for_new_series() y search_hispashare_for_single_file_items():
+        mismo bucle, mismo manejo de errores, mismo guardado de resultado. Las tres
+        variantes solo difieren en qué lista consultan y en los textos de log.
+        `label_prefix(i, total, item)` permite personalizar el prefijo por elemento
+        (usado para mostrar la categoría en bibliotecas de archivo único).
+        """
         try:
+            total = len(series_list)
+            if total == 0:
+                self.log_signal.emit(f"   ℹ️ {empty_message}")
+                return 0
+
+            self.log_signal.emit(f"   📊 {count_label}: {total}")
             searcher = HispashareSearcher(driver, self.db)
-            # Cambiar para obtener solo series con episodios faltantes sin URL
-            series_list = self.db.get_series_with_missing_episodes_without_url()
-            
             found = 0
-            total_series = len(series_list)
-            
-            if total_series == 0:
-                self.log_signal.emit("   ℹ️ No hay series con episodios faltantes que necesiten búsqueda en Hispashare")
-                return
-            
-            self.log_signal.emit(f"   📊 Series con episodios faltantes a buscar: {total_series}")
-            
+
             for i, series in enumerate(series_list, 1):
+                if not self.running:
+                    break
+
                 query, year = self._get_hispashare_search_query(series)
                 label = series.get('tmdb_name') or series.get('name')
-                self.log_signal.emit(f"   🔎 [{i}/{total_series}] Buscando: {label} -> '{query}'...")
-                
-                try:
-                    url = searcher.search_and_select(
-                        query,
-                        year,
-                        series['id']  # Pasar el ID de la serie
-                    )
-                    
-                    if url:
-                        # Guardar URL inmediatamente cuando se encuentra
-                        try:
-                            self.db.update_hispashare_url(series['id'], url)
-                            cover_url = self.db.derive_hispashare_cover_url(url)
-                            if cover_url:
-                                self.db.update_hispashare_cover_url(series['id'], cover_url)
-                            found += 1
-                            self.logger.info(f"URL guardada para '{series['name']}': {url}")
-                            self.log_signal.emit(f"      ✅ URL encontrada y guardada: {url[:50]}...")
-                            # Emitir señal para actualizar la UI en tiempo real
-                            self.logger.info(f"EMITIENDO SEÑAL url_saved_signal para serie ID {series['id']}: {url}")
-                            self.url_saved_signal.emit(series['id'], url)
-                            self.logger.info(f"Señal url_saved_signal emitida correctamente")
-                        except Exception as save_error:
-                            self.logger.error(f"Error guardando URL para '{series['name']}': {save_error}")
-                            self.log_signal.emit(f"      ⚠️ URL encontrada pero error al guardar: {str(save_error)}")
-                    else:
-                        self.log_signal.emit(f"      ❌ No se encontró (marcada para no buscar más)")
-                        
-                except Exception as e:
-                    self.logger.error(f"Error buscando '{series['name']}': {e}")
-                    self.log_signal.emit(f"      ❌ Error en búsqueda: {str(e)}")
-                    continue
-                
-                time.sleep(2)  # Esperar entre búsquedas
-            
-            self.log_signal.emit(f"   ✅ {found}/{total_series} URLs encontradas para series con episodios faltantes")
-            
-        except Exception as e:
-            self.logger.error(f"Error en search_hispashare: {e}")
-            raise
-
-    def search_hispashare_for_new_series(self, driver):
-        """Buscar y guardar URL de Hispashare para series nuevas que no tienen episodios faltantes.
-        Evita duplicar con las que ya se buscan en search_hispashare()."""
-        try:
-            searcher = HispashareSearcher(driver, self.db)
-
-            # Series sin URL en general
-            all_without_url = self.db.get_series_without_hispashare_url()
-
-            # Series con episodios faltantes sin URL (ya se gestionan en search_hispashare)
-            missing_without_url = self.db.get_series_with_missing_episodes_without_url()
-            missing_ids = {s['id'] for s in missing_without_url}
-
-            # Filtrar para quedarse con las "nuevas" (sin episodios faltantes)
-            series_list = [s for s in all_without_url if s['id'] not in missing_ids]
-
-            if not series_list:
-                self.log_signal.emit("   ℹ️ No hay series nuevas sin URL que necesiten búsqueda en Hispashare")
-                return
-
-            self.log_signal.emit(f"   📊 Series nuevas sin URL a buscar: {len(series_list)}")
-
-            found = 0
-            for i, series in enumerate(series_list, 1):
-                query, year = self._get_hispashare_search_query(series)
-                label = series.get('tmdb_name') or series.get('name')
-                self.log_signal.emit(f"   🔎 [NUEVAS {i}/{len(series_list)}] Buscando: {label} -> '{query}'...")
+                prefix = label_prefix(i, total, series) if label_prefix else f"[{i}/{total}]"
+                self.log_signal.emit(f"   🔎 {prefix} Buscando: {label} -> '{query}'...")
 
                 try:
-                    url = searcher.search_and_select(
-                        query,
-                        year,
-                        series['id']
-                    )
+                    kwargs = {'content_mode': content_mode} if content_mode else {}
+                    url = searcher.search_and_select(query, year, series['id'], **kwargs)
 
                     if url:
                         try:
-                            self.db.update_hispashare_url(series['id'], url)
-                            cover_url = self.db.derive_hispashare_cover_url(url)
-                            if cover_url:
-                                self.db.update_hispashare_cover_url(series['id'], cover_url)
-                            found += 1
-                            self.logger.info(f"URL guardada para '{series['name']}': {url}")
-                            self.log_signal.emit(f"      ✅ URL encontrada y guardada: {url[:50]}...")
-                            self.url_saved_signal.emit(series['id'], url)
+                            saved = self._save_hispashare_source(
+                                series['id'],
+                                url,
+                                source_title=label,
+                                reason=save_reason,
+                            )
+                            if saved:
+                                found += 1
+                                self.logger.info(f"URL guardada para '{series['name']}': {url}")
+                                self.log_signal.emit(f"      ✅ URL encontrada y guardada: {url[:50]}...")
+                                self.url_saved_signal.emit(series['id'], url)
+                            else:
+                                # Repetir la búsqueda devolvería la misma ficha en cada
+                                # pasada (hubo items con 37 intentos y una fila 'conflict'
+                                # por intento): se desactiva hasta revisión manual.
+                                # register_search_failure y no disable_series_search: deja
+                                # search_failures >= 1, así la migración de arranque de
+                                # db_manager (reactiva desactivadas con 0 fallos) no la
+                                # vuelve a encender.
+                                self.db.register_search_failure(series['id'], disable_after=1)
+                                self.logger.warning(f"URL en conflicto (ya asignada a otra serie) para '{series['name']}': {url}")
+                                self.log_signal.emit("      ⚠️ URL ya pertenece a otra serie; se omite y se desactiva la búsqueda automática (revisar a mano)")
                         except Exception as save_error:
                             self.logger.error(f"Error guardando URL para '{series['name']}': {save_error}")
                             self.log_signal.emit(f"      ⚠️ URL encontrada pero error al guardar: {str(save_error)}")
@@ -446,84 +541,434 @@ class SchedulerThread(QThread):
                     self.log_signal.emit(f"      ❌ Error en búsqueda: {str(e)}")
                     continue
 
-                time.sleep(2)  # pequeña pausa entre búsquedas
+                time.sleep(2)  # Esperar entre búsquedas
 
-            self.log_signal.emit(f"   ✅ {found}/{len(series_list)} URLs encontradas para series nuevas sin episodios faltantes")
+            self.log_signal.emit(f"   ✅ {found}/{total} {found_label}")
+            return found
 
         except Exception as e:
-            self.logger.error(f"Error en search_hispashare_for_new_series: {e}")
+            self.logger.error(f"Error en {method_name}: {e}")
             raise
 
+    def search_hispashare(self, driver):
+        """Buscar series en Hispashare - solo las que tienen episodios faltantes"""
+        series_list = self.db.get_series_with_missing_episodes_without_url(self.db.get_episodic_categories())
+        self._search_hispashare_pass(
+            driver,
+            series_list,
+            method_name="search_hispashare",
+            empty_message="No hay series con episodios faltantes que necesiten búsqueda en Hispashare",
+            count_label="Series con episodios faltantes a buscar",
+            found_label="URLs encontradas para series con episodios faltantes",
+            save_reason='URL encontrada por scheduler para serie con episodios faltantes',
+        )
+
+    def search_hispashare_for_new_series(self, driver):
+        """Buscar y guardar URL de Hispashare para series nuevas que no tienen episodios faltantes.
+        Evita duplicar con las que ya se buscan en search_hispashare()."""
+        all_without_url = self.db.get_series_without_hispashare_url(self.db.get_episodic_categories())
+        missing_without_url = self.db.get_series_with_missing_episodes_without_url(self.db.get_episodic_categories())
+        missing_ids = {s['id'] for s in missing_without_url}
+        series_list = [s for s in all_without_url if s['id'] not in missing_ids]
+
+        self._search_hispashare_pass(
+            driver,
+            series_list,
+            method_name="search_hispashare_for_new_series",
+            empty_message="No hay series nuevas sin URL que necesiten búsqueda en Hispashare",
+            count_label="Series nuevas sin URL a buscar",
+            found_label="URLs encontradas para series nuevas sin episodios faltantes",
+            save_reason='URL encontrada por scheduler para serie nueva',
+            label_prefix=lambda i, total, series: f"[NUEVAS {i}/{total}]",
+        )
+
+    def search_hispashare_for_single_file_items(self, driver):
+        """Buscar y guardar URL para bibliotecas de archivo unico."""
+        categories = Settings.get_single_file_categories()
+        items = self.db.get_series_without_hispashare_url(categories)
+
+        def _prefix(i, total, item):
+            category_label = Settings.get_category_label(item.get('content_category', ''))
+            return f"[{i}/{total}] [{category_label}]"
+
+        self._search_hispashare_pass(
+            driver,
+            items,
+            method_name="search_hispashare_for_single_file_items",
+            empty_message="No hay elementos de archivo unico sin URL que buscar",
+            count_label="Elementos de archivo único sin URL a buscar",
+            found_label="URLs encontradas para archivo unico",
+            save_reason='URL encontrada por scheduler para biblioteca de archivo unico',
+            content_mode='single_file',
+            label_prefix=_prefix,
+        )
+
     def process_downloads(self, driver):
-        """Procesar descargas de episodios faltantes - solo series que realmente tienen episodios faltantes"""
+        """
+        Descarga episodios faltantes usando la fuente de mayor calidad
+        disponible entre todos los proveedores activos. El arbitraje
+        (SourceArbitrationService) decide qué proveedor gana -- ni Hispashare
+        ni Wolfmax están hardcodeados aquí, así que añadir un proveedor nuevo
+        no requiere tocar este método.
+        """
         try:
-            # Obtener solo series con episodios faltantes que tienen URL de Hispashare
-            series_with_urls = self.db.get_series_with_missing_episodes_and_url()
-            
-            if not series_with_urls:
-                self.log_signal.emit("   ℹ️ No hay series con episodios faltantes y URLs para procesar descargas")
+            series_with_offers = self.db.get_series_with_missing_episodes_and_any_offer(
+                self.db.get_episodic_categories()
+            )
+
+            if not series_with_offers:
+                self.log_signal.emit("   ℹ️ No hay series con episodios faltantes y fuentes conocidas para procesar descargas")
                 return
-            
-            downloader = HispashareDownloader(driver, self.db)
-            total_links = 0
-            
-            self.log_signal.emit(f"   📋 Procesando {len(series_with_urls)} series con episodios faltantes...")
-            
-            for series in series_with_urls:
+
+            total_downloads = 0
+            self.log_signal.emit(f"   📋 Procesando {len(series_with_offers)} series con episodios faltantes...")
+
+            for series in series_with_offers:
                 if not self.running:
                     break
-                
+
+                series_id = series['id']
+                name = series['name']
+
                 try:
-                    self.log_signal.emit(f"   🔍 Procesando: {series['name']} (tiene episodios faltantes)")
-                    
-                    # Obtener enlaces ed2k para episodios faltantes
-                    ed2k_links = downloader.download_missing_episodes(series['id'])
-                    
-                    if ed2k_links:
-                        total_links += len(ed2k_links)
-                        self.log_signal.emit(f"      ✅ {len(ed2k_links)} enlaces ed2k obtenidos para episodios faltantes")
-                    else:
-                        self.log_signal.emit(f"      ℹ️ No se encontraron enlaces para los episodios faltantes")
-                    
+                    # Revisita todas las fuentes conocidas para esta serie antes
+                    # de decidir -- así Hispashare se sigue comprobando aunque
+                    # Wolfmax sea el proveedor que gane, y viceversa.
+                    self.source_arbitration_service.refresh_all_offers(series_id, series)
+                    offer = self.source_arbitration_service.best_offer(series_id)
+                    if offer is None:
+                        self.log_signal.emit(f"   ℹ️ [{name}] Sin oferta disponible en ningún proveedor")
+                        continue
+
+                    provider = self.providers.get(offer.provider)
+                    if provider is None:
+                        self.logger.warning(f"Proveedor desconocido '{offer.provider}' para '{name}'")
+                        continue
+
+                    quality_label = f"{offer.quality.resolution_height}p" if offer.quality.resolution_height else "?"
+                    self.log_signal.emit(f"   🔍 [{offer.provider} {quality_label}] {name}")
+
+                    handle = provider.resolve_download(series, offer, missing_only=True)
+                    if handle is None:
+                        self.log_signal.emit("      ℹ️ Sin enlaces para episodios faltantes")
+                        continue
+
+                    if handle.kind == "ed2k":
+                        count = len(handle.payload.get("ed2k_links", []))
+                        total_downloads += count
+                        self.log_signal.emit(f"      ✅ {count} enlaces ed2k")
+                    elif handle.kind == "direct_http":
+                        count = len(handle.payload.get("downloaded", []))
+                        total_downloads += count
+                        self.log_signal.emit(
+                            f"      ✅ {count} archivo(s) → {handle.payload.get('staging_dir', '')}"
+                        )
+
                 except Exception as e:
-                    self.logger.error(f"Error procesando serie '{series['name']}': {e}")
-                    self.log_signal.emit(f"      ❌ Error procesando: {str(e)}")
+                    self.logger.error(f"Error procesando '{name}': {e}")
+                    self.log_signal.emit(f"      ❌ Error: {e}")
                     continue
-                
+
                 time.sleep(1)  # Pequeña pausa entre series
-            
-            if total_links > 0:
-                self.log_signal.emit(f"   ✅ Total: {total_links} enlaces ed2k obtenidos para episodios faltantes")
+
+            if total_downloads > 0:
+                self.log_signal.emit(f"   ✅ Total: {total_downloads} descargas obtenidas para episodios faltantes")
             else:
-                self.log_signal.emit("   ℹ️ No se obtuvieron enlaces ed2k en este ciclo")
-            
+                self.log_signal.emit("   ℹ️ No se obtuvieron descargas en este ciclo")
+
         except Exception as e:
             self.logger.error(f"Error en process_downloads: {e}")
+            raise
+
+    def _save_hispashare_source(self, series_id, url, *, source_title="", reason=""):
+        cover_url = self.db.derive_hispashare_cover_url(url) or ""
+        saved = self.source_repository.save_match(
+            series_id,
+            {
+                "source_url": url,
+                "source_title": source_title,
+                "cover_url": cover_url,
+                "match_score": 1.0,
+                "match_status": "confirmed",
+                "validation_reason": reason,
+            },
+        )
+        if not saved:
+            return False
+        self.decision_log_repository.append(
+            series_id,
+            "source_selected_scheduler",
+            "Se guardó una URL Hispashare desde el scheduler",
+            {
+                "source_url": url,
+                "source_title": source_title,
+                "reason": reason,
+            },
+        )
+        return True
+
+    def scan_wolfmax_categories(self, max_pages: int = 3):
+        """
+        Rasca las páginas de categoría de wolfmax4k.com, hace match con las
+        series/películas de la DB por título y guarda las URLs wolfmax encontradas.
+        También detecta contenido nuevo (no en la DB) y lo registra.
+        """
+        try:
+            all_series = self.db.get_all_series()
+            if not all_series:
+                return
+
+            # Índice normalizado de la DB para matching rápido
+            db_index = [
+                {
+                    'id': s['id'],
+                    'name': s.get('name', ''),
+                    'tmdb_name': s.get('tmdb_name', ''),
+                    'category': s.get('content_category', ''),
+                    'year': s.get('year'),
+                    'norm': _normalize(s.get('tmdb_name') or s.get('name', '')),
+                }
+                for s in all_series
+            ]
+
+            scanner = WolfmaxCategoryScanner(max_pages=max_pages)
+            items = scanner.scan_categories()
+            self.log_signal.emit(f"   📋 {len(items)} items encontrados en wolfmax4k.com")
+
+            matched = 0
+            new_content = 0
+            threshold = getattr(Settings, 'WOLFMAX_MATCH_THRESHOLD', 0.55)
+
+            for item in items:
+                if not self.running:
+                    break
+                item_norm = _normalize(item['title'])
+                best_series = None
+                best_score = 0.0
+
+                # Buscar solo en la misma categoría (no caer al índice global)
+                cat_candidates = [
+                    s for s in db_index
+                    if s['category'] == item['app_category'] and s['norm']
+                ]
+                item_year = item.get('year')
+                for s in cat_candidates:
+                    # Año conocido y distinto → nunca es el mismo contenido
+                    # (remakes/homónimos: "Dune" 1984 vs "Dune" 2021).
+                    if item_year and s['year'] and s['year'] != item_year:
+                        continue
+                    score = _title_score(item_norm, s['norm'])
+                    if score > best_score:
+                        best_score = score
+                        best_series = s
+
+                if best_series and best_score >= threshold:
+                    existing = self.db.get_wolfmax_source_for_series(best_series['id'])
+                    # Preferir URL de mayor calidad: actualizar si la nueva es mejor
+                    existing_q = int((existing or {}).get('match_score', 0) * 2160)
+                    new_q = item.get('quality_height') or 0
+                    # Las URLs del diseño antiguo de wolfmax ya no existen:
+                    # sustituirlas aunque la nueva no sea de mayor calidad.
+                    stale = existing and not is_current_wolfmax_url(existing.get('source_url') or '')
+                    if not existing or stale or new_q > existing_q:
+                        self.db.save_wolfmax_source(
+                            best_series['id'],
+                            item['wolfmax_url'],
+                            item.get('quality_height'),
+                            item['title'],
+                        )
+                        quality_label = f'{new_q}p' if new_q else '?'
+                        self.log_signal.emit(
+                            f"   🐺 [{best_series['category']}] {best_series['name']} "
+                            f"→ wolfmax {quality_label} (score={best_score:.2f})"
+                        )
+                        matched += 1
+                else:
+                    # Contenido no encontrado en la DB → posible contenido nuevo
+                    new_content += 1
+
+            self.log_signal.emit(
+                f"   ✅ Wolfmax sync: {matched} URLs guardadas | "
+                f"{new_content} items sin match en tu biblioteca"
+            )
+        except Exception as e:
+            self.logger.error(f"Error en scan_wolfmax_categories: {e}")
+            self.log_signal.emit(f"   ⚠️ Error en wolfmax category scan: {e}")
+
+    def scan_missing_resolutions(self, batch_size=300):
+        """
+        Detecta la resolución real (con pymediainfo) de los episodios que
+        el parser de nombre no pudo clasificar. Procesa hasta `batch_size`
+        archivos por ciclo para no bloquear el scheduler demasiado tiempo.
+        """
+        try:
+            episodes = self.db.get_episodes_missing_resolution(limit=batch_size)
+            if not episodes:
+                self.log_signal.emit("   ✅ Todas las resoluciones ya detectadas")
+                return
+
+            self.log_signal.emit(
+                f"   🔬 Detectando resolución de {len(episodes)} archivo(s) con MediaInfo..."
+            )
+            resolved = []
+            failed_ids = []
+            for ep in episodes:
+                if not self.running:
+                    break
+                result = detect_resolution_from_file(ep['file_path'])
+                if result:
+                    resolved.append({'id': ep['id'], **result})
+                else:
+                    failed_ids.append(ep['id'])
+
+            if resolved:
+                self.db.batch_update_episode_resolutions(resolved)
+            if failed_ids:
+                self.db.mark_episode_resolution_unreadable(failed_ids)
+
+            pending = self.db.get_episodes_missing_resolution(limit=1)
+            self.log_signal.emit(
+                f"   ✅ Resueltos: {len(resolved)} | No leíbles: {len(failed_ids)} | "
+                f"Pendientes: {'0' if not pending else 'más de 300'}"
+            )
+        except Exception as e:
+            self.logger.error(f"Error en scan_missing_resolutions: {e}")
+            self.log_signal.emit(f"   ⚠️ Error detectando resoluciones: {e}")
+
+    def process_upgrades(self, driver):
+        """
+        Mejora la calidad de episodios ya descargados usando la mejor oferta
+        conocida entre todos los proveedores activos (arbitraje genérico,
+        vía SourceArbitrationService.should_upgrade). Reemplaza las dos
+        comparaciones que antes estaban escritas a mano y por separado para
+        Hispashare y Wolfmax.
+        """
+        try:
+            candidates = self.db.get_series_with_local_resolution_and_any_offer(
+                self.db.get_episodic_categories()
+            )
+            if not candidates:
+                self.log_signal.emit("   ℹ️ No hay series con episodios locales y fuente conocida para evaluar upgrades")
+                return
+
+            max_series = getattr(Settings, 'UPGRADE_MAX_SERIES_PER_CYCLE', 15)
+            # Presupuestos por proveedor: preservan los límites previos
+            # (enlaces ed2k de Hispashare vs. descargas directas de Wolfmax
+            # son recursos de coste muy distinto). Un proveedor nuevo sin
+            # límite explícito configurado usa un tope conservador por defecto.
+            provider_budgets = {
+                'hispashare': getattr(Settings, 'UPGRADE_MAX_LINKS_PER_CYCLE', 80),
+                'wolfmax': getattr(Settings, 'WOLFMAX_MAX_DOWNLOADS_PER_CYCLE', 2),
+            }
+            provider_used = {}
+            processed = 0
+            total_upgrades = 0
+
+            self.log_signal.emit(f"   📊 {len(candidates)} candidatos a evaluar para upgrade")
+
+            for series in candidates:
+                if not self.running or processed >= max_series:
+                    break
+
+                series_id = series['id']
+                name = series['name']
+                # Si aún no se conoce la resolución local real (pendiente de
+                # scan_missing_resolutions), no evaluar upgrade: una Quality
+                # desconocida rankearía como la peor posible y dispararía
+                # descargas innecesarias hasta que se complete la detección.
+                if series.get('max_local_resolution') is None:
+                    continue
+                local_quality = quality_from_local_episode(
+                    {'resolution_height': series.get('max_local_resolution'), 'codec': None}
+                )
+
+                try:
+                    self.source_arbitration_service.refresh_all_offers(series_id, series)
+                    upgrade_available, offer = self.source_arbitration_service.should_upgrade(
+                        series_id, local_quality
+                    )
+                    if not upgrade_available or offer is None:
+                        continue
+
+                    budget = provider_budgets.get(offer.provider, 5)
+                    if provider_used.get(offer.provider, 0) >= budget:
+                        continue
+
+                    provider = self.providers.get(offer.provider)
+                    if provider is None:
+                        continue
+
+                    processed += 1
+                    res = series.get('max_local_resolution')
+                    quality_label = f"{offer.quality.resolution_height}p" if offer.quality.resolution_height else "?"
+                    self.log_signal.emit(
+                        f"   🔼 [{offer.provider} {quality_label}] Upgrade: {name} (actual: {res}p)"
+                    )
+
+                    handle = provider.resolve_download(series, offer, missing_only=False)
+                    if handle is None:
+                        self.log_signal.emit("      ℹ️ Sin upgrades disponibles")
+                        continue
+
+                    if handle.kind == "ed2k":
+                        count = len(handle.payload.get("ed2k_links", []))
+                    else:
+                        count = len(handle.payload.get("downloaded", []))
+                    provider_used[offer.provider] = provider_used.get(offer.provider, 0) + count
+                    total_upgrades += count
+                    self.log_signal.emit(f"      ✅ {count} obtenido(s)")
+
+                except Exception as e:
+                    self.logger.error(f"Error en upgrades para '{name}': {e}")
+                    self.log_signal.emit(f"      ❌ Error: {str(e)}")
+                    continue
+
+                time.sleep(1)
+
+            if total_upgrades:
+                self.log_signal.emit(f"   ✅ Upgrades: {total_upgrades} obtenido(s)")
+            else:
+                self.log_signal.emit("   ℹ️ No se realizaron upgrades en este ciclo")
+
+        except Exception as e:
+            self.logger.error(f"Error en process_upgrades: {e}")
             raise
     
     def scan_new_content(self, driver):
         """Escanear nuevo contenido en Hispashare"""
         try:
+            if not self.running:
+                return
             # Verificar si el barrido de contenido está habilitado
             if not getattr(Settings, 'CONTENT_SCAN_ENABLED', True):
                 self.log_signal.emit("   ℹ️ Barrido de nuevo contenido deshabilitado en configuración")
                 return
             
-            scanner = ContentScanner(driver, self.db)
+            scanner = ContentScanner(driver, self.db, should_stop=lambda: not self.running)
             
             # 1. Escanear páginas de Hispashare
             self.log_signal.emit("   📄 Escaneando páginas de Hispashare...")
             new_content = scanner.scan_new_content()
+            if not self.running:
+                return
             
             if not new_content:
                 self.log_signal.emit("   ℹ️ No se encontró nuevo contenido que cumpla los filtros")
                 return
             
             self.log_signal.emit(f"   ✅ {len(new_content)} elementos de nuevo contenido encontrados")
+            grouped_counts = {}
+            for item in new_content:
+                category = item.get('library_category', 'sin_categoria')
+                grouped_counts[category] = grouped_counts.get(category, 0) + 1
+            for category, count in sorted(grouped_counts.items()):
+                self.log_signal.emit(f"      📚 {Settings.get_category_label(category)}: {count}")
             
             # 2. Procesar contenido encontrado
             self.log_signal.emit("   🎬 Procesando nuevo contenido...")
             ed2k_links = scanner.process_new_content(new_content)
+            if not self.running:
+                return
             
             if ed2k_links:
                 self.log_signal.emit(f"   ✅ {len(ed2k_links)} enlaces ed2k obtenidos del nuevo contenido")
@@ -540,15 +985,13 @@ class SchedulerThread(QThread):
         """Detener el scheduler"""
         self.logger.info("Deteniendo scheduler...")
         self.running = False
-        
-        # Cerrar driver activo si existe
+        self.requestInterruption()
         if self.current_driver:
             try:
-                self.logger.info("Cerrando driver de Selenium...")
                 self.current_driver.quit()
-                self.current_driver = None
-                self.logger.info("Driver cerrado correctamente")
+                self.logger.info("Driver cerrado al detener scheduler")
             except Exception as e:
-                self.logger.error(f"Error cerrando driver en stop(): {e}")
-        
+                self.logger.warning(f"No se pudo cerrar el driver al detener scheduler: {e}")
+            finally:
+                self.current_driver = None
         self.logger.info("Scheduler marcado para detenerse")

@@ -38,98 +38,196 @@ class Settings:
     DOCUMENTARIES_PATH = os.getenv("DOCUMENTARIES_PATH", "")
     DOCUMENTARIES_PATHS = os.getenv("DOCUMENTARIES_PATHS", "")  # Múltiples rutas separadas por ;
     
+    CARTOONS_PATH = os.getenv("CARTOONS_PATH", "")
+    CARTOONS_PATHS = os.getenv("CARTOONS_PATHS", "")  # Múltiples rutas separadas por ;
+
+    ANIMATED_MOVIES_PATH = os.getenv("ANIMATED_MOVIES_PATH", "")
+    ANIMATED_MOVIES_PATHS = os.getenv("ANIMATED_MOVIES_PATHS", "")  # Múltiples rutas separadas por ;
+
+    DOCUSERIES_PATH = os.getenv("DOCUSERIES_PATH", "")
+    DOCUSERIES_PATHS = os.getenv("DOCUSERIES_PATHS", "")  # Múltiples rutas separadas por ;
+
+    CONCERTS_PATH = os.getenv("CONCERTS_PATH", "")
+    CONCERTS_PATHS = os.getenv("CONCERTS_PATHS", "")  # Múltiples rutas separadas por ;
+
     MUSIC_PATH = os.getenv("MUSIC_PATH", "")
     MUSIC_PATHS = os.getenv("MUSIC_PATHS", "")  # Múltiples rutas separadas por ;
     
     DB_PATH = _resolve_path(os.getenv("DB_PATH", "series_manager.db"))
+    COVER_CACHE_DIR = _resolve_path(os.getenv("COVER_CACHE_DIR", "cache/covers"))
+
+    LIBRARY_CATEGORIES = {
+        'series': {
+            'label': 'Series',
+            'primary_key': 'SERIES_PATH',
+            'additional_key': 'SERIES_PATHS',
+            'content_mode': 'episodic',
+        },
+        'movies': {
+            'label': 'Películas',
+            'primary_key': 'MOVIES_PATH',
+            'additional_key': 'MOVIES_PATHS',
+            'content_mode': 'single_file',
+        },
+        'documentaries': {
+            'label': 'Documentales',
+            'primary_key': 'DOCUMENTARIES_PATH',
+            'additional_key': 'DOCUMENTARIES_PATHS',
+            'content_mode': 'single_file',
+        },
+        'cartoons': {
+            'label': 'Dibujos',
+            'primary_key': 'CARTOONS_PATH',
+            'additional_key': 'CARTOONS_PATHS',
+            'content_mode': 'episodic',
+        },
+        'animated_movies': {
+            'label': 'Películas Animación',
+            'primary_key': 'ANIMATED_MOVIES_PATH',
+            'additional_key': 'ANIMATED_MOVIES_PATHS',
+            'content_mode': 'single_file',
+        },
+        'docuseries': {
+            'label': 'Documentales Series',
+            'primary_key': 'DOCUSERIES_PATH',
+            'additional_key': 'DOCUSERIES_PATHS',
+            'content_mode': 'episodic',
+        },
+        'concerts': {
+            'label': 'Conciertos',
+            'primary_key': 'CONCERTS_PATH',
+            'additional_key': 'CONCERTS_PATHS',
+            'content_mode': 'single_file',
+        },
+        'music': {
+            'label': 'Música',
+            'primary_key': 'MUSIC_PATH',
+            'additional_key': 'MUSIC_PATHS',
+            'content_mode': 'single_file',
+        },
+    }
+
+    @classmethod
+    def get_library_categories(cls):
+        return cls.LIBRARY_CATEGORIES
+
+    @classmethod
+    def get_category_label(cls, category):
+        config = cls.LIBRARY_CATEGORIES.get(category, {})
+        return config.get('label', category)
+
+    @classmethod
+    def get_category_content_mode(cls, category):
+        config = cls.LIBRARY_CATEGORIES.get(category, {})
+        return config.get('content_mode', 'single_file')
+
+    @classmethod
+    def get_categories_by_mode(cls, content_mode):
+        return [
+            category
+            for category, config in cls.LIBRARY_CATEGORIES.items()
+            if config.get('content_mode') == content_mode
+        ]
+
+    @classmethod
+    def get_single_file_categories(cls):
+        return cls.get_categories_by_mode('single_file')
+
+    @classmethod
+    def get_episodic_categories(cls):
+        return cls.get_categories_by_mode('episodic')
+
+    @classmethod
+    def get_paths_for_category(cls, category):
+        """Obtener todas las rutas configuradas para una categoría."""
+        config = cls.LIBRARY_CATEGORIES.get(category)
+        if not config:
+            return []
+
+        primary_value = getattr(cls, config['primary_key'], "")
+        additional_value = getattr(cls, config['additional_key'], "")
+        paths = []
+
+        if primary_value and primary_value.strip():
+            paths.append(primary_value.strip())
+
+        if additional_value and additional_value.strip():
+            paths.extend(
+                path.strip()
+                for path in additional_value.split(';')
+                if path.strip()
+            )
+
+        unique_paths = []
+        for path in paths:
+            if path not in unique_paths:
+                unique_paths.append(path)
+
+        return unique_paths
+
+    @classmethod
+    def save_paths_for_category(cls, category, paths_list):
+        """Guardar rutas de una categoría de biblioteca en el archivo .env."""
+        config = cls.LIBRARY_CATEGORIES.get(category)
+        if not config or paths_list is None:
+            return
+
+        primary_path = paths_list[0] if paths_list else ""
+        additional_paths = ";".join(paths_list[1:]) if len(paths_list) > 1 else ""
+
+        current_settings = {}
+        try:
+            with open(ENV_PATH, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if '=' in line and not line.strip().startswith('#'):
+                        key, value = line.strip().split('=', 1)
+                        current_settings[key] = value
+        except FileNotFoundError:
+            pass
+
+        current_settings[config['primary_key']] = primary_path
+        current_settings[config['additional_key']] = additional_paths
+        cls.save_settings(current_settings)
     
     @classmethod
     def get_series_paths(cls):
         """Obtener todas las rutas de series configuradas"""
-        paths = []
-        
-        # Agregar ruta principal si existe
-        if cls.SERIES_PATH and cls.SERIES_PATH.strip():
-            paths.append(cls.SERIES_PATH.strip())
-        
-        # Agregar rutas adicionales si existen
-        if cls.SERIES_PATHS and cls.SERIES_PATHS.strip():
-            additional_paths = [path.strip() for path in cls.SERIES_PATHS.split(';') if path.strip()]
-            paths.extend(additional_paths)
-        
-        # Eliminar duplicados manteniendo el orden
-        unique_paths = []
-        for path in paths:
-            if path not in unique_paths:
-                unique_paths.append(path)
-        
-        return unique_paths
+        return cls.get_paths_for_category('series')
     
     @classmethod
     def get_movies_paths(cls):
         """Obtener todas las rutas de películas configuradas"""
-        paths = []
-        
-        # Agregar ruta principal si existe
-        if cls.MOVIES_PATH and cls.MOVIES_PATH.strip():
-            paths.append(cls.MOVIES_PATH.strip())
-        
-        # Agregar rutas adicionales si existen
-        if cls.MOVIES_PATHS and cls.MOVIES_PATHS.strip():
-            additional_paths = [path.strip() for path in cls.MOVIES_PATHS.split(';') if path.strip()]
-            paths.extend(additional_paths)
-        
-        # Eliminar duplicados manteniendo el orden
-        unique_paths = []
-        for path in paths:
-            if path not in unique_paths:
-                unique_paths.append(path)
-        
-        return unique_paths
+        return cls.get_paths_for_category('movies')
     
     @classmethod
     def get_documentaries_paths(cls):
         """Obtener todas las rutas de documentales configuradas"""
-        paths = []
-        
-        # Agregar ruta principal si existe
-        if cls.DOCUMENTARIES_PATH and cls.DOCUMENTARIES_PATH.strip():
-            paths.append(cls.DOCUMENTARIES_PATH.strip())
-        
-        # Agregar rutas adicionales si existen
-        if cls.DOCUMENTARIES_PATHS and cls.DOCUMENTARIES_PATHS.strip():
-            additional_paths = [path.strip() for path in cls.DOCUMENTARIES_PATHS.split(';') if path.strip()]
-            paths.extend(additional_paths)
-        
-        # Eliminar duplicados manteniendo el orden
-        unique_paths = []
-        for path in paths:
-            if path not in unique_paths:
-                unique_paths.append(path)
-        
-        return unique_paths
+        return cls.get_paths_for_category('documentaries')
+
+    @classmethod
+    def get_cartoons_paths(cls):
+        """Obtener todas las rutas de dibujos configuradas"""
+        return cls.get_paths_for_category('cartoons')
+
+    @classmethod
+    def get_animated_movies_paths(cls):
+        """Obtener todas las rutas de películas de animación configuradas"""
+        return cls.get_paths_for_category('animated_movies')
+
+    @classmethod
+    def get_docuseries_paths(cls):
+        """Obtener todas las rutas de documentales de series configuradas"""
+        return cls.get_paths_for_category('docuseries')
+
+    @classmethod
+    def get_concerts_paths(cls):
+        """Obtener todas las rutas de conciertos configuradas"""
+        return cls.get_paths_for_category('concerts')
     
     @classmethod
     def get_music_paths(cls):
         """Obtener todas las rutas de música configuradas"""
-        paths = []
-        
-        # Agregar ruta principal si existe
-        if cls.MUSIC_PATH and cls.MUSIC_PATH.strip():
-            paths.append(cls.MUSIC_PATH.strip())
-        
-        # Agregar rutas adicionales si existen
-        if cls.MUSIC_PATHS and cls.MUSIC_PATHS.strip():
-            additional_paths = [path.strip() for path in cls.MUSIC_PATHS.split(';') if path.strip()]
-            paths.extend(additional_paths)
-        
-        # Eliminar duplicados manteniendo el orden
-        unique_paths = []
-        for path in paths:
-            if path not in unique_paths:
-                unique_paths.append(path)
-        
-        return unique_paths
+        return cls.get_paths_for_category('music')
     
     # Selenium
     SELENIUM_HEADLESS = os.getenv("SELENIUM_HEADLESS", "False").lower() == "true"
@@ -155,8 +253,28 @@ class Settings:
     # Tamaño máximo opcional para películas (0 o vacío deshabilita el filtro máximo)
     MAXIMUM_MOVIE_SIZE_GB = float(os.getenv("MAXIMUM_MOVIE_SIZE_GB", "0"))
 
+    # Reintento de enlaces ed2k atascados (enviados a eMule pero nunca completados)
+    ED2K_RETRY_ENABLED = os.getenv("ED2K_RETRY_ENABLED", "True").lower() == "true"
+    ED2K_RETRY_AFTER_DAYS = int(os.getenv("ED2K_RETRY_AFTER_DAYS", "3"))
+
+    UPGRADE_ENABLED = os.getenv("UPGRADE_ENABLED", "False").lower() == "true"
+    UPGRADE_TARGET_QUALITY = os.getenv("UPGRADE_TARGET_QUALITY", "2160p")
+    UPGRADE_MAX_SERIES_PER_CYCLE = int(os.getenv("UPGRADE_MAX_SERIES_PER_CYCLE", "15"))
+    UPGRADE_MAX_LINKS_PER_CYCLE = int(os.getenv("UPGRADE_MAX_LINKS_PER_CYCLE", "80"))
+
+    # Wolfmax4k
+    WOLFMAX_UPGRADE_ENABLED = os.getenv("WOLFMAX_UPGRADE_ENABLED", "False").lower() == "true"
+    WOLFMAX_STAGING_DIR = os.getenv("WOLFMAX_STAGING_DIR", "")
+    WOLFMAX_MAX_DOWNLOADS_PER_CYCLE = int(os.getenv("WOLFMAX_MAX_DOWNLOADS_PER_CYCLE", "2"))
+    WOLFMAX_MATCH_THRESHOLD = float(os.getenv("WOLFMAX_MATCH_THRESHOLD", "0.70"))
+
     # Búsqueda en biblioteca
     LIBRARY_SEARCH_MAX_DEPTH = int(os.getenv("LIBRARY_SEARCH_MAX_DEPTH", "2"))  # Profundidad máxima de subcarpetas para detectar contenido existente
+
+    CONTENT_SCAN_MIN_RATING = float(os.getenv("CONTENT_SCAN_MIN_RATING", "5.5"))
+
+    # Biblioteca - renombrado automático
+    AUTO_RENAME_FOLDER_ON_TMDB_ASSIGN = os.getenv("AUTO_RENAME_FOLDER_ON_TMDB_ASSIGN", "True").lower() == "true"
     
     @classmethod
     def validate(cls):
@@ -172,8 +290,13 @@ class Settings:
         if not cls.HISPASHARE_PASS:
             errors.append("HISPASHARE_PASS no configurada")
             
-        if not cls.SERIES_PATH:
-            errors.append("SERIES_PATH no configurada")
+        episodic_paths = (
+            cls.get_series_paths() +
+            cls.get_cartoons_paths() +
+            cls.get_docuseries_paths()
+        )
+        if not episodic_paths:
+            errors.append("No hay rutas episódicas configuradas (series, dibujos o documentales series)")
             
         return errors
     
@@ -187,114 +310,42 @@ class Settings:
     @classmethod
     def save_series_paths(cls, paths_list):
         """Guarda las rutas de series en el archivo .env"""
-        if not paths_list:
-            return
-        
-        # La primera ruta va a SERIES_PATH, las demás a SERIES_PATHS
-        primary_path = paths_list[0] if paths_list else ""
-        additional_paths = ";".join(paths_list[1:]) if len(paths_list) > 1 else ""
-        
-        # Leer configuración actual
-        current_settings = {}
-        try:
-            with open(ENV_PATH, 'r', encoding='utf-8') as f:
-                for line in f:
-                    if '=' in line and not line.strip().startswith('#'):
-                        key, value = line.strip().split('=', 1)
-                        current_settings[key] = value
-        except FileNotFoundError:
-            pass
-        
-        # Actualizar rutas
-        current_settings['SERIES_PATH'] = primary_path
-        current_settings['SERIES_PATHS'] = additional_paths
-        
-        # Guardar configuración actualizada
-        cls.save_settings(current_settings)
+        cls.save_paths_for_category('series', paths_list)
     
     @classmethod
     def save_movies_paths(cls, paths_list):
         """Guarda las rutas de películas en el archivo .env"""
-        if not paths_list:
-            return
-        
-        # La primera ruta va a MOVIES_PATH, las demás a MOVIES_PATHS
-        primary_path = paths_list[0] if paths_list else ""
-        additional_paths = ";".join(paths_list[1:]) if len(paths_list) > 1 else ""
-        
-        # Leer configuración actual
-        current_settings = {}
-        try:
-            with open(ENV_PATH, 'r', encoding='utf-8') as f:
-                for line in f:
-                    if '=' in line and not line.strip().startswith('#'):
-                        key, value = line.strip().split('=', 1)
-                        current_settings[key] = value
-        except FileNotFoundError:
-            pass
-        
-        # Actualizar rutas
-        current_settings['MOVIES_PATH'] = primary_path
-        current_settings['MOVIES_PATHS'] = additional_paths
-        
-        # Guardar configuración actualizada
-        cls.save_settings(current_settings)
+        cls.save_paths_for_category('movies', paths_list)
     
     @classmethod
     def save_documentaries_paths(cls, paths_list):
         """Guarda las rutas de documentales en el archivo .env"""
-        if not paths_list:
-            return
-        
-        # La primera ruta va a DOCUMENTARIES_PATH, las demás a DOCUMENTARIES_PATHS
-        primary_path = paths_list[0] if paths_list else ""
-        additional_paths = ";".join(paths_list[1:]) if len(paths_list) > 1 else ""
-        
-        # Leer configuración actual
-        current_settings = {}
-        try:
-            with open(ENV_PATH, 'r', encoding='utf-8') as f:
-                for line in f:
-                    if '=' in line and not line.strip().startswith('#'):
-                        key, value = line.strip().split('=', 1)
-                        current_settings[key] = value
-        except FileNotFoundError:
-            pass
-        
-        # Actualizar rutas
-        current_settings['DOCUMENTARIES_PATH'] = primary_path
-        current_settings['DOCUMENTARIES_PATHS'] = additional_paths
-        
-        # Guardar configuración actualizada
-        cls.save_settings(current_settings)
+        cls.save_paths_for_category('documentaries', paths_list)
+
+    @classmethod
+    def save_cartoons_paths(cls, paths_list):
+        """Guarda las rutas de dibujos en el archivo .env"""
+        cls.save_paths_for_category('cartoons', paths_list)
+
+    @classmethod
+    def save_animated_movies_paths(cls, paths_list):
+        """Guarda las rutas de películas de animación en el archivo .env"""
+        cls.save_paths_for_category('animated_movies', paths_list)
+
+    @classmethod
+    def save_docuseries_paths(cls, paths_list):
+        """Guarda las rutas de documentales series en el archivo .env"""
+        cls.save_paths_for_category('docuseries', paths_list)
+
+    @classmethod
+    def save_concerts_paths(cls, paths_list):
+        """Guarda las rutas de conciertos en el archivo .env"""
+        cls.save_paths_for_category('concerts', paths_list)
     
     @classmethod
     def save_music_paths(cls, paths_list):
         """Guarda las rutas de música en el archivo .env"""
-        if not paths_list:
-            return
-        
-        # La primera ruta va a MUSIC_PATH, las demás a MUSIC_PATHS
-        primary_path = paths_list[0] if paths_list else ""
-        additional_paths = ";".join(paths_list[1:]) if len(paths_list) > 1 else ""
-        
-        # Leer configuración actual
-        current_settings = {}
-        try:
-            with open(ENV_PATH, 'r', encoding='utf-8') as f:
-                for line in f:
-                    if '=' in line and not line.strip().startswith('#'):
-                        key, value = line.strip().split('=', 1)
-                        current_settings[key] = value
-        except FileNotFoundError:
-            pass
-        
-        # Actualizar rutas
-        current_settings['MUSIC_PATH'] = primary_path
-        current_settings['MUSIC_PATHS'] = additional_paths
-        
-        # Guardar configuración actualizada
-        cls.save_settings(current_settings)
+        cls.save_paths_for_category('music', paths_list)
 
     def get_emule_config(self):
         """Obtener configuración de eMule"""

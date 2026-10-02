@@ -10,7 +10,8 @@ from config.settings import Settings
 
 def main() -> None:
     db_path = Path(Settings.DB_PATH)
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=60.0)
+    conn.execute("PRAGMA busy_timeout = 60000")
     try:
         cur = conn.cursor()
         cur.execute(

@@ -1,5 +1,6 @@
 import logging
 import sys
+from logging.handlers import RotatingFileHandler
 from PyQt6.QtCore import QObject, pyqtSignal
 from datetime import datetime
 
@@ -53,9 +54,15 @@ def setup_logger():
     console_handler.setFormatter(console_formatter)
     logger.addHandler(console_handler)
     
-    # Handler para archivo
-    file_handler = logging.FileHandler('series_manager.log', encoding='utf-8')
-    file_handler.setLevel(logging.DEBUG)
+    # Handler para archivo (con rotación para que no crezca indefinidamente)
+    file_handler = RotatingFileHandler(
+        'series_manager.log',
+        maxBytes=10 * 1024 * 1024,  # 10 MB por archivo
+        backupCount=5,  # hasta 5 archivos de respaldo (series_manager.log.1 .. .5)
+        encoding='utf-8',
+    )
+    # INFO: el nivel DEBUG generaba ~28k líneas por sesión (10 MB) en una unidad de red
+    file_handler.setLevel(logging.INFO)
     file_formatter = logging.Formatter(
         '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
@@ -65,7 +72,9 @@ def setup_logger():
     
     # Reducir verbosidad de librerías externas
     logging.getLogger('selenium').setLevel(logging.WARNING)
+    logging.getLogger('selenium.webdriver.remote.remote_connection').setLevel(logging.ERROR)
     logging.getLogger('urllib3').setLevel(logging.WARNING)
+    logging.getLogger('urllib3.connectionpool').setLevel(logging.ERROR)
     logging.getLogger('WDM').setLevel(logging.WARNING)
     
     logger.info("=" * 60)
