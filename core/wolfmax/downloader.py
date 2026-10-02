@@ -226,8 +226,9 @@ def _resolve_torrent_url(driver, wolfmax_url: str) -> str:
     return download_url
 
 
-def _download_torrent(driver, torrent_url: str, output_dir) -> Path:
-    """Descarga el .torrent con fetch() desde el propio navegador."""
+def _fetch_torrent(driver, torrent_url: str) -> tuple[str, bytes]:
+    """Descarga el .torrent con fetch() desde el propio navegador.
+    Devuelve (nombre de archivo, contenido)."""
     _ensure_on_site(driver)
     res = driver.execute_async_script(_FETCH_B64_JS, torrent_url)
     if res.get('status') != 200:
@@ -238,6 +239,11 @@ def _download_torrent(driver, torrent_url: str, output_dir) -> Path:
 
     filename = unquote(Path(urlparse(torrent_url).path).name) or 'descarga.torrent'
     filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+    return filename, content
+
+
+def _download_torrent(driver, torrent_url: str, output_dir) -> Path:
+    filename, content = _fetch_torrent(driver, torrent_url)
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / filename
@@ -333,6 +339,17 @@ class WolfmaxDownloader:
         driver = _make_driver()
         try:
             return _resolve_torrent_url(driver, wolfmax_url)
+        finally:
+            driver.quit()
+
+    def fetch_torrent(self, wolfmax_url: str) -> tuple[str, bytes]:
+        """Obtiene el .torrent de un episodio/película sin escribirlo en disco.
+        Devuelve (nombre de archivo, contenido)."""
+        driver = _make_driver()
+        try:
+            torrent_url = _resolve_torrent_url(driver, wolfmax_url)
+            logger.info(f'wolfmax: obteniendo {torrent_url}')
+            return _fetch_torrent(driver, torrent_url)
         finally:
             driver.quit()
 

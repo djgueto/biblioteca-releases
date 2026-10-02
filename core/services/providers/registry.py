@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+from core.download_clients import DownloadDispatcher, build_download_dispatcher
 from core.services.providers.base import SourceProvider
 from core.services.providers.wolfmax_provider import WolfmaxSourceProvider
 
 
 def build_provider_registry(
-    db_manager, *, hispashare_driver=None, include_wolfmax: bool = True
+    db_manager,
+    *,
+    hispashare_driver=None,
+    include_wolfmax: bool = True,
+    dispatcher: DownloadDispatcher | None = None,
 ) -> dict[str, SourceProvider]:
     """Construye el registro de proveedores activos.
 
@@ -20,11 +25,16 @@ def build_provider_registry(
     `include_wolfmax` preserva el comportamiento previo del scheduler, donde
     Settings.WOLFMAX_UPGRADE_ENABLED apagaba Wolfmax tanto para upgrades como
     para descargas de episodios faltantes.
+
+    `dispatcher` entrega las releases a los clientes de descarga (carpeta
+    vigilada de torrents, eMule); por defecto se construye desde Settings.
     """
     providers: dict[str, SourceProvider] = {}
+    if dispatcher is None:
+        dispatcher = build_download_dispatcher()
 
     if include_wolfmax:
-        providers["wolfmax"] = WolfmaxSourceProvider(db_manager)
+        providers["wolfmax"] = WolfmaxSourceProvider(db_manager, dispatcher)
 
     if hispashare_driver is not None:
         from core.services.providers.hispashare_provider import HispashareSourceProvider

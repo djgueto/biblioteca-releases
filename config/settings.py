@@ -268,6 +268,16 @@ class Settings:
     WOLFMAX_MAX_DOWNLOADS_PER_CYCLE = int(os.getenv("WOLFMAX_MAX_DOWNLOADS_PER_CYCLE", "2"))
     WOLFMAX_MATCH_THRESHOLD = float(os.getenv("WOLFMAX_MATCH_THRESHOLD", "0.70"))
 
+    # Cliente torrent tipo "blackhole": los .torrent se dejan en esta carpeta
+    # y el cliente torrent (vigilándola) se encarga de descargarlos.
+    TORRENT_WATCH_DIR = os.getenv("TORRENT_WATCH_DIR", "")
+
+    @classmethod
+    def get_torrent_watch_dir(cls) -> str:
+        # WOLFMAX_STAGING_DIR era esa misma carpeta antes de que el blackhole
+        # fuera común a todos los proveedores torrent.
+        return (cls.TORRENT_WATCH_DIR or cls.WOLFMAX_STAGING_DIR or "").strip()
+
     # Búsqueda en biblioteca
     LIBRARY_SEARCH_MAX_DEPTH = int(os.getenv("LIBRARY_SEARCH_MAX_DEPTH", "2"))  # Profundidad máxima de subcarpetas para detectar contenido existente
 

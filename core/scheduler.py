@@ -1,6 +1,7 @@
 import time
 import logging
 from datetime import datetime
+from pathlib import Path
 import re
 
 from core.auth.hispashare_login import HispashareAuth
@@ -656,12 +657,11 @@ class Scheduler(BackgroundJob):
                         count = len(handle.payload.get("ed2k_links", []))
                         total_downloads += count
                         self._log(f"      ✅ {count} enlaces ed2k")
-                    elif handle.kind == "direct_http":
-                        count = len(handle.payload.get("downloaded", []))
-                        total_downloads += count
-                        self._log(
-                            f"      ✅ {count} archivo(s) → {handle.payload.get('staging_dir', '')}"
-                        )
+                    elif handle.kind == "torrent":
+                        grabbed = handle.payload.get("grabbed", [])
+                        total_downloads += len(grabbed)
+                        destination = str(Path(grabbed[0]).parent) if grabbed else ""
+                        self._log(f"      ✅ {len(grabbed)} torrent(s) → {destination}")
 
                 except Exception as e:
                     self.logger.error(f"Error procesando '{name}': {e}")
@@ -912,7 +912,7 @@ class Scheduler(BackgroundJob):
                     if handle.kind == "ed2k":
                         count = len(handle.payload.get("ed2k_links", []))
                     else:
-                        count = len(handle.payload.get("downloaded", []))
+                        count = len(handle.payload.get("grabbed", []))
                     provider_used[offer.provider] = provider_used.get(offer.provider, 0) + count
                     total_upgrades += count
                     self._log(f"      ✅ {count} obtenido(s)")

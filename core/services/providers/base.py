@@ -20,7 +20,7 @@ class SourceOffer:
 @dataclass(frozen=True)
 class DownloadHandle:
     provider: str
-    kind: str  # 'ed2k' | 'direct_http' | futuro 'torrent' / 'amule_link'
+    kind: str  # protocolo: 'ed2k' | 'torrent' (ver core/download_clients)
     payload: dict
 
 

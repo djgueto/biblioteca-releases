@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from config.settings import Settings
+from core.download_clients import TORRENT, DownloadDispatcher, Release
 from core.services.providers.base import DownloadHandle, SourceOffer
 from core.services.quality import Quality
 from core.wolfmax.downloader import WolfmaxDownloader, WolfmaxRateLimited, is_current_url
@@ -17,8 +17,9 @@ class WolfmaxSourceProvider:
 
     name = "wolfmax"
 
-    def __init__(self, db_manager):
+    def __init__(self, db_manager, dispatcher: DownloadDispatcher | None = None):
         self.db = db_manager
+        self.dispatcher = dispatcher
         self._searcher = WolfmaxSearcher()
         self._downloader = WolfmaxDownloader()
 
@@ -65,8 +66,7 @@ class WolfmaxSourceProvider:
     def resolve_download(
         self, item: dict, offer: SourceOffer, *, missing_only: bool = True
     ) -> DownloadHandle | None:
-        staging_dir = getattr(Settings, "WOLFMAX_STAGING_DIR", "").strip()
-        if not staging_dir:
+        if self.dispatcher is None or not self.dispatcher.can_handle(TORRENT):
             return None
 
         series_id = item.get("id")
@@ -96,22 +96,31 @@ class WolfmaxSourceProvider:
         if not new_urls:
             return None
 
-        downloaded = []
+        grabbed = []
         for ep_url in new_urls:
             try:
-                out_path = self._downloader.download_to_staging(ep_url, staging_dir)
+                filename, content = self._downloader.fetch_torrent(ep_url)
+                destination = self.dispatcher.grab(Release(
+                    protocol=TORRENT,
+                    title=item.get("tmdb_name") or item.get("name", ""),
+                    filename=filename,
+                    content=content,
+                    source_url=ep_url,
+                ))
+                # Solo se marca tras entregarlo: si el cliente falla, la URL
+                # se reintenta en el siguiente ciclo.
                 self.db.mark_wolfmax_urls_done([ep_url], series_id=series_id)
-                downloaded.append(str(out_path))
+                grabbed.append(destination)
             except WolfmaxRateLimited as e:
                 logger.warning(str(e))
                 break
             except Exception as e:
                 logger.error(f"wolfmax resolve_download error {ep_url}: {e}")
 
-        if not downloaded:
+        if not grabbed:
             return None
         return DownloadHandle(
             provider=self.name,
-            kind="direct_http",
-            payload={"downloaded": downloaded, "staging_dir": staging_dir},
+            kind=TORRENT,
+            payload={"grabbed": grabbed},
         )
