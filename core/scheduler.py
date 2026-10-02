@@ -33,6 +33,7 @@ from core.services.quality import quality_from_local_episode
 from core.services.quality_profile import TIERS, tier_of
 from core.repositories.item_quality_repository import ItemQualityRepository
 from core.repositories.grab_history_repository import GrabHistoryRepository
+from core.repositories.provider_search_log import ProviderSearchLog
 from core.library.quality_scan import MediaInfoUnavailable, measure_episodes, measure_items
 from config.settings import Settings
 
@@ -56,6 +57,7 @@ class Scheduler(BackgroundJob):
         self.decision_log_repository = DecisionLogRepository(self.db)
         self.item_quality_repository = ItemQualityRepository(self.db)
         self.grab_history_repository = GrabHistoryRepository(self.db)
+        self.provider_search_log = ProviderSearchLog(self.db)
         self.missing_episodes_service = MissingEpisodesService(
             self.db,
             self.series_repository,
@@ -248,6 +250,8 @@ class Scheduler(BackgroundJob):
                 self._progress(97, "🐺 Sincronizando catálogo Wolfmax4k...")
                 self._log("🐺 Escaneando categorías Wolfmax4k...")
                 self.scan_wolfmax_categories()
+                self._log("🐺 Buscando en Wolfmax4k lo que no sale en su catálogo reciente...")
+                self.relink_wolfmax()
             
             self._progress(100, "✅ Ciclo completado")
             self._log("✅ CICLO COMPLETADO CON ÉXITO")
@@ -911,6 +915,69 @@ class Scheduler(BackgroundJob):
         except Exception as e:
             self.logger.error(f"Error en scan_wolfmax_categories: {e}")
             self._log(f"   ⚠️ Error en wolfmax category scan: {e}")
+
+    def relink_wolfmax(self, limit: int = 15, retry_days: int = 14):
+        """Busca en Wolfmax (con su buscador, no solo las 3 primeras páginas
+        del catálogo) por turnos y en este orden:
+          1. fichas cuyo enlace guardado es del diseño antiguo de la web
+             (ya no funciona y el catálogo reciente no lo renueva);
+          2. series con episodios faltantes sin enlace de Wolfmax;
+          3. lo que está por debajo de 4K sin enlace de Wolfmax (mejoras).
+        Lo no encontrado no se vuelve a buscar hasta pasados `retry_days`."""
+        provider = self.providers.get("wolfmax")
+        if provider is None:
+            return
+        conn = self.db.get_connection()
+        recent = self.provider_search_log.searched_recently("wolfmax", retry_days)
+        columns = "s.id, s.name, s.tmdb_name, s.year, s.content_category"
+        stale = [
+            dict(r) for r in conn.execute(
+                f"SELECT {columns}, so.source_url FROM source_offers so JOIN series s ON s.id = so.series_id "
+                "WHERE so.provider = 'wolfmax' AND COALESCE(s.monitored, 1) = 1"
+            ).fetchall()
+            if not is_current_wolfmax_url(r["source_url"] or "")
+        ]
+        no_link = "NOT EXISTS (SELECT 1 FROM source_offers so WHERE so.series_id = s.id AND so.provider = 'wolfmax')"
+        missing = [dict(r) for r in conn.execute(
+            f"SELECT DISTINCT {columns} FROM series s JOIN missing_episodes me ON me.series_id = s.id "
+            f"AND me.status = 'missing' WHERE COALESCE(s.monitored, 1) = 1 AND {no_link}"
+        ).fetchall()]
+        below_4k = [dict(r) for r in conn.execute(
+            f"""SELECT {columns} FROM series s
+                LEFT JOIN item_quality iq ON iq.series_id = s.id AND iq.source = 'mediainfo' AND iq.unreadable = 0
+                LEFT JOIN (SELECT series_id, MIN(resolution_height) AS worst FROM local_episodes
+                           WHERE quality_source = 'mediainfo' GROUP BY series_id) le ON le.series_id = s.id
+                WHERE COALESCE(s.monitored, 1) = 1 AND COALESCE(s.placeholder, 0) = 0 AND {no_link}
+                  AND COALESCE(iq.resolution_height, le.worst) < 2000"""
+        ).fetchall()]
+
+        queue, seen = [], set()
+        for item in stale + missing + below_4k:
+            if item["id"] not in seen and item["id"] not in recent and (item.get("tmdb_name") or item.get("name")):
+                seen.add(item["id"])
+                queue.append(item)
+        if not queue:
+            return
+        self._log(f"   🐺 {len(queue)} fichas por buscar en Wolfmax ({len(stale)} con enlace caducado); "
+                  f"este ciclo: {min(limit, len(queue))}")
+        found = 0
+        for item in queue[:limit]:
+            if not self.running:
+                return
+            mode = Settings.get_category_content_mode(item["content_category"])
+            try:
+                offer = provider.find_candidate(item, content_mode=mode)
+            except Exception as e:
+                self.logger.warning(f"wolfmax: error buscando '{item['name']}': {e}")
+                continue
+            self.provider_search_log.record(item["id"], "wolfmax", offer is not None)
+            if offer is None:
+                continue
+            self.db.save_wolfmax_source(item["id"], offer.source_url, offer.quality.resolution_height, offer.title)
+            found += 1
+            self._log(f"      ✅ {item.get('tmdb_name') or item['name']} → {offer.source_url} "
+                      f"[{offer.quality.resolution_height or '?'}p]")
+        self._log(f"   ✅ Wolfmax: {found}/{min(limit, len(queue))} encontradas por búsqueda")
 
     def scan_missing_resolutions(self, batch_size=1200):
         """Analiza con MediaInfo una tanda de episodios cuya calidad aún no se
