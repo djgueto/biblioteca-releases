@@ -17,6 +17,11 @@ class DatabaseManager:
     # QThreadPool (identificada por hilo + ruta), nunca entre hilos distintos.
     _thread_local = threading.local()
 
+    # cleanup_deleted_series no borra más de esto en un ciclo (protege contra
+    # una ruta de biblioteca mal configurada o inaccesible).
+    CLEANUP_MAX_DELETIONS = 20
+    CLEANUP_MAX_DELETION_RATIO = 0.25
+
     def __init__(self, db_path=None):
         self.db_path = db_path or Settings.DB_PATH
         self.logger = logging.getLogger(__name__)
@@ -1131,21 +1136,48 @@ class DatabaseManager:
             cursor.execute('SELECT id, name, folder_path, content_category FROM series')
             all_series = cursor.fetchall()
             
-            deleted_count = 0
-            
+            to_delete = []
+            skipped_unreachable = 0
+            root_exists_cache = {}
+
+            def _root_exists(path):
+                if path not in root_exists_cache:
+                    root_exists_cache[path] = path.exists()
+                return root_exists_cache[path]
+
             for series in all_series:
                 series_id, series_name, folder_path, content_category = series
                 series_path = Path(folder_path)
                 configured_paths = Settings.get_paths_for_category(content_category or 'series')
                 configured_paths = [Path(path).resolve() for path in configured_paths if path.strip()]
-                
+
                 should_delete = False
                 delete_reason = ""
-                
+
                 # Verificar si la carpeta existe
                 if not series_path.exists():
-                    should_delete = True
-                    delete_reason = "carpeta no existe"
+                    # Solo es una baja real si su raíz configurada es accesible:
+                    # con el NAS caído, o con rutas de otro sistema (BD creada
+                    # en Windows usada desde Docker), "no existe" no significa
+                    # que se haya borrado, y eliminar aquí vaciaría la biblioteca.
+                    try:
+                        resolved_missing = series_path.resolve()
+                    except Exception:
+                        resolved_missing = series_path
+                    under_live_root = False
+                    for configured_path in configured_paths:
+                        try:
+                            resolved_missing.relative_to(configured_path)
+                        except ValueError:
+                            continue
+                        if _root_exists(configured_path):
+                            under_live_root = True
+                            break
+                    if under_live_root:
+                        should_delete = True
+                        delete_reason = "carpeta no existe"
+                    else:
+                        skipped_unreachable += 1
                 else:
                     # Verificar si la serie está dentro de alguna ruta configurada
                     is_in_configured_path = False
@@ -1169,19 +1201,37 @@ class DatabaseManager:
                         delete_reason = "no está en rutas configuradas"
                 
                 if should_delete:
-                    self.logger.info(f"Eliminando serie '{series_name}' - {delete_reason}: {folder_path}")
-                    
-                    # Eliminar episodios locales
-                    cursor.execute('DELETE FROM local_episodes WHERE series_id = ?', (series_id,))
-                    
-                    # Eliminar episodios faltantes
-                    cursor.execute('DELETE FROM missing_episodes WHERE series_id = ?', (series_id,))
-                    
-                    # Eliminar la serie
-                    cursor.execute('DELETE FROM series WHERE id = ?', (series_id,))
-                    
-                    deleted_count += 1
-            
+                    to_delete.append((series_id, series_name, folder_path, delete_reason))
+
+            if skipped_unreachable:
+                self.logger.warning(
+                    f"Limpieza: {skipped_unreachable} series con carpeta no accesible y fuera de "
+                    f"una ruta configurada accesible; se conservan"
+                )
+
+            max_deletions = max(self.CLEANUP_MAX_DELETIONS, int(len(all_series) * self.CLEANUP_MAX_DELETION_RATIO))
+            if len(to_delete) > max_deletions:
+                self.logger.error(
+                    f"Limpieza cancelada: se iban a eliminar {len(to_delete)} de {len(all_series)} series "
+                    f"(límite {max_deletions}). Revisa que las rutas de biblioteca sean accesibles."
+                )
+                return 0
+
+            deleted_count = 0
+            for series_id, series_name, folder_path, delete_reason in to_delete:
+                self.logger.info(f"Eliminando serie '{series_name}' - {delete_reason}: {folder_path}")
+
+                # Eliminar episodios locales
+                cursor.execute('DELETE FROM local_episodes WHERE series_id = ?', (series_id,))
+
+                # Eliminar episodios faltantes
+                cursor.execute('DELETE FROM missing_episodes WHERE series_id = ?', (series_id,))
+
+                # Eliminar la serie
+                cursor.execute('DELETE FROM series WHERE id = ?', (series_id,))
+
+                deleted_count += 1
+
             conn.commit()
             self.logger.info(f"Limpieza completada: {deleted_count} series eliminadas")
             return deleted_count

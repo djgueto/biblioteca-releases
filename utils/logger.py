@@ -1,4 +1,5 @@
 import logging
+import os
 import sys
 from logging.handlers import RotatingFileHandler
 
@@ -22,7 +23,7 @@ def setup_logger():
     
     # Handler para archivo (con rotación para que no crezca indefinidamente)
     file_handler = RotatingFileHandler(
-        'series_manager.log',
+        os.getenv('LOG_FILE', 'series_manager.log'),
         maxBytes=10 * 1024 * 1024,  # 10 MB por archivo
         backupCount=5,  # hasta 5 archivos de respaldo (series_manager.log.1 .. .5)
         encoding='utf-8',

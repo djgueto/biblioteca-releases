@@ -3,7 +3,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parents[1]
-ENV_PATH = BASE_DIR / ".env"
+# En Docker el .env vive en el volumen de configuración (APP_ENV_FILE=/config/.env).
+ENV_PATH = Path(os.getenv("APP_ENV_FILE") or BASE_DIR / ".env")
 load_dotenv(dotenv_path=ENV_PATH)
 
 def _resolve_path(value: str) -> str:

@@ -1,0 +1,42 @@
+# Despliegue en el NAS:   docker compose up -d --build
+# Interfaz:               http://IP-DEL-NAS:9797
+#
+# /config  → .env, base de datos, caché de carátulas y log (persistente)
+# /media   → la carpeta Multimedia del NAS (la misma que Windows ve como Y:/Z:)
+# /watch   → carpeta vigilada por el cliente torrent (Transmission)
+#
+# IMPORTANTE: la base de datos actual guarda rutas de Windows
+# (\\192.168.1.101\Multimedia\...). Hasta migrarlas a /media/..., la web
+# muestra la biblioteca pero NO deja iniciar el ciclo (crearía duplicados).
+# Usa una COPIA de series_manager.db en ./config, no la que usa el escritorio.
+
+services:
+  biblioteca:
+    build: .
+    image: biblioteca:latest
+    container_name: biblioteca
+    restart: unless-stopped
+    ports:
+      - "9797:9797"
+    shm_size: "1gb"          # Chromium necesita más /dev/shm que los 64 MB por defecto
+    # user: "1026:100"       # Synology: UID/GID del usuario dueño de Multimedia
+    environment:
+      TZ: Europe/Madrid
+      WEB_SCHEDULER_AUTOSTART: "false"
+      # Las rutas de biblioteca del .env de Windows (Y:/, Z:/) no existen aquí:
+      SERIES_PATH: /media/SERIES
+      MOVIES_PATH: /media/PELICULAS
+      MOVIES_PATHS: /media/PELICULAS DE ANIMACION
+      DOCUMENTARIES_PATH: /media/DOCUMENTALES
+      DOCUMENTARIES_PATHS: /media/DOCUMENTALES (series)
+      CARTOONS_PATH: /media/DIBUJOS
+      ANIMATED_MOVIES_PATH: /media/PELICULAS DE ANIMACION
+      DOCUSERIES_PATH: /media/DOCUMENTALES (series)
+      CONCERTS_PATH: /media/CONCIERTOS
+      MUSIC_PATH: /media/CONCIERTOS
+      # eMule/aMule: localhost dentro del contenedor no es tu PC
+      # EMULE_URL: http://192.168.1.X:4711
+    volumes:
+      - ./config:/config
+      - /volume1/Multimedia:/media
+      - /volume1/descargas/watch:/watch

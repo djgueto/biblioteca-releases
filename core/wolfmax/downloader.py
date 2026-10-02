@@ -25,6 +25,8 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from bs4 import BeautifulSoup
 
+from core.browser import new_system_chrome, system_chrome_configured
+
 # gibberish-aes.js está en scripts/wolfmax_extractor/ junto al wolfmax_dl.py original
 _GIBBERISH_JS = Path(__file__).parents[2] / 'scripts' / 'wolfmax_extractor' / 'gibberish-aes.js'
 _REAL_KEY = 'fee631d2cffda38a78b96ee6d2dfb43a'
@@ -86,7 +88,7 @@ def _make_driver():
     opts.add_argument('--no-sandbox')
     opts.add_argument('--disable-blink-features=AutomationControlled')
     opts.add_experimental_option('excludeSwitches', ['enable-automation'])
-    driver = webdriver.Chrome(options=opts)
+    driver = new_system_chrome(opts) if system_chrome_configured() else webdriver.Chrome(options=opts)
     driver.execute_cdp_cmd(
         'Page.addScriptToEvaluateOnNewDocument',
         {'source': 'Object.defineProperty(navigator,"webdriver",{get:()=>undefined});'},

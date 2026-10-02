@@ -5,6 +5,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
+from core.browser import new_system_chrome, system_chrome_configured
 import logging
 import time
 from pathlib import Path
@@ -38,6 +39,11 @@ class HispashareAuth:
         }
         options.add_experimental_option("prefs", prefs)
         
+        if system_chrome_configured():
+            self.driver = new_system_chrome(options)
+            self.driver.implicitly_wait(10)
+            return
+
         try:
             # Usar webdriver-manager para ChromeDriver
             driver_path = self._resolve_chromedriver_path(ChromeDriverManager().install())
