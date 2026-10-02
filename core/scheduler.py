@@ -1,4 +1,3 @@
-from PyQt6.QtCore import QThread, pyqtSignal
 import time
 import logging
 from datetime import datetime
@@ -15,7 +14,8 @@ from core.wolfmax.category_scanner import WolfmaxCategoryScanner, WOLFMAX_CATEGO
 from core.wolfmax.downloader import is_current_url as is_current_wolfmax_url
 from core.library.parser import detect_resolution_from_file
 from core.database.db_manager import DatabaseManager
-from core.events import EventBus
+from core.events import SOURCE_URL_SAVED, TMDB_MATCHED
+from core.jobs import BackgroundJob
 from core.repositories import (
     DecisionLogRepository,
     SeriesRepository,
@@ -32,21 +32,20 @@ from core.services.providers import build_provider_registry
 from core.services.quality import quality_from_local_episode
 from config.settings import Settings
 
-class SchedulerThread(QThread):
-    progress_signal = pyqtSignal(int, str)
-    log_signal = pyqtSignal(str)
-    finished_signal = pyqtSignal()
-    error_signal = pyqtSignal(str)
-    url_saved_signal = pyqtSignal(int, str)  # series_id, url
-    tmdb_matched_signal = pyqtSignal(int, dict)  # series_id, match_data
-    series_updated_signal = pyqtSignal(int)  # series_id para refrescar fila específica
-    
-    def __init__(self):
-        super().__init__()
-        self.running = True
+class Scheduler(BackgroundJob):
+    """Ciclo periódico de escaneo, matching, búsqueda y descargas.
+
+    Además de los eventos de BackgroundJob publica SOURCE_URL_SAVED y
+    TMDB_MATCHED. Al compartir bus con los servicios, también llegan los
+    SERIES_UPDATED de ReconciliationService (sin "source").
+    """
+
+    name = "scheduler"
+
+    def __init__(self, event_bus=None):
+        super().__init__(event_bus)
         self.logger = logging.getLogger(__name__)
         self.db = DatabaseManager()
-        self.event_bus = EventBus()
         self.series_repository = SeriesRepository(self.db)
         self.source_repository = SourceRepository(self.db)
         self.source_offer_repository = SourceOfferRepository(self.db)
@@ -91,7 +90,7 @@ class SchedulerThread(QThread):
                 
                 # Esperar intervalo configurado
                 hours = Settings.CHECK_INTERVAL_HOURS
-                self.log_signal.emit(f"⏰ Próximo ciclo en {hours} horas")
+                self._log(f"⏰ Próximo ciclo en {hours} horas")
                 
                 # Dormir en intervalos pequeños para poder detener el thread rápido
                 sleep_time = hours * 3600
@@ -102,8 +101,8 @@ class SchedulerThread(QThread):
                 
             except Exception as e:
                 self.logger.error(f"Error en ciclo: {e}", exc_info=True)
-                self.error_signal.emit(str(e))
-                self.log_signal.emit(f"❌ ERROR: {str(e)}")
+                self._error(str(e))
+                self._log(f"❌ ERROR: {str(e)}")
                 # Esperar antes de reintentar, pero verificar si seguimos ejecutándose
                 for _ in range(1800):  # 30 minutos en segundos
                     if not self.running:
@@ -114,15 +113,15 @@ class SchedulerThread(QThread):
     
     def execute_cycle(self):
         """Ejecutar un ciclo completo"""
-        self.log_signal.emit("=" * 60)
-        self.log_signal.emit(f"🚀 INICIO CICLO - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        self.log_signal.emit("=" * 60)
+        self._log("=" * 60)
+        self._log(f"🚀 INICIO CICLO - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        self._log("=" * 60)
         
         driver = None
         try:
             # 1. Login Hispashare
-            self.progress_signal.emit(5, "🔐 Login Hispashare...")
-            self.log_signal.emit("🔐 Iniciando sesión en Hispashare...")
+            self._progress(5, "🔐 Login Hispashare...")
+            self._log("🔐 Iniciando sesión en Hispashare...")
             driver = self.login_hispashare()
             self.current_driver = driver  # Mantener referencia
             # Reconstruir el registro de proveedores con el driver de este
@@ -138,99 +137,99 @@ class SchedulerThread(QThread):
                 return
             
             # 2. Limpiar series eliminadas
-            self.progress_signal.emit(15, "🧹 Limpiando series eliminadas...")
-            self.log_signal.emit("🧹 Limpiando series eliminadas del disco...")
+            self._progress(15, "🧹 Limpiando series eliminadas...")
+            self._log("🧹 Limpiando series eliminadas del disco...")
             cleaned_count = self.db.cleanup_deleted_series()
-            self.log_signal.emit(f"   ✅ {cleaned_count} series eliminadas")
+            self._log(f"   ✅ {cleaned_count} series eliminadas")
             if not self.running:
                 return
             
             # 2.1. Limpiar episodios faltantes huérfanos
-            self.log_signal.emit("🧹 Limpiando episodios faltantes huérfanos...")
+            self._log("🧹 Limpiando episodios faltantes huérfanos...")
             orphan_count = self.db.cleanup_orphaned_missing_episodes()
-            self.log_signal.emit(f"   ✅ {orphan_count} episodios huérfanos eliminados")
+            self._log(f"   ✅ {orphan_count} episodios huérfanos eliminados")
 
             # 3. Escanear biblioteca
-            self.progress_signal.emit(25, "📁 Escaneando biblioteca...")
-            self.log_signal.emit("📁 Escaneando biblioteca local...")
+            self._progress(25, "📁 Escaneando biblioteca...")
+            self._log("📁 Escaneando biblioteca local...")
             series_list = self.scan_library()
-            self.log_signal.emit(f"   ✅ {len(series_list)} series encontradas")
+            self._log(f"   ✅ {len(series_list)} series encontradas")
             if not self.running:
                 return
 
-            self.log_signal.emit("🎞️ Escaneando bibliotecas de archivo unico...")
+            self._log("🎞️ Escaneando bibliotecas de archivo unico...")
             single_file_items = self.scan_single_file_library()
-            self.log_signal.emit(f"   ✅ {len(single_file_items)} elementos de archivo unico encontrados")
+            self._log(f"   ✅ {len(single_file_items)} elementos de archivo unico encontrados")
             if not self.running:
                 return
             
             # 4. Limpiar duplicados de series tras la sincronización de escaneos
-            self.progress_signal.emit(35, "🔧 Consolidando duplicados...")
-            self.log_signal.emit("🔧 Limpiando series duplicadas...")
+            self._progress(35, "🔧 Consolidando duplicados...")
+            self._log("🔧 Limpiando series duplicadas...")
             cleaned_series = self.db.cleanup_duplicate_series()
-            self.log_signal.emit(f"   ✅ {cleaned_series} series duplicadas eliminadas")
+            self._log(f"   ✅ {cleaned_series} series duplicadas eliminadas")
             
             # 5. Vincular con TMDB
-            self.progress_signal.emit(45, "💾 Sincronización completada...")
-            self.log_signal.emit("💾 Base de datos sincronizada durante el escaneo")
-            self.progress_signal.emit(55, "🎬 Vinculando con TMDB...")
-            self.log_signal.emit("🎬 Vinculando bibliotecas con TMDB...")
+            self._progress(45, "💾 Sincronización completada...")
+            self._log("💾 Base de datos sincronizada durante el escaneo")
+            self._progress(55, "🎬 Vinculando con TMDB...")
+            self._log("🎬 Vinculando bibliotecas con TMDB...")
             db_series_list = self.db.get_all_series()
             self.match_tmdb(db_series_list)
             
             # 6. Detectar episodios faltantes
-            self.progress_signal.emit(65, "🔍 Detectando episodios faltantes...")
-            self.log_signal.emit("🔍 Detectando episodios faltantes...")
+            self._progress(65, "🔍 Detectando episodios faltantes...")
+            self._log("🔍 Detectando episodios faltantes...")
             missing_count = self.detect_missing()
-            self.log_signal.emit(f"   ✅ {missing_count} episodios faltantes detectados")
+            self._log(f"   ✅ {missing_count} episodios faltantes detectados")
 
             # 6.1. Buscar URLs para series nuevas sin episodios faltantes
-            self.progress_signal.emit(70, "🔎 Buscando URLs para series nuevas...")
-            self.log_signal.emit("🔎 Buscando URLs en Hispashare para series nuevas sin episodios faltantes...")
+            self._progress(70, "🔎 Buscando URLs para series nuevas...")
+            self._log("🔎 Buscando URLs en Hispashare para series nuevas sin episodios faltantes...")
             self.search_hispashare_for_new_series(driver)
 
-            self.progress_signal.emit(73, "🔎 Buscando URLs de bibliotecas...")
-            self.log_signal.emit("🔎 Buscando URLs en Hispashare para bibliotecas de archivo unico...")
+            self._progress(73, "🔎 Buscando URLs de bibliotecas...")
+            self._log("🔎 Buscando URLs en Hispashare para bibliotecas de archivo unico...")
             self.search_hispashare_for_single_file_items(driver)
 
             # 8. Buscar en Hispashare
-            self.progress_signal.emit(75, "🔎 Buscando en Hispashare...")
-            self.log_signal.emit("🔎 Buscando URLs en Hispashare...")
+            self._progress(75, "🔎 Buscando en Hispashare...")
+            self._log("🔎 Buscando URLs en Hispashare...")
             self.search_hispashare(driver)
             
             # 9. Descargar episodios faltantes
-            self.progress_signal.emit(85, "⬇️ Procesando descargas...")
-            self.log_signal.emit("⬇️ Procesando descargas de episodios faltantes...")
+            self._progress(85, "⬇️ Procesando descargas...")
+            self._log("⬇️ Procesando descargas de episodios faltantes...")
             self.process_downloads(driver)
             if not self.running:
                 return
 
             # 9.1. Detectar resolución real de archivos sin metadatos en el nombre
-            self.progress_signal.emit(88, "🔬 Detectando resoluciones reales...")
+            self._progress(88, "🔬 Detectando resoluciones reales...")
             self.scan_missing_resolutions()
 
             # 9.2. Mejorar calidad (upgrades) de episodios existentes
             if getattr(Settings, 'UPGRADE_ENABLED', False):
-                self.progress_signal.emit(90, "🔼 Mejorando calidad...")
-                self.log_signal.emit("🔼 Buscando upgrades de calidad (ej. 2160p)...")
+                self._progress(90, "🔼 Mejorando calidad...")
+                self._log("🔼 Buscando upgrades de calidad (ej. 2160p)...")
                 self.process_upgrades(driver)
             
             # 10. Barrido de nuevo contenido en Hispashare
-            self.progress_signal.emit(93, "🔍 Buscando nuevo contenido...")
-            self.log_signal.emit("🔍 Iniciando barrido de nuevo contenido en Hispashare...")
+            self._progress(93, "🔍 Buscando nuevo contenido...")
+            self._log("🔍 Iniciando barrido de nuevo contenido en Hispashare...")
             self.scan_new_content(driver)
 
             # 11. Descubrimiento de contenido en Wolfmax4k
             if getattr(Settings, 'WOLFMAX_UPGRADE_ENABLED', False):
-                self.progress_signal.emit(97, "🐺 Sincronizando catálogo Wolfmax4k...")
-                self.log_signal.emit("🐺 Escaneando categorías Wolfmax4k...")
+                self._progress(97, "🐺 Sincronizando catálogo Wolfmax4k...")
+                self._log("🐺 Escaneando categorías Wolfmax4k...")
                 self.scan_wolfmax_categories()
             
-            self.progress_signal.emit(100, "✅ Ciclo completado")
-            self.log_signal.emit("✅ CICLO COMPLETADO CON ÉXITO")
-            self.log_signal.emit("=" * 60)
+            self._progress(100, "✅ Ciclo completado")
+            self._log("✅ CICLO COMPLETADO CON ÉXITO")
+            self._log("=" * 60)
             
-            self.finished_signal.emit()
+            self._finished()
             
         except Exception as e:
             self.logger.error(f"Error en execute_cycle: {e}", exc_info=True)
@@ -255,7 +254,7 @@ class SchedulerThread(QThread):
             )
             
             if auth.login():
-                self.log_signal.emit("   ✅ Login exitoso")
+                self._log("   ✅ Login exitoso")
                 return auth.driver
             else:
                 raise Exception("Login fallido en Hispashare")
@@ -270,10 +269,10 @@ class SchedulerThread(QThread):
             series_list = LibraryScanner.scan_all_episodic_categories(db_manager=self.db)
             
             # Limpiar duplicados existentes antes de procesar nuevas series
-            self.log_signal.emit("🧹 Limpiando episodios duplicados...")
+            self._log("🧹 Limpiando episodios duplicados...")
             cleaned_count = self.db.cleanup_duplicate_episodes()
             if cleaned_count > 0:
-                self.log_signal.emit(f"   ✅ {cleaned_count} episodios duplicados eliminados")
+                self._log(f"   ✅ {cleaned_count} episodios duplicados eliminados")
             
             # Guardar en base de datos
             for series in series_list:
@@ -325,7 +324,7 @@ class SchedulerThread(QThread):
                     continue
                 
                 content_type = Settings.get_category_label(series.get('content_category', 'series'))
-                self.log_signal.emit(f"   🔗 Matching [{content_type}]: {series['name']}...")
+                self._log(f"   🔗 Matching [{content_type}]: {series['name']}...")
 
                 try:
                     match_result = matcher.match_content(series)
@@ -361,22 +360,22 @@ class SchedulerThread(QThread):
                         matched += 1
 
                         # Emitir señal para actualizar la interfaz en tiempo real
-                        self.tmdb_matched_signal.emit(series['id'], match_result)
+                        self._emit(TMDB_MATCHED, series_id=series['id'], match=match_result)
 
                         confidence_emoji = "✅" if match_result['confidence_score'] >= 0.85 else "⚠️"
-                        self.log_signal.emit(
+                        self._log(
                             f"      {confidence_emoji} {match_result['name']} "
                             f"({match_result['year']}) - "
                             f"Confianza: {match_result['confidence_score']:.1%}"
                         )
                     else:
-                        self.log_signal.emit(f"      ❌ No se encontró match")
+                        self._log(f"      ❌ No se encontró match")
                 except Exception as series_error:
                     self.logger.error(f"Error haciendo match TMDB de '{series.get('name')}': {series_error}")
-                    self.log_signal.emit(f"      ❌ Error en match: {series_error}")
+                    self._log(f"      ❌ Error en match: {series_error}")
                     continue
             
-            self.log_signal.emit(f"   ✅ {matched} elementos vinculados con TMDB")
+            self._log(f"   ✅ {matched} elementos vinculados con TMDB")
             
         except Exception as e:
             self.logger.error(f"Error en match_tmdb: {e}")
@@ -391,19 +390,19 @@ class SchedulerThread(QThread):
             for series_result in result.get("series_results", []):
                 missing_count = int(series_result.get("missing_count", 0))
                 if missing_count:
-                    self.log_signal.emit(
+                    self._log(
                         f"      📺 {series_result.get('series_name', 'Serie')}: "
                         f"{missing_count} episodios faltantes"
                     )
                 series_id = series_result.get("series_id")
                 if series_id is not None:
-                    self.series_updated_signal.emit(series_id)
-            self.log_signal.emit(
+                    self._series_updated(series_id)
+            self._log(
                 f"   ✅ Recalculados faltantes para {result.get('recalculated_series', 0)} series"
             )
             skipped = result.get("skipped_needs_review", 0)
             if skipped:
-                self.log_signal.emit(
+                self._log(
                     f"   ⏸️ {skipped} series con match de baja confianza omitidas "
                     f"(pendientes de revisión manual)"
                 )
@@ -486,10 +485,10 @@ class SchedulerThread(QThread):
         try:
             total = len(series_list)
             if total == 0:
-                self.log_signal.emit(f"   ℹ️ {empty_message}")
+                self._log(f"   ℹ️ {empty_message}")
                 return 0
 
-            self.log_signal.emit(f"   📊 {count_label}: {total}")
+            self._log(f"   📊 {count_label}: {total}")
             searcher = HispashareSearcher(driver, self.db)
             found = 0
 
@@ -500,7 +499,7 @@ class SchedulerThread(QThread):
                 query, year = self._get_hispashare_search_query(series)
                 label = series.get('tmdb_name') or series.get('name')
                 prefix = label_prefix(i, total, series) if label_prefix else f"[{i}/{total}]"
-                self.log_signal.emit(f"   🔎 {prefix} Buscando: {label} -> '{query}'...")
+                self._log(f"   🔎 {prefix} Buscando: {label} -> '{query}'...")
 
                 try:
                     kwargs = {'content_mode': content_mode} if content_mode else {}
@@ -517,8 +516,8 @@ class SchedulerThread(QThread):
                             if saved:
                                 found += 1
                                 self.logger.info(f"URL guardada para '{series['name']}': {url}")
-                                self.log_signal.emit(f"      ✅ URL encontrada y guardada: {url[:50]}...")
-                                self.url_saved_signal.emit(series['id'], url)
+                                self._log(f"      ✅ URL encontrada y guardada: {url[:50]}...")
+                                self._emit(SOURCE_URL_SAVED, series_id=series['id'], url=url)
                             else:
                                 # Repetir la búsqueda devolvería la misma ficha en cada
                                 # pasada (hubo items con 37 intentos y una fila 'conflict'
@@ -529,21 +528,21 @@ class SchedulerThread(QThread):
                                 # vuelve a encender.
                                 self.db.register_search_failure(series['id'], disable_after=1)
                                 self.logger.warning(f"URL en conflicto (ya asignada a otra serie) para '{series['name']}': {url}")
-                                self.log_signal.emit("      ⚠️ URL ya pertenece a otra serie; se omite y se desactiva la búsqueda automática (revisar a mano)")
+                                self._log("      ⚠️ URL ya pertenece a otra serie; se omite y se desactiva la búsqueda automática (revisar a mano)")
                         except Exception as save_error:
                             self.logger.error(f"Error guardando URL para '{series['name']}': {save_error}")
-                            self.log_signal.emit(f"      ⚠️ URL encontrada pero error al guardar: {str(save_error)}")
+                            self._log(f"      ⚠️ URL encontrada pero error al guardar: {str(save_error)}")
                     else:
-                        self.log_signal.emit("      ❌ No se encontró (marcada para no buscar más)")
+                        self._log("      ❌ No se encontró (marcada para no buscar más)")
 
                 except Exception as e:
                     self.logger.error(f"Error buscando '{series['name']}': {e}")
-                    self.log_signal.emit(f"      ❌ Error en búsqueda: {str(e)}")
+                    self._log(f"      ❌ Error en búsqueda: {str(e)}")
                     continue
 
                 time.sleep(2)  # Esperar entre búsquedas
 
-            self.log_signal.emit(f"   ✅ {found}/{total} {found_label}")
+            self._log(f"   ✅ {found}/{total} {found_label}")
             return found
 
         except Exception as e:
@@ -617,11 +616,11 @@ class SchedulerThread(QThread):
             )
 
             if not series_with_offers:
-                self.log_signal.emit("   ℹ️ No hay series con episodios faltantes y fuentes conocidas para procesar descargas")
+                self._log("   ℹ️ No hay series con episodios faltantes y fuentes conocidas para procesar descargas")
                 return
 
             total_downloads = 0
-            self.log_signal.emit(f"   📋 Procesando {len(series_with_offers)} series con episodios faltantes...")
+            self._log(f"   📋 Procesando {len(series_with_offers)} series con episodios faltantes...")
 
             for series in series_with_offers:
                 if not self.running:
@@ -637,7 +636,7 @@ class SchedulerThread(QThread):
                     self.source_arbitration_service.refresh_all_offers(series_id, series)
                     offer = self.source_arbitration_service.best_offer(series_id)
                     if offer is None:
-                        self.log_signal.emit(f"   ℹ️ [{name}] Sin oferta disponible en ningún proveedor")
+                        self._log(f"   ℹ️ [{name}] Sin oferta disponible en ningún proveedor")
                         continue
 
                     provider = self.providers.get(offer.provider)
@@ -646,35 +645,35 @@ class SchedulerThread(QThread):
                         continue
 
                     quality_label = f"{offer.quality.resolution_height}p" if offer.quality.resolution_height else "?"
-                    self.log_signal.emit(f"   🔍 [{offer.provider} {quality_label}] {name}")
+                    self._log(f"   🔍 [{offer.provider} {quality_label}] {name}")
 
                     handle = provider.resolve_download(series, offer, missing_only=True)
                     if handle is None:
-                        self.log_signal.emit("      ℹ️ Sin enlaces para episodios faltantes")
+                        self._log("      ℹ️ Sin enlaces para episodios faltantes")
                         continue
 
                     if handle.kind == "ed2k":
                         count = len(handle.payload.get("ed2k_links", []))
                         total_downloads += count
-                        self.log_signal.emit(f"      ✅ {count} enlaces ed2k")
+                        self._log(f"      ✅ {count} enlaces ed2k")
                     elif handle.kind == "direct_http":
                         count = len(handle.payload.get("downloaded", []))
                         total_downloads += count
-                        self.log_signal.emit(
+                        self._log(
                             f"      ✅ {count} archivo(s) → {handle.payload.get('staging_dir', '')}"
                         )
 
                 except Exception as e:
                     self.logger.error(f"Error procesando '{name}': {e}")
-                    self.log_signal.emit(f"      ❌ Error: {e}")
+                    self._log(f"      ❌ Error: {e}")
                     continue
 
                 time.sleep(1)  # Pequeña pausa entre series
 
             if total_downloads > 0:
-                self.log_signal.emit(f"   ✅ Total: {total_downloads} descargas obtenidas para episodios faltantes")
+                self._log(f"   ✅ Total: {total_downloads} descargas obtenidas para episodios faltantes")
             else:
-                self.log_signal.emit("   ℹ️ No se obtuvieron descargas en este ciclo")
+                self._log("   ℹ️ No se obtuvieron descargas en este ciclo")
 
         except Exception as e:
             self.logger.error(f"Error en process_downloads: {e}")
@@ -733,7 +732,7 @@ class SchedulerThread(QThread):
 
             scanner = WolfmaxCategoryScanner(max_pages=max_pages)
             items = scanner.scan_categories()
-            self.log_signal.emit(f"   📋 {len(items)} items encontrados en wolfmax4k.com")
+            self._log(f"   📋 {len(items)} items encontrados en wolfmax4k.com")
 
             matched = 0
             new_content = 0
@@ -778,7 +777,7 @@ class SchedulerThread(QThread):
                             item['title'],
                         )
                         quality_label = f'{new_q}p' if new_q else '?'
-                        self.log_signal.emit(
+                        self._log(
                             f"   🐺 [{best_series['category']}] {best_series['name']} "
                             f"→ wolfmax {quality_label} (score={best_score:.2f})"
                         )
@@ -787,13 +786,13 @@ class SchedulerThread(QThread):
                     # Contenido no encontrado en la DB → posible contenido nuevo
                     new_content += 1
 
-            self.log_signal.emit(
+            self._log(
                 f"   ✅ Wolfmax sync: {matched} URLs guardadas | "
                 f"{new_content} items sin match en tu biblioteca"
             )
         except Exception as e:
             self.logger.error(f"Error en scan_wolfmax_categories: {e}")
-            self.log_signal.emit(f"   ⚠️ Error en wolfmax category scan: {e}")
+            self._log(f"   ⚠️ Error en wolfmax category scan: {e}")
 
     def scan_missing_resolutions(self, batch_size=300):
         """
@@ -804,10 +803,10 @@ class SchedulerThread(QThread):
         try:
             episodes = self.db.get_episodes_missing_resolution(limit=batch_size)
             if not episodes:
-                self.log_signal.emit("   ✅ Todas las resoluciones ya detectadas")
+                self._log("   ✅ Todas las resoluciones ya detectadas")
                 return
 
-            self.log_signal.emit(
+            self._log(
                 f"   🔬 Detectando resolución de {len(episodes)} archivo(s) con MediaInfo..."
             )
             resolved = []
@@ -827,13 +826,13 @@ class SchedulerThread(QThread):
                 self.db.mark_episode_resolution_unreadable(failed_ids)
 
             pending = self.db.get_episodes_missing_resolution(limit=1)
-            self.log_signal.emit(
+            self._log(
                 f"   ✅ Resueltos: {len(resolved)} | No leíbles: {len(failed_ids)} | "
                 f"Pendientes: {'0' if not pending else 'más de 300'}"
             )
         except Exception as e:
             self.logger.error(f"Error en scan_missing_resolutions: {e}")
-            self.log_signal.emit(f"   ⚠️ Error detectando resoluciones: {e}")
+            self._log(f"   ⚠️ Error detectando resoluciones: {e}")
 
     def process_upgrades(self, driver):
         """
@@ -848,7 +847,7 @@ class SchedulerThread(QThread):
                 self.db.get_episodic_categories()
             )
             if not candidates:
-                self.log_signal.emit("   ℹ️ No hay series con episodios locales y fuente conocida para evaluar upgrades")
+                self._log("   ℹ️ No hay series con episodios locales y fuente conocida para evaluar upgrades")
                 return
 
             max_series = getattr(Settings, 'UPGRADE_MAX_SERIES_PER_CYCLE', 15)
@@ -864,7 +863,7 @@ class SchedulerThread(QThread):
             processed = 0
             total_upgrades = 0
 
-            self.log_signal.emit(f"   📊 {len(candidates)} candidatos a evaluar para upgrade")
+            self._log(f"   📊 {len(candidates)} candidatos a evaluar para upgrade")
 
             for series in candidates:
                 if not self.running or processed >= max_series:
@@ -901,13 +900,13 @@ class SchedulerThread(QThread):
                     processed += 1
                     res = series.get('max_local_resolution')
                     quality_label = f"{offer.quality.resolution_height}p" if offer.quality.resolution_height else "?"
-                    self.log_signal.emit(
+                    self._log(
                         f"   🔼 [{offer.provider} {quality_label}] Upgrade: {name} (actual: {res}p)"
                     )
 
                     handle = provider.resolve_download(series, offer, missing_only=False)
                     if handle is None:
-                        self.log_signal.emit("      ℹ️ Sin upgrades disponibles")
+                        self._log("      ℹ️ Sin upgrades disponibles")
                         continue
 
                     if handle.kind == "ed2k":
@@ -916,19 +915,19 @@ class SchedulerThread(QThread):
                         count = len(handle.payload.get("downloaded", []))
                     provider_used[offer.provider] = provider_used.get(offer.provider, 0) + count
                     total_upgrades += count
-                    self.log_signal.emit(f"      ✅ {count} obtenido(s)")
+                    self._log(f"      ✅ {count} obtenido(s)")
 
                 except Exception as e:
                     self.logger.error(f"Error en upgrades para '{name}': {e}")
-                    self.log_signal.emit(f"      ❌ Error: {str(e)}")
+                    self._log(f"      ❌ Error: {str(e)}")
                     continue
 
                 time.sleep(1)
 
             if total_upgrades:
-                self.log_signal.emit(f"   ✅ Upgrades: {total_upgrades} obtenido(s)")
+                self._log(f"   ✅ Upgrades: {total_upgrades} obtenido(s)")
             else:
-                self.log_signal.emit("   ℹ️ No se realizaron upgrades en este ciclo")
+                self._log("   ℹ️ No se realizaron upgrades en este ciclo")
 
         except Exception as e:
             self.logger.error(f"Error en process_upgrades: {e}")
@@ -941,51 +940,50 @@ class SchedulerThread(QThread):
                 return
             # Verificar si el barrido de contenido está habilitado
             if not getattr(Settings, 'CONTENT_SCAN_ENABLED', True):
-                self.log_signal.emit("   ℹ️ Barrido de nuevo contenido deshabilitado en configuración")
+                self._log("   ℹ️ Barrido de nuevo contenido deshabilitado en configuración")
                 return
             
             scanner = ContentScanner(driver, self.db, should_stop=lambda: not self.running)
             
             # 1. Escanear páginas de Hispashare
-            self.log_signal.emit("   📄 Escaneando páginas de Hispashare...")
+            self._log("   📄 Escaneando páginas de Hispashare...")
             new_content = scanner.scan_new_content()
             if not self.running:
                 return
             
             if not new_content:
-                self.log_signal.emit("   ℹ️ No se encontró nuevo contenido que cumpla los filtros")
+                self._log("   ℹ️ No se encontró nuevo contenido que cumpla los filtros")
                 return
             
-            self.log_signal.emit(f"   ✅ {len(new_content)} elementos de nuevo contenido encontrados")
+            self._log(f"   ✅ {len(new_content)} elementos de nuevo contenido encontrados")
             grouped_counts = {}
             for item in new_content:
                 category = item.get('library_category', 'sin_categoria')
                 grouped_counts[category] = grouped_counts.get(category, 0) + 1
             for category, count in sorted(grouped_counts.items()):
-                self.log_signal.emit(f"      📚 {Settings.get_category_label(category)}: {count}")
+                self._log(f"      📚 {Settings.get_category_label(category)}: {count}")
             
             # 2. Procesar contenido encontrado
-            self.log_signal.emit("   🎬 Procesando nuevo contenido...")
+            self._log("   🎬 Procesando nuevo contenido...")
             ed2k_links = scanner.process_new_content(new_content)
             if not self.running:
                 return
             
             if ed2k_links:
-                self.log_signal.emit(f"   ✅ {len(ed2k_links)} enlaces ed2k obtenidos del nuevo contenido")
+                self._log(f"   ✅ {len(ed2k_links)} enlaces ed2k obtenidos del nuevo contenido")
             else:
-                self.log_signal.emit("   ℹ️ No se obtuvieron enlaces del nuevo contenido")
+                self._log("   ℹ️ No se obtuvieron enlaces del nuevo contenido")
             
         except Exception as e:
             self.logger.error(f"Error en scan_new_content: {e}")
-            self.log_signal.emit(f"   ❌ Error en barrido de contenido: {str(e)}")
+            self._log(f"   ❌ Error en barrido de contenido: {str(e)}")
             # No relanzar la excepción para no interrumpir el ciclo completo
             pass
 
     def stop(self):
         """Detener el scheduler"""
         self.logger.info("Deteniendo scheduler...")
-        self.running = False
-        self.requestInterruption()
+        super().stop()
         if self.current_driver:
             try:
                 self.current_driver.quit()

@@ -32,13 +32,12 @@ from .workers import (
     SeriesRefreshTask,
     TMDBRescanTask,
 )
-from core.scheduler import SchedulerThread
+from ui.workers.job_threads import SchedulerThread, TMDBRecalcThread
 from core.database.db_manager import DatabaseManager
 from core.repositories import DecisionLogRepository
 from core.services import DiagnosticsService
 from core.tmdb.api_client import TMDBClient
 from core.tmdb.auto_matcher import TMDBAutoMatcher
-from core.tmdb.recalc_thread import TMDBRecalcThread
 from config.settings import Settings
 import logging
 import threading

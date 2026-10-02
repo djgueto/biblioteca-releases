@@ -1,8 +1,6 @@
-from PyQt6.QtCore import QThread, pyqtSignal
-
 from config.settings import Settings
 from core.database.db_manager import DatabaseManager
-from core.events import EventBus
+from core.jobs import BackgroundJob
 from core.repositories import (
     DecisionLogRepository,
     SeriesRepository,
@@ -14,24 +12,18 @@ from core.tmdb.api_client import TMDBClient
 from core.tmdb.auto_matcher import TMDBAutoMatcher
 
 
-class TMDBRecalcThread(QThread):
-    progress_signal = pyqtSignal(int, str)
-    log_signal = pyqtSignal(str)
-    series_updated_signal = pyqtSignal(int)
-    finished_signal = pyqtSignal(int, int, int)  # total, updated, failed
-    error_signal = pyqtSignal(str)
+class TMDBRecalcJob(BackgroundJob):
+    """Recalcula la identidad TMDB de todas las series episódicas.
 
-    def __init__(self):
-        super().__init__()
-        self.running = True
+    TASK_FINISHED lleva result={total, updated, failed}.
+    """
 
-    def stop(self):
-        self.running = False
+    name = "tmdb_recalc"
 
     def run(self):
         try:
             if not Settings.TMDB_API_KEY:
-                self.error_signal.emit("TMDB_API_KEY no configurada")
+                self._error("TMDB_API_KEY no configurada")
                 return
 
             db = DatabaseManager()
@@ -50,7 +42,7 @@ class TMDBRecalcThread(QThread):
                 missing_episodes_service,
                 source_match_service,
                 decision_log_repository,
-                event_bus=EventBus(),
+                event_bus=self.event_bus,
                 source_offer_repository=source_offer_repository,
             )
 
@@ -60,7 +52,7 @@ class TMDBRecalcThread(QThread):
             failed = 0
 
             if total == 0:
-                self.finished_signal.emit(0, 0, 0)
+                self._finished(total=0, updated=0, failed=0)
                 return
 
             for idx, series in enumerate(series_list, 1):
@@ -70,7 +62,7 @@ class TMDBRecalcThread(QThread):
                 name = series.get("name", "")
                 series_id = series.get("id")
                 category_label = Settings.get_category_label(series.get("content_category", "series"))
-                self.progress_signal.emit(int((idx - 1) * 100 / total), f"🎬 TMDB: {idx}/{total} [{category_label}] {name}")
+                self._progress(int((idx - 1) * 100 / total), f"🎬 TMDB: {idx}/{total} [{category_label}] {name}")
 
                 try:
                     tmdb_id = series.get("tmdb_id")
@@ -79,7 +71,7 @@ class TMDBRecalcThread(QThread):
                         details = tmdb.get_series_details(tmdb_id)
                         if not details:
                             failed += 1
-                            self.log_signal.emit(f"⚠️ TMDB sin respuesta para '{name}' (tmdb_id={tmdb_id})")
+                            self._log(f"⚠️ TMDB sin respuesta para '{name}' (tmdb_id={tmdb_id})")
                             continue
 
                         score = matcher.calculate_fast_score(
@@ -103,7 +95,7 @@ class TMDBRecalcThread(QThread):
                             update_result.get("updated_item") or {},
                         )
                         updated += 1
-                        self.series_updated_signal.emit(series_id)
+                        self._series_updated(series_id)
                         continue
 
                     match_result = matcher.match_series(
@@ -118,7 +110,7 @@ class TMDBRecalcThread(QThread):
 
                     if not match_result:
                         failed += 1
-                        self.log_signal.emit(f"⚠️ Sin match TMDB para '{name}'")
+                        self._log(f"⚠️ Sin match TMDB para '{name}'")
                         continue
 
                     update_result = series_repository.update_tmdb_identity(series_id, match_result)
@@ -128,18 +120,18 @@ class TMDBRecalcThread(QThread):
                         update_result.get("updated_item") or {},
                     )
                     updated += 1
-                    self.series_updated_signal.emit(series_id)
-                    self.log_signal.emit(
+                    self._series_updated(series_id)
+                    self._log(
                         f"✅ {name} -> {match_result['name']} ({match_result.get('year', '')}) "
                         f"{match_result['confidence_score']:.1%}"
                     )
 
                 except Exception as e:
                     failed += 1
-                    self.log_signal.emit(f"❌ Error TMDB en '{name}': {str(e)}")
+                    self._log(f"❌ Error TMDB en '{name}': {str(e)}")
 
-            self.progress_signal.emit(100, "✅ Recalculo TMDB completado")
-            self.finished_signal.emit(total, updated, failed)
+            self._progress(100, "✅ Recalculo TMDB completado")
+            self._finished(total=total, updated=updated, failed=failed)
 
         except Exception as e:
-            self.error_signal.emit(str(e))
+            self._error(str(e))

@@ -1,40 +1,6 @@
 import logging
 import sys
 from logging.handlers import RotatingFileHandler
-from PyQt6.QtCore import QObject, pyqtSignal
-from datetime import datetime
-
-
-class QtLogHandler(logging.Handler, QObject):
-    """Handler personalizado para emitir logs a Qt"""
-    log_signal = pyqtSignal(str)
-    
-    def __init__(self):
-        logging.Handler.__init__(self)
-        QObject.__init__(self)
-        
-        # Formato
-        formatter = logging.Formatter(
-            '%(asctime)s - %(levelname)s - %(message)s',
-            datefmt='%H:%M:%S'
-        )
-        self.setFormatter(formatter)
-    
-    def emit(self, record):
-        """Emitir log formateado"""
-        msg = self.format(record)
-        
-        # Añadir emoji según nivel
-        if record.levelno >= logging.ERROR:
-            msg = f"❌ {msg}"
-        elif record.levelno >= logging.WARNING:
-            msg = f"⚠️ {msg}"
-        elif record.levelno >= logging.INFO:
-            msg = f"ℹ️ {msg}"
-        else:
-            msg = f"🔍 {msg}"
-        
-        self.log_signal.emit(msg)
 
 
 def setup_logger():

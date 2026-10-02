@@ -4,7 +4,13 @@ from .event_types import (
     SERIES_UPDATED,
     SOURCE_MATCH_CHANGED,
     SOURCE_OFFER_UPDATED,
+    SOURCE_URL_SAVED,
+    TASK_ERROR,
+    TASK_FINISHED,
+    TASK_LOG,
+    TASK_PROGRESS,
     TMDB_CHANGED,
+    TMDB_MATCHED,
 )
 
 __all__ = [
@@ -13,5 +19,11 @@ __all__ = [
     "SERIES_UPDATED",
     "SOURCE_MATCH_CHANGED",
     "SOURCE_OFFER_UPDATED",
+    "SOURCE_URL_SAVED",
+    "TASK_ERROR",
+    "TASK_FINISHED",
+    "TASK_LOG",
+    "TASK_PROGRESS",
     "TMDB_CHANGED",
+    "TMDB_MATCHED",
 ]
