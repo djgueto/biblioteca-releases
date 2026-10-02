@@ -90,6 +90,7 @@ const ICONS = {
 
 const qualityLabel = (h) => (!h ? null : h >= 2000 ? '4K' : h >= 1000 ? '1080p' : h >= 700 ? '720p' : 'SD');
 const displayName = (it) => it.tmdb_name || it.name;
+const hdrLabel = (h) => ({ dolby_vision: 'Dolby Vision', hdr10: 'HDR10' })[h] || null;
 const fmtDate = (s) => (s ? new Date(s.replace(' ', 'T')).toLocaleString('es-ES', { dateStyle: 'short', timeStyle: 'short' }) : '—');
 const PALETTE = ['#3b4a6b', '#4b3b6b', '#6b3b55', '#3b6b62', '#6b5a3b', '#3b5c6b', '#58406b'];
 const phColor = (id) => PALETTE[id % PALETTE.length];
@@ -197,9 +198,9 @@ function SeriesDetail({ id, tick, toast }) {
 
   const local = it.seasons.reduce((n, s) => n + s.local.length, 0);
   const missing = it.seasons.reduce((n, s) => n + s.missing.length, 0);
-  const best = Math.max(0, ...it.seasons.flatMap((s) => s.local.map((e) => e.resolution_height || 0)));
+  const best = Math.max(it.file_quality?.resolution_height || 0, ...it.seasons.flatMap((s) => s.local.map((e) => e.resolution_height || 0)));
   const cover = it.cover_url ? `/api/series/${it.id}/cover` : null;
-
+  const bestOffer = it.offers.filter((o) => o.available).sort((a, b) => (b.resolution || 0) - (a.resolution || 0))[0];
   const toggleMonitored = async () => {
     setBusy(true);
     try {
@@ -231,6 +232,18 @@ function SeriesDetail({ id, tick, toast }) {
             <div class="stat"><div class="k">Faltan</div><div class="v" style=${missing ? 'color:var(--warn)' : ''}>${missing}</div></div>
             <div class="stat"><div class="k">Mejor calidad</div><div class="v">${qualityLabel(best) || '—'}</div></div>
             <div class="stat"><div class="k">Fuentes</div><div class="v">${it.offers.length + (it.hispashare_url && !it.offers.some((o) => o.provider === 'hispashare') ? 1 : 0)}</div></div>
+          </div>`}
+        ${it.content_mode !== 'episodic' && html`
+          <div class="stats">
+            <div class="stat"><div class="k">Calidad del archivo</div>
+              <div class="v">${it.file_quality ? qualityLabel(it.file_quality.resolution_height) : '—'}</div>
+              ${it.file_quality && html`<div class="faint" style="font-size:12px">${[it.file_quality.codec, hdrLabel(it.file_quality.hdr)].filter(Boolean).join(' · ') || 'códec desconocido'}</div>`}
+            </div>
+            <div class="stat"><div class="k">Mejor fuente</div>
+              <div class="v">${bestOffer ? qualityLabel(bestOffer.resolution) || '?' : '—'}</div>
+              ${bestOffer && html`<div class="faint" style="font-size:12px">${bestOffer.provider}</div>`}
+            </div>
+            <div class="stat"><div class="k">Fuentes</div><div class="v">${it.offers.length}</div></div>
           </div>`}
         <div class="actions" style=${it.content_mode === 'episodic' ? '' : 'margin-top:18px'}>
           <button class="btn" disabled=${busy} onClick=${toggleMonitored}>

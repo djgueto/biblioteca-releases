@@ -13,6 +13,9 @@ class LibraryRepository:
 
     def __init__(self, db_manager):
         self.db = db_manager
+        from core.repositories.item_quality_repository import ItemQualityRepository
+
+        ItemQualityRepository(db_manager)  # crea la tabla si aún no existe
 
     def list_items(self) -> list[dict]:
         cursor = self.db.get_connection().cursor()
@@ -23,7 +26,8 @@ class LibraryRepository:
                    s.updated_at,
                    COALESCE(me.missing_count, 0) AS missing_count,
                    COALESCE(le.local_count, 0) AS local_count,
-                   le.max_resolution,
+                   COALESCE(le.max_resolution, iq.resolution_height) AS max_resolution,
+                   iq.codec AS file_codec, iq.hdr AS file_hdr,
                    so.providers
             FROM series s
             LEFT JOIN (
@@ -40,6 +44,7 @@ class LibraryRepository:
                 FROM source_offers WHERE available = 1
                 GROUP BY series_id
             ) so ON so.series_id = s.id
+            LEFT JOIN item_quality iq ON iq.series_id = s.id AND iq.unreadable = 0
             ORDER BY COALESCE(NULLIF(s.tmdb_name, ''), s.name) COLLATE NOCASE
         ''')
         return [self._present(dict(row)) for row in cursor.fetchall()]
@@ -52,6 +57,11 @@ class LibraryRepository:
         item["category_label"] = Settings.get_category_label(item.get("content_category"))
         item["content_mode"] = Settings.get_category_content_mode(item.get("content_category"))
         item["cover_url"] = self.cover_url(item)
+        row = self.db.get_connection().execute(
+            "SELECT file_path, resolution_height, codec, hdr, source FROM item_quality WHERE series_id = ? AND unreadable = 0",
+            (series_id,),
+        ).fetchone()
+        item["file_quality"] = dict(row) if row else None
         return item
 
     def list_missing(self, limit: int = 10000) -> list[dict]:

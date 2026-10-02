@@ -31,6 +31,9 @@ from core.services import (
 )
 from core.services.providers import ProviderUnavailable, build_provider_registry
 from core.services.quality import quality_from_local_episode
+from core.services.quality_profile import TIERS, tier_of
+from core.repositories.item_quality_repository import ItemQualityRepository
+from core.library.item_quality import detect_item_quality
 from config.settings import Settings
 
 class Scheduler(BackgroundJob):
@@ -51,6 +54,7 @@ class Scheduler(BackgroundJob):
         self.source_repository = SourceRepository(self.db)
         self.source_offer_repository = SourceOfferRepository(self.db)
         self.decision_log_repository = DecisionLogRepository(self.db)
+        self.item_quality_repository = ItemQualityRepository(self.db)
         self.missing_episodes_service = MissingEpisodesService(
             self.db,
             self.series_repository,
@@ -215,6 +219,7 @@ class Scheduler(BackgroundJob):
             # 9.1. Detectar resolución real de archivos sin metadatos en el nombre
             self._progress(88, "🔬 Detectando resoluciones reales...")
             self.scan_missing_resolutions()
+            self.scan_item_qualities()
 
             # 9.2. Mejorar calidad (upgrades) de episodios existentes
             if getattr(Settings, 'UPGRADE_ENABLED', False):
@@ -874,6 +879,37 @@ class Scheduler(BackgroundJob):
             self.logger.error(f"Error en scan_missing_resolutions: {e}")
             self._log(f"   ⚠️ Error detectando resoluciones: {e}")
 
+    def scan_item_qualities(self, batch_size=600, workers=4):
+        """Mide la calidad real (MediaInfo) de películas, documentales y
+        conciertos que aún no la tienen. Leer cada archivo por la red tarda
+        ~2 s, así que se leen varios a la vez y en tandas por ciclo."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        pending = self.item_quality_repository.pending(Settings.get_single_file_categories(), limit=batch_size)
+        if not pending:
+            return
+        self._log(f"   🔬 Midiendo calidad de {len(pending)} películas/documentales...")
+        measured = unreadable = 0
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [(item, pool.submit(detect_item_quality, item["folder_path"])) for item in pending]
+            for item, future in futures:
+                if not self.running:
+                    pool.shutdown(cancel_futures=True)
+                    return
+                try:
+                    file_path, quality, source = future.result()
+                except Exception as e:
+                    self.logger.warning(f"No se pudo medir '{item['name']}': {e}")
+                    continue
+                # Las escrituras van en este hilo: la conexión SQLite es por hilo.
+                self.item_quality_repository.save(item["id"], item["folder_path"], file_path=file_path,
+                                                  quality=quality, source=source)
+                if quality:
+                    measured += 1
+                else:
+                    unreadable += 1
+        self._log(f"   ✅ Calidad medida: {measured} | sin poder leer: {unreadable}")
+
     def process_upgrades(self, driver):
         """
         Mejora la calidad de episodios ya descargados usando la mejor oferta
@@ -883,11 +919,23 @@ class Scheduler(BackgroundJob):
         Hispashare y Wolfmax.
         """
         try:
-            candidates = self.db.get_series_with_local_resolution_and_any_offer(
-                self.db.get_episodic_categories()
-            )
+            candidates = []
+            # Series: se compara con el PEOR episodio en disco, para que una
+            # serie con un episodio en 4K y el resto en 1080p también mejore.
+            # Si aún no se conoce la resolución real (pendiente de
+            # scan_missing_resolutions) no se evalúa: no hay con qué comparar.
+            for series in self.db.get_series_with_local_resolution_and_any_offer(self.db.get_episodic_categories()):
+                if series.get('min_local_resolution') is None:
+                    continue
+                local = quality_from_local_episode({'resolution_height': series['min_local_resolution'], 'codec': None})
+                candidates.append((series, local))
+            # Películas, documentales, conciertos: la calidad medida del archivo.
+            for item in self.item_quality_repository.upgrade_candidates(Settings.get_single_file_categories()):
+                local = quality_from_local_episode(item)
+                candidates.append((item, local))
+
             if not candidates:
-                self._log("   ℹ️ No hay series con episodios locales y fuente conocida para evaluar upgrades")
+                self._log("   ℹ️ No hay elementos con calidad conocida y fuente para evaluar mejoras")
                 return
 
             max_series = getattr(Settings, 'UPGRADE_MAX_SERIES_PER_CYCLE', 15)
@@ -905,21 +953,12 @@ class Scheduler(BackgroundJob):
 
             self._log(f"   📊 {len(candidates)} candidatos a evaluar para upgrade")
 
-            for series in candidates:
+            for series, local_quality in candidates:
                 if not self.running or processed >= max_series:
                     break
 
                 series_id = series['id']
                 name = series['name']
-                # Si aún no se conoce la resolución local real (pendiente de
-                # scan_missing_resolutions), no evaluar upgrade: una Quality
-                # desconocida rankearía como la peor posible y dispararía
-                # descargas innecesarias hasta que se complete la detección.
-                if series.get('max_local_resolution') is None:
-                    continue
-                local_quality = quality_from_local_episode(
-                    {'resolution_height': series.get('max_local_resolution'), 'codec': None}
-                )
 
                 try:
                     self.source_arbitration_service.refresh_all_offers(series_id, series)
@@ -938,10 +977,9 @@ class Scheduler(BackgroundJob):
                         continue
 
                     processed += 1
-                    res = series.get('max_local_resolution')
-                    quality_label = f"{offer.quality.resolution_height}p" if offer.quality.resolution_height else "?"
                     self._log(
-                        f"   🔼 [{offer.provider} {quality_label}] Upgrade: {name} (actual: {res}p)"
+                        f"   🔼 [{offer.provider}] Mejora: {name} "
+                        f"({TIERS.get(tier_of(local_quality), '?')} → {TIERS.get(tier_of(offer.quality), '?')})"
                     )
 
                     handle = provider.resolve_download(series, offer, missing_only=False)

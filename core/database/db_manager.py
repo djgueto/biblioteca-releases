@@ -802,8 +802,9 @@ class DatabaseManager:
 
         category_filter, params = self._build_category_filter(categories)
         cursor.execute(f'''
-            SELECT s.id, s.name, s.hispashare_url, s.tmdb_id, s.content_category,
-                   MAX(le.resolution_height) as max_local_resolution
+            SELECT s.id, s.name, s.tmdb_name, s.year, s.hispashare_url, s.tmdb_id, s.content_category,
+                   MAX(le.resolution_height) as max_local_resolution,
+                   MIN(le.resolution_height) as min_local_resolution
             FROM series s
             JOIN local_episodes le ON le.series_id = s.id
             WHERE COALESCE(s.monitored, 1) = 1
