@@ -13,6 +13,36 @@ def _resolve_path(value: str) -> str:
         p = (BASE_DIR / p).resolve()
     return str(p)
 
+def write_env_values(path: Path, values: dict[str, str]) -> None:
+    """Actualiza (o añade) claves de un .env conservando el resto de líneas,
+    comentarios incluidos.
+
+    Se reescribe el archivo en su sitio ('r+' y truncate) en vez de crear uno
+    nuevo y moverlo encima (como hace dotenv.set_key): en Windows un .env
+    oculto no se puede reemplazar ("Permission denied"), y moverlo desde la
+    carpeta temporal a una unidad de red tampoco.
+    """
+    path = Path(path)
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    pending = dict(values)
+    out = []
+    for line in lines:
+        key = line.split("=", 1)[0].strip() if "=" in line and not line.lstrip().startswith("#") else None
+        if key in pending:
+            out.append(f"{key}={pending.pop(key)}")
+        else:
+            out.append(line)
+    out.extend(f"{k}={v}" for k, v in pending.items())
+    text = "\n".join(out) + "\n"
+    if path.exists():
+        with open(path, "r+", encoding="utf-8", newline="") as f:
+            f.write(text)
+            f.truncate()
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+
 class Settings:
     # APIs
     TMDB_API_KEY = os.getenv("TMDB_API_KEY", "")
@@ -246,7 +276,9 @@ class Settings:
     CHECK_INTERVAL_HOURS = int(os.getenv("CHECK_INTERVAL_HOURS", "4"))
     
     # Contenido
-    CONTENT_SCAN_ENABLED = os.getenv("CONTENT_SCAN_ENABLED", "True").lower() == "true"
+    # Barrido antiguo de novedades de Hispashare (sus propios filtros). Sustituido
+    # por las novedades de TMDB/IMDb (core/discovery): desactivado por defecto.
+    CONTENT_SCAN_ENABLED = os.getenv("CONTENT_SCAN_ENABLED", "False").lower() == "true"
     CONTENT_DISCOVERY_PAGES = int(os.getenv("CONTENT_DISCOVERY_PAGES", "3"))  # Número de páginas a buscar en descubrimiento
     
     # Calidad y preferencias
@@ -326,14 +358,10 @@ class Settings:
     def update_env(cls, values: dict):
         """Cambia solo estas claves en el .env (el resto se conserva tal cual)
         y las aplica en memoria. Los booleanos se guardan como True/False."""
-        from dotenv import set_key
-
-        ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
-        ENV_PATH.touch(exist_ok=True)
+        texts = {k: (("True" if v else "False") if isinstance(v, bool) else str(v)) for k, v in values.items()}
+        write_env_values(ENV_PATH, texts)
         for key, value in values.items():
-            text = str(value) if not isinstance(value, bool) else ("True" if value else "False")
-            set_key(str(ENV_PATH), key, text, quote_mode="never")
-            os.environ[key] = text
+            os.environ[key] = texts[key]
             setattr(cls, key, value)
 
     @classmethod
@@ -341,13 +369,8 @@ class Settings:
         """Guarda configuración en el .env actualizando solo estas claves: las
         que no conoce quien llama (ajustes añadidos desde la web, DonTorrent,
         carpeta vigilada...) se conservan en vez de borrarse."""
-        from dotenv import set_key
+        write_env_values(ENV_PATH, {k: str(v) for k, v in settings_dict.items()})
 
-        ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
-        ENV_PATH.touch(exist_ok=True)
-        for key, value in settings_dict.items():
-            set_key(str(ENV_PATH), key, str(value), quote_mode="never")
-    
     @classmethod
     def save_series_paths(cls, paths_list):
         """Guarda las rutas de series en el archivo .env"""
