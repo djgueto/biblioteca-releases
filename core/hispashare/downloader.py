@@ -949,7 +949,7 @@ class HispashareDownloader:
         self.logger.info(f"Total enlaces ed2k obtenidos en esta sección{quality_info}: {len(ed2k_links)}")
         return ed2k_links
     
-    def download_missing_episodes(self, series_id):
+    def download_missing_episodes(self, series_id, exclude=None):
         """
         Proceso completo para descargar episodios faltantes de una serie
         
@@ -966,6 +966,9 @@ class HispashareDownloader:
             return []
         
         rows = self.db_manager.get_missing_episodes_for_series(series_id)
+        if exclude:
+            # Ya pedidos o esperando en la carpeta de descargas.
+            rows = [r for r in rows if (r.get("season"), r.get("episode")) not in exclude]
         if not rows:
             self.logger.info(f"No hay episodios faltantes para la serie {series['name']}")
             return []
@@ -1083,9 +1086,18 @@ class HispashareDownloader:
             self.logger.debug("No se pudo verificar la cola de aMule; se omite el reintento de enlaces atascados en este ciclo")
             return []
 
+        try:
+            from core.importer.pending import downloads_index
+
+            downloads = downloads_index(self.db_manager)
+        except Exception:
+            downloads = None
         retry_links = [
             link for link in stale_links
             if not self.emule_client.is_link_active_in_queue(link, queue_page)
+            # Fuera de la cola puede significar "terminado": si el archivo ya
+            # está en la carpeta de descargas no se atascó, solo falta pasarlo.
+            and not (downloads and downloads.has_ed2k_file(link))
         ]
         if retry_links:
             self.logger.info(

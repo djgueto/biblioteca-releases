@@ -52,6 +52,29 @@ class GrabHistoryRepository:
         ).fetchall()
         return {(r[0], r[1]) for r in rows}
 
+    def blocked_episodes(self, series: dict, days: int) -> set[tuple[int, int]]:
+        """Episodios que no se deben volver a pedir: enviados hace poco a un
+        cliente, o ya presentes en las carpetas de descargas (descargados o
+        descargándose) aunque aún no estén en la biblioteca."""
+        from core.importer.pending import downloads_index
+
+        blocked = self.recently_grabbed_episodes(series["id"], days)
+        try:
+            blocked |= downloads_index(self.db).episodes_for(series)
+        except Exception:
+            pass  # sin índice de descargas: se queda en la regla de los días
+        return blocked
+
+    def movie_blocked(self, series: dict, days: int) -> bool:
+        from core.importer.pending import downloads_index
+
+        if self.recently_grabbed_item(series["id"], days):
+            return True
+        try:
+            return downloads_index(self.db).has_movie(series)
+        except Exception:
+            return False
+
     def recently_grabbed_item(self, series_id: int, days: int) -> bool:
         """¿Se envió algo de esta ficha (p. ej. la película entera) hace poco?"""
         row = self.db.get_connection().execute(

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import logging
 
+from config.settings import Settings
 from core.download_clients import TORRENT, DownloadDispatcher, Release
+from core.repositories.grab_history_repository import GrabHistoryRepository
 from core.services.providers.base import DownloadHandle, SourceOffer
 from core.services.quality import Quality
 from core.wolfmax.downloader import WolfmaxDownloader, WolfmaxRateLimited, is_current_url
@@ -74,25 +76,31 @@ class WolfmaxSourceProvider:
         series_id = item.get("id")
         episodic_cats = self.db.get_episodic_categories()
         is_episodic = item.get("content_category") in episodic_cats
+        history = GrabHistoryRepository(self.db)
+        episodes_by_url: dict[str, list[tuple[int, int]]] = {}
 
         if is_episodic:
             episodes = self._downloader.get_episodes(offer.source_url)
             if missing_only and series_id:
                 # El sitio publica fichas por temporada con todos sus
-                # episodios: descargar solo los que faltan en la biblioteca.
+                # episodios: descargar solo los que faltan en la biblioteca y
+                # no se han pedido ya (ni están esperando en descargas).
                 missing = {
                     (m.get("season"), m.get("episode"))
                     for m in self.db.get_missing_episodes_for_series(series_id)
-                }
+                } - history.blocked_episodes(item, Settings.GRAB_RETRY_DAYS)
                 episodes = [
                     ep for ep in episodes
                     if any((ep["season"], n) in missing for n in ep["episodes"])
                 ]
+            episodes_by_url = {ep["url"]: [(ep["season"], n) for n in ep["episodes"]] for ep in episodes}
             episode_urls = [ep["url"] for ep in episodes]
             if not episode_urls:
                 return None
             new_urls = self.db.filter_new_wolfmax_urls(episode_urls)
         else:
+            if series_id and history.movie_blocked(item, Settings.GRAB_RETRY_DAYS):
+                return None
             new_urls = self.db.filter_new_wolfmax_urls([offer.source_url])
 
         if not new_urls:
@@ -112,6 +120,11 @@ class WolfmaxSourceProvider:
                 # Solo se marca tras entregarlo: si el cliente falla, la URL
                 # se reintenta en el siguiente ciclo.
                 self.db.mark_wolfmax_urls_done([ep_url], series_id=series_id)
+                if series_id:
+                    # Registro común de envíos: así ninguna otra fuente vuelve a
+                    # pedir estos episodios mientras se descargan.
+                    history.record(self.name, ep_url, series_id, episodes_by_url.get(ep_url, []),
+                                   release_title=filename, destination=destination)
                 grabbed.append(destination)
             except WolfmaxRateLimited as e:
                 logger.warning(str(e))

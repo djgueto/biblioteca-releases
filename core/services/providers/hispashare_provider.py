@@ -7,6 +7,20 @@ from core.services.providers.base import DownloadHandle, SourceOffer
 from core.services.quality import Quality
 
 
+def _episodes_in_links(links: list[str]) -> set[tuple[int, int]]:
+    """Temporada/episodio de cada enlace ed2k según su nombre de archivo."""
+    from core.library.parser import EpisodeParser
+
+    parser = EpisodeParser()
+    found = set()
+    for link in links:
+        parts = link.split("|")
+        parsed = parser.parse_episode(parts[2]) if len(parts) > 2 else None
+        if parsed:
+            found.add((parsed["season"], parsed["episode"]))
+    return found
+
+
 class HispashareSourceProvider:
     """Envuelve HispashareSearcher/HispashareDownloader (sin reimplementar su
     scraping) para exponerlos a través del contrato SourceProvider genérico.
@@ -66,12 +80,22 @@ class HispashareSourceProvider:
             return None
         if Settings.get_category_content_mode(item.get("content_category") or "series") == "single_file":
             return self._resolve_movie(item, offer, upgrade=not missing_only)
+        from core.repositories.grab_history_repository import GrabHistoryRepository
+
+        history = GrabHistoryRepository(self.db)
         if missing_only:
-            links = self._downloader.download_missing_episodes(series_id)
+            blocked = history.blocked_episodes(item, Settings.GRAB_RETRY_DAYS)
+            links = self._downloader.download_missing_episodes(series_id, exclude=blocked)
         else:
             links = self._downloader.download_upgrade_episodes(series_id)
         if not links:
             return None
+        # Registro común de envíos (episodio a episodio, según el nombre del
+        # archivo de cada enlace): así ninguna fuente lo vuelve a pedir.
+        episodes = _episodes_in_links(links)
+        if episodes:
+            history.record(self.name, item.get("hispashare_url") or "", series_id, sorted(episodes),
+                           release_title=f"{len(links)} enlace(s) ed2k", destination="eMule")
         return DownloadHandle(provider=self.name, kind="ed2k", payload={"ed2k_links": links})
 
     def _resolve_movie(self, item: dict, offer: SourceOffer | None, *, upgrade: bool) -> DownloadHandle | None:
@@ -87,7 +111,7 @@ class HispashareSourceProvider:
         if not url:
             return None
         history = GrabHistoryRepository(self.db)
-        if history.recently_grabbed_item(series_id, Settings.GRAB_RETRY_DAYS):
+        if history.movie_blocked(item, Settings.GRAB_RETRY_DAYS):
             return None
         if upgrade:
             local = ItemQualityRepository(self.db).get(series_id)

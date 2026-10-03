@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import shutil
+import threading
 import time
 import unicodedata
 from dataclasses import asdict, dataclass, field
@@ -46,6 +47,30 @@ _CUT_TOKENS = re.compile(
     re.IGNORECASE,
 )
 _EPISODE_MARK = re.compile(r"(?i)(?<![a-z0-9])(?:s\d{1,2}\s*[._ -]*e\d{1,3}|t\d{1,2}e\d{1,3}|\d{1,2}x\d{1,3})")
+# Nomenclatura de las webs españolas: "[Cap.407]" = 4x07, "Cap 1012" = 10x12.
+_CAP_MARK = re.compile(r"(?i)(?<![a-z])cap(?:[ií]tulo)?\.?\s*(\d{1,2})(\d{2})(?!\d)")
+_PARSER = None
+# El ciclo completo y la tarea programada pueden coincidir: dos importaciones
+# a la vez copiarían (o moverían) el mismo archivo dos veces.
+_RUN_LOCK = threading.Lock()
+
+
+def parse_release_episode(stem: str) -> tuple[int, int, int] | None:
+    """(posición donde empieza la marca, temporada, episodio) en un nombre de
+    descarga: "Serie.S04E07", "Serie 4x07", "Serie [Cap.407]"."""
+    global _PARSER
+    marker = _EPISODE_MARK.search(stem)
+    if marker:
+        if _PARSER is None:
+            _PARSER = EpisodeParser()
+        parsed = _PARSER.parse_episode(marker.group(0))
+        if parsed:
+            return marker.start(), parsed["season"], parsed["episode"]
+    cap = _CAP_MARK.search(stem)
+    if cap:
+        start = stem.rfind("[", 0, cap.start() + 1)
+        return (start if start >= 0 and cap.start() - start <= 1 else cap.start()), int(cap.group(1)), int(cap.group(2))
+    return None
 MATCH_THRESHOLD = 0.8
 GRAB_WINDOW_DAYS = 30
 
@@ -84,9 +109,26 @@ class ImportMatch:
     old_path: str | None = None
 
 
+def iter_download_files(base: Path):
+    """Archivos de una carpeta de descargas. La raíz de un disco (p. ej. la
+    "Incoming" de aMule en F:\\) se mira solo en su primer nivel: recorrer el
+    disco entero sería lento y tocaría cosas que no son descargas."""
+    is_drive_root = base.resolve() == Path(base.resolve().anchor)
+    try:
+        yield from (base.iterdir() if is_drive_root else base.rglob("*"))
+    except OSError:
+        return
+
+
 def _comparable(text: str) -> str:
     text = unicodedata.normalize("NFKD", text or "")
     return _normalize("".join(c for c in text if not unicodedata.combining(c)))
+
+
+def _episode_title_part(text: str) -> str:
+    cut = _CUT_TOKENS.search(_clean_name(text))
+    text = _clean_name(text)
+    return text[: cut.start()].strip() if cut else text
 
 
 def _clean_name(stem: str) -> str:
@@ -134,7 +176,7 @@ class ImportService:
             base = Path(source)
             if not base.is_dir():
                 continue
-            for path in base.rglob("*"):
+            for path in iter_download_files(base):
                 try:
                     if not path.is_file() or path.suffix.lower() not in VIDEO_EXTENSIONS:
                         continue
@@ -164,11 +206,12 @@ class ImportService:
 
     # --- identificar qué es cada archivo ------------------------------------------
     def match(self, path: Path) -> ImportMatch | None:
-        parsed = self.parser.parse_episode(path.name)
-        marker = _EPISODE_MARK.search(path.stem)
-        if parsed and marker:
-            # El título es lo que va antes de "S04E07" / "4x07".
-            match = self._match_episode(_clean_name(path.stem[: marker.start()]), parsed["season"], parsed["episode"])
+        found = parse_release_episode(path.stem)
+        if found:
+            # El título es lo que va antes de "S04E07" / "4x07" / "[Cap.407]",
+            # sin etiquetas de calidad ("[4K 2160p]").
+            start, season, episode = found
+            match = self._match_episode(_episode_title_part(path.stem[:start]), season, episode)
             if match:
                 return match
         return self._match_movie(path)
@@ -283,6 +326,15 @@ class ImportService:
         summary = {"imported": 0, "upgraded": 0, "skipped": 0}
         if not self.settings.enabled:
             return summary
+        if not _RUN_LOCK.acquire(blocking=False):
+            self.log("   ⏭️ Ya hay una importación en marcha")
+            return summary
+        try:
+            return self._run(summary)
+        finally:
+            _RUN_LOCK.release()
+
+    def _run(self, summary: dict) -> dict:
         for path in self.finished_files():
             try:
                 if self._already_imported(path):

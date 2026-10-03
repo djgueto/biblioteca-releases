@@ -47,7 +47,7 @@ def _default_factories() -> dict[str, Callable[[EventBus], BackgroundJob]]:
     from core.tmdb.recalc_job import TMDBRecalcJob
 
     return {
-        "scheduler": lambda bus: Scheduler(event_bus=bus),
+        "scheduler": lambda bus, **options: Scheduler(event_bus=bus, **options),
         "discovery": lambda bus: DiscoveryJob(event_bus=bus),
         "quality_scan": lambda bus: QualityScanJob(event_bus=bus),
         "agenda": lambda bus: AgendaJob(event_bus=bus),
@@ -108,14 +108,14 @@ class JobManager:
                 logger.exception("Error notificando a un cliente web")
 
     # --- control ------------------------------------------------------
-    def start(self, name: str):
+    def start(self, name: str, **options):
         if name not in self.factories:
             raise KeyError(name)
         with self._lock:
             if self._state[name]["running"]:
                 raise JobAlreadyRunning(name)
             bus = EventBus()
-            job = self.factories[name](bus)
+            job = self.factories[name](bus, **options)
             self._subscribe(bus, name)
             self._jobs[name] = job
             self._state[name].update(running=True, stopping=False, percent=0, message="Iniciando...",

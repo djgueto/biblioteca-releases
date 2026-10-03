@@ -45,6 +45,9 @@ class DatabaseManager:
     CLEANUP_MAX_DELETIONS = 20
     CLEANUP_MAX_DELETION_RATIO = 0.25
 
+    # Versión del esquema que deja initialize_database (PRAGMA user_version).
+    SCHEMA_VERSION = 1
+
     def __init__(self, db_path=None):
         self.db_path = db_path or Settings.DB_PATH
         self.logger = logging.getLogger(__name__)
@@ -108,10 +111,17 @@ class DatabaseManager:
         self.conn = None
     
     def initialize_database(self):
-        """Crear tablas si no existen"""
+        """Crear tablas si no existen y aplicar las migraciones.
+
+        Con la BD en el NAS, cada ALTER/commit cuesta: si la BD ya está en
+        SCHEMA_VERSION (PRAGMA user_version) no se repite nada. Al añadir una
+        migración aquí, súbase SCHEMA_VERSION.
+        """
         conn = self.get_connection()
+        if conn.execute("PRAGMA user_version").fetchone()[0] >= self.SCHEMA_VERSION:
+            return
         cursor = conn.cursor()
-        
+
         # Tabla de series
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS series (
@@ -387,6 +397,19 @@ class DatabaseManager:
             pass
 
         ensure_placeholder_column(self)
+        # Los ALTER de arriba se tragan cualquier error: solo se da la BD por
+        # migrada si las columnas están de verdad (si no, se reintenta).
+        expected = {
+            "series": {"search_disabled", "monitored", "search_failures", "hispashare_cover_url",
+                       "content_category", "placeholder"},
+            "local_episodes": {"resolution_height", "codec", "source", "size_mb", "quality_rank", "hdr",
+                               "quality_source", "measured_at"},
+            "ed2k_history": {"last_sent_at", "retry_count"},
+        }
+        if all(columns <= {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+               for table, columns in expected.items()):
+            conn.execute(f"PRAGMA user_version = {self.SCHEMA_VERSION}")
+            conn.commit()
         self.logger.info("Base de datos inicializada correctamente")
     
     # ========== SERIES ==========

@@ -110,9 +110,11 @@ class DontorrentSourceProvider:
                 break
         return list(best.values())
 
-    def _missing(self, series_id: int) -> set[tuple[int, int]]:
-        missing = {(m["season"], m["episode"]) for m in self.db.get_missing_episodes_for_series(series_id)}
-        return missing - self.history.recently_grabbed_episodes(series_id, self.retry_days)
+    def _missing(self, item: dict) -> set[tuple[int, int]]:
+        """Faltantes que se pueden pedir: sin los enviados hace poco ni los que
+        ya están en las carpetas de descargas esperando a la biblioteca."""
+        missing = {(m["season"], m["episode"]) for m in self.db.get_missing_episodes_for_series(item["id"])}
+        return missing - self.history.blocked_episodes(item, self.retry_days)
 
     def _local_qualities(self, series_id: int) -> dict[tuple[int, int], Quality]:
         """Calidad medida con MediaInfo de cada episodio en disco (lo deducido
@@ -138,7 +140,7 @@ class DontorrentSourceProvider:
         candidates = self._candidates(item)
         if not candidates:
             return None
-        seasons = {s for s, _ in self._missing(item["id"])} if item.get("id") else set()
+        seasons = {s for s, _ in self._missing(item)} if item.get("id") else set()
         # Solo cuenta una ficha de una temporada que falta: una oferta de
         # otra temporada podría ganar el arbitraje por calidad y dejar sin
         # turno a un proveedor que sí tiene esos episodios. Sin faltantes
@@ -213,7 +215,7 @@ class DontorrentSourceProvider:
 
     def _resolve_movie(self, item: dict, offer: SourceOffer | None, *, upgrade: bool) -> DownloadHandle | None:
         series_id = item["id"]
-        if self.history.recently_grabbed_item(series_id, self.retry_days):
+        if self.history.movie_blocked(item, self.retry_days):
             return None
         if offer is None or offer.provider != self.name:
             offer = self._movie_offer(item)
@@ -239,9 +241,9 @@ class DontorrentSourceProvider:
         """Faltantes: cualquier calidad aceptable (la mejor que haya).
         Mejoras: solo episodios en disco cuya calidad medida mejora la ficha."""
         series_id = item["id"]
-        recent = self.history.recently_grabbed_episodes(series_id, self.retry_days)
+        recent = self.history.blocked_episodes(item, self.retry_days)
         if missing_only:
-            wanted = {key: None for key in self._missing(series_id)}
+            wanted = {key: None for key in self._missing(item)}
         else:
             wanted = {key: q for key, q in self._local_qualities(series_id).items() if key not in recent}
         if not wanted:

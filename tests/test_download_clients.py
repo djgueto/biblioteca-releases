@@ -77,6 +77,14 @@ class TestDispatcher(unittest.TestCase):
 
 
 class TestWolfmaxGrab(unittest.TestCase):
+    def setUp(self):
+        # BD simulada: el registro de envíos no tiene nada pedido.
+        history = patch("core.services.providers.wolfmax_provider.GrabHistoryRepository")
+        self.history = history.start().return_value
+        self.history.movie_blocked.return_value = False
+        self.history.blocked_episodes.return_value = set()
+        self.addCleanup(history.stop)
+
     def _provider(self, dispatcher):
         with patch("core.services.providers.wolfmax_provider.WolfmaxSearcher"), \
                 patch("core.services.providers.wolfmax_provider.WolfmaxDownloader"):
@@ -107,6 +115,15 @@ class TestWolfmaxGrab(unittest.TestCase):
         self.assertEqual((release.protocol, release.filename, release.content), (TORRENT, "Peli.torrent", TORRENT_BYTES))
         db.mark_wolfmax_urls_done.assert_called_once_with([offer.source_url], series_id=5)
         self.assertEqual((handle.kind, handle.payload), (TORRENT, {"grabbed": ["W:/watch/Peli.torrent"]}))
+
+    def test_movie_already_in_downloads_is_not_requested_again(self):
+        dispatcher = MagicMock()
+        dispatcher.can_handle.return_value = True
+        self.history.movie_blocked.return_value = True
+        provider, _ = self._provider(dispatcher)
+        item, offer = self._movie()
+        self.assertIsNone(provider.resolve_download(item, offer))
+        provider._downloader.fetch_torrent.assert_not_called()
 
     def test_client_failure_leaves_url_pending(self):
         dispatcher = MagicMock()

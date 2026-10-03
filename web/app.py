@@ -149,19 +149,33 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
     library_cache = _LibraryCache()
     jobs.add_listener(lambda msg: library_cache.invalidate() if msg.get("type") in ("series_updated", "job_finished") else None)
 
+    def prepare_database():
+        # Antes de servir: la reubicación de bibliotecas cambia rutas de la BD.
+        db = DatabaseManager()
+        db.initialize_database()
+        sync_library_roots(db)
+
+    def start_background():
+        # Ya con el servidor respondiendo (la BD suele estar en el NAS).
+        try:
+            if autostart_enabled():
+                if LibraryRepository(DatabaseManager()).path_health()["ok"]:
+                    jobs.start("scheduler", wait_for_interval=True)
+                else:
+                    logger.error("Arranque automático del ciclo omitido: las rutas de la BD no coinciden con las configuradas")
+        except Exception:
+            logger.exception("Error en el arranque automático del ciclo")
+        periodic.start()
+        try:
+            library_cache.get()  # la primera visita no espera a la consulta
+        except Exception:
+            logger.exception("No se pudo precargar la biblioteca")
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         if init_db:
-            db = DatabaseManager()
-            db.initialize_database()
-            sync_library_roots(db)
-        if init_db and autostart_enabled():
-            if LibraryRepository(DatabaseManager()).path_health()["ok"]:
-                jobs.start("scheduler")
-            else:
-                logger.error("Arranque automático del ciclo omitido: las rutas de la BD no coinciden con las configuradas")
-        if init_db:
-            periodic.start()
+            await asyncio.to_thread(prepare_database)
+            threading.Thread(target=start_background, name="arranque", daemon=True).start()
         yield
         periodic.stop()
         await asyncio.to_thread(jobs.stop_all)

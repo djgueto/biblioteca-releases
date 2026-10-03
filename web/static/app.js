@@ -772,6 +772,7 @@ function ImportSettingsPanel({ toast }) {
       <div class="panel form">
         <label class="check"><input type="checkbox" checked=${form.enabled} onChange=${set('enabled')} /> Importar automáticamente lo descargado</label>
         <label class="field"><span>Carpetas donde terminan las descargas (una por línea)</span>
+          <small class="faint">Se usan también con la importación desactivada: lo que ya está aquí (terminado o a medias) no se vuelve a pedir.</small>
           <textarea class="input mono" rows="3" value=${form.source_text} onInput=${set('source_text')} placeholder="F:/temp transmission"></textarea>
           <small class="faint">La de Transmission y, si quieres, la carpeta "Incoming" de aMule. La carpeta vigilada de torrents se ignora.</small>
         </label>

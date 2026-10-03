@@ -14,22 +14,15 @@ from datetime import datetime, timedelta
 from typing import Callable
 
 from core.database.db_manager import DatabaseManager
+from core.jobs import task_runs
+from core.jobs.task_runs import DEFAULT_INTERVALS, INTERVALS_KEY
 from core.repositories.app_settings_repository import AppSettingsRepository
 
 logger = logging.getLogger(__name__)
 
-INTERVALS_KEY = "task_intervals"
-LAST_RUN_KEY = "task_last_run"
 TICK_SECONDS = 30
 STARTUP_DELAY_MINUTES = 5
 
-# minutos; 0 = no se ejecuta sola
-DEFAULT_INTERVALS = {
-    "importer": 15,
-    "quality_scan": 60,
-    "discovery": 360,
-    "agenda": 720,
-}
 LABELS = {
     "importer": "Importar descargas",
     "quality_scan": "Analizar calidad",
@@ -40,13 +33,6 @@ LABELS = {
 
 def _now() -> datetime:
     return datetime.now()
-
-
-def _parse(value: str | None) -> datetime | None:
-    try:
-        return datetime.fromisoformat(value) if value else None
-    except ValueError:
-        return None
 
 
 def _default_conditions() -> dict[str, Callable[[], bool]]:
@@ -82,8 +68,7 @@ class PeriodicRunner:
         return AppSettingsRepository(self.db_factory())
 
     def intervals(self) -> dict[str, int]:
-        saved = self._settings().get(INTERVALS_KEY) or {}
-        return {name: int(saved.get(name, default)) for name, default in DEFAULT_INTERVALS.items()
+        return {name: minutes for name, minutes in task_runs.intervals(self.db_factory()).items()
                 if name in self.jobs.factories}
 
     def set_intervals(self, values: dict[str, int]) -> dict[str, int]:
@@ -96,14 +81,11 @@ class PeriodicRunner:
         return current
 
     def last_runs(self) -> dict[str, datetime | None]:
-        saved = self._settings().get(LAST_RUN_KEY) or {}
-        return {name: _parse(saved.get(name)) for name in DEFAULT_INTERVALS}
+        saved = task_runs.last_runs(self.db_factory())
+        return {name: saved.get(name) for name in DEFAULT_INTERVALS}
 
     def _record_run(self, name: str, when: datetime) -> None:
-        settings = self._settings()
-        saved = settings.get(LAST_RUN_KEY) or {}
-        saved[name] = when.isoformat(timespec="seconds")
-        settings.set(LAST_RUN_KEY, saved)
+        task_runs.record_run(self.db_factory(), name, when)
 
     def next_runs(self) -> dict[str, datetime | None]:
         last = self.last_runs()
@@ -161,10 +143,7 @@ class PeriodicRunner:
         if not (isinstance(job, dict) and job.get("name") in DEFAULT_INTERVALS and job.get("started_at")):
             return
         try:
-            started = datetime.fromisoformat(job["started_at"])
-            previous = self.last_runs().get(job["name"])
-            if previous is None or started > previous:
-                self._record_run(job["name"], started)
+            self._record_run(job["name"], datetime.fromisoformat(job["started_at"]))
         except Exception:
             pass
 

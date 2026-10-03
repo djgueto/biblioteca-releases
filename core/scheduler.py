@@ -1,6 +1,6 @@
 import time
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import re
 
@@ -34,6 +34,7 @@ from core.services.quality_profile import TIERS, tier_of
 from core.repositories.item_quality_repository import ItemQualityRepository
 from core.repositories.grab_history_repository import GrabHistoryRepository
 from core.repositories.provider_search_log import ProviderSearchLog
+from core.jobs import task_runs
 from core.jobs.cycle_lock import CycleLock
 from core.library.quality_scan import MediaInfoUnavailable, measure_episodes, measure_items
 from config.settings import Settings
@@ -48,8 +49,11 @@ class Scheduler(BackgroundJob):
 
     name = "scheduler"
 
-    def __init__(self, event_bus=None):
+    def __init__(self, event_bus=None, *, wait_for_interval=False):
         super().__init__(event_bus)
+        # Arranque automático: si el último ciclo completo fue hace menos de
+        # CHECK_INTERVAL_HOURS, se espera lo que falte en vez de repetirlo.
+        self.wait_for_interval = wait_for_interval
         self.logger = logging.getLogger(__name__)
         self.db = DatabaseManager()
         self.series_repository = SeriesRepository(self.db)
@@ -94,6 +98,8 @@ class Scheduler(BackgroundJob):
     def run(self):
         """Ejecutar ciclo principal"""
         self.logger.info("Scheduler iniciado")
+        if self.wait_for_interval:
+            self._wait_until_due()
         while self.running:
             if not self.cycle_lock.acquire():
                 # Otro proceso (la web o la app de escritorio) ya está en un
@@ -133,9 +139,22 @@ class Scheduler(BackgroundJob):
                     time.sleep(1)
         
         self.logger.info("Scheduler detenido correctamente")
-    
+
+    def _wait_until_due(self):
+        last = task_runs.last_runs(self.db).get(self.name)
+        if last is None:
+            return
+        due = last + timedelta(hours=Settings.CHECK_INTERVAL_HOURS)
+        if due <= datetime.now():
+            return
+        self._log(f"⏰ Último ciclo completo: {last:%d/%m %H:%M}. Próximo ciclo: {due:%d/%m %H:%M}")
+        self._progress(0, f"Próximo ciclo: {due:%d/%m %H:%M}")
+        while self.running and datetime.now() < due:
+            time.sleep(1)
+
     def execute_cycle(self):
         """Ejecutar un ciclo completo"""
+        cycle_started = datetime.now()
         self._log("=" * 60)
         self._log(f"🚀 INICIO CICLO - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         self._log("=" * 60)
@@ -281,7 +300,8 @@ class Scheduler(BackgroundJob):
             self._progress(100, "✅ Ciclo completado")
             self._log("✅ CICLO COMPLETADO CON ÉXITO")
             self._log("=" * 60)
-            
+            self._record_task(self.name, cycle_started)
+
             self._finished()
             
         except Exception as e:
@@ -663,6 +683,7 @@ class Scheduler(BackgroundJob):
             if not service.settings.enabled:
                 return
             self._log("📥 Importando descargas terminadas a la biblioteca...")
+            self._record_task("importer")
             result = service.run()
             self._log(f"   ✅ Importación: {result['imported']} nuevos, {result['upgraded']} mejoras, "
                       f"{result['skipped']} omitidos")
@@ -670,10 +691,30 @@ class Scheduler(BackgroundJob):
             self.logger.error(f"Error importando descargas: {e}", exc_info=True)
             self._log(f"   ⚠️ Error importando descargas: {e}")
 
+    def _record_task(self, name, when=None):
+        """Las tareas programadas de la web se reprograman desde aquí: no
+        repiten lo que el ciclo acaba de hacer."""
+        try:
+            task_runs.record_run(self.db, name, when or datetime.now())
+        except Exception as e:
+            self.logger.warning(f"No se pudo guardar la última ejecución de {name}: {e}")
+
+    def _skip_if_recent(self, name, label):
+        try:
+            recent = task_runs.ran_recently(self.db, name)
+        except Exception:
+            recent = False
+        if recent:
+            self._log(f"   ⏭️ {label}: ya se hizo hace poco")
+        return recent
+
     def update_agenda(self):
+        if self._skip_if_recent("agenda", "Calendario"):
+            return
         try:
             from core.agenda.service import AgendaService
 
+            self._record_task("agenda")
             result = AgendaService(self.db).rebuild()
             self._log(f"   ✅ Calendario: {result['episodes']} episodios de {result['series']} series en emisión")
         except Exception as e:
@@ -681,9 +722,12 @@ class Scheduler(BackgroundJob):
             self._log(f"   ⚠️ Error actualizando el calendario: {e}")
 
     def run_discovery(self):
+        if self._skip_if_recent("discovery", "Novedades"):
+            return
         try:
             from core.discovery.service import DiscoveryService
 
+            self._record_task("discovery")
             DiscoveryService(self.db, log=self._log).run()
         except Exception as e:
             # Las novedades nunca deben tumbar el ciclo de la biblioteca.
@@ -711,8 +755,8 @@ class Scheduler(BackgroundJob):
             if not self.running:
                 return
             item = dict(row)
-            if self.grab_history_repository.recently_grabbed_item(item["id"], Settings.GRAB_RETRY_DAYS):
-                continue  # ya enviada: esperando a que el cliente la descargue
+            if self.grab_history_repository.movie_blocked(item, Settings.GRAB_RETRY_DAYS):
+                continue  # ya enviada o esperando en descargas
             for provider in movie_providers:
                 if self.source_offer_repository.get(item["id"], provider.name):
                     continue
