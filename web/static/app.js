@@ -204,7 +204,7 @@ function SeriesDetail({ id, tick, toast }) {
   const local = it.seasons.reduce((n, s) => n + s.local.length, 0);
   const missing = it.seasons.reduce((n, s) => n + s.missing.length, 0);
   const best = Math.max(it.file_quality?.resolution_height || 0, ...it.seasons.flatMap((s) => s.local.map((e) => e.resolution_height || 0)));
-  const cover = it.cover_url ? `/api/series/${it.id}/cover` : null;
+  const cover = it.has_cover ? `/api/series/${it.id}/cover` : null;
   const bestOffer = it.offers.filter((o) => o.available).sort((a, b) => (b.resolution || 0) - (a.resolution || 0))[0];
   const toggleMonitored = async () => {
     setBusy(true);

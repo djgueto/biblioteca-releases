@@ -144,6 +144,15 @@ class TestWebApi(unittest.TestCase):
         self.assertEqual(detail["cover_url"], "https://www.hispashare.org/images/titles/77/cover.jpg")
         self.assertEqual(self.client.get("/api/series/999").status_code, 404)
 
+    def test_detail_and_list_agree_on_cover(self):
+        # Película con TMDB pero sin Hispashare: la lista y la ficha deben
+        # mostrar la carátula (el servidor sirve el cartel de TMDB).
+        self.client.get("/api/library")
+        sqlite3.connect(self.db_path).execute("UPDATE series SET tmdb_id = 55 WHERE id = 2").connection.commit()
+        detail = self.client.get("/api/series/2").json()
+        self.assertTrue(detail["has_cover"])
+        self.assertEqual(detail["cover_url"], "")
+
     def test_toggle_monitored_invalidates_library(self):
         self.client.get("/api/library")
         r = self.client.put("/api/series/1/monitored", json={"monitored": False})
