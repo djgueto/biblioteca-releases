@@ -682,7 +682,7 @@ function System() {
 
 // ---------------------------------------------------------------- settings
 function Settings({ toast }) {
-  return html`<${GeneralSettings} toast=${toast} /><${QualitySettings} toast=${toast} /><${DiscoverySettingsPanel} toast=${toast} />`;
+  return html`<${GeneralSettings} toast=${toast} /><${QualitySettings} toast=${toast} /><${DiscoverySettingsPanel} toast=${toast} /><${ImportSettingsPanel} toast=${toast} />`;
 }
 
 function GeneralSettings({ toast }) {
@@ -732,6 +732,61 @@ function GeneralSettings({ toast }) {
       </div>
       <div class="actions" style="margin-top:14px">
         <button class="btn primary" disabled=${!dirty || saving} onClick=${save}>${saving ? 'Comprobando…' : 'Guardar'}</button>
+      </div>
+    </div>`;
+}
+
+function ImportSettingsPanel({ toast }) {
+  const { data, reload } = useFetch('/api/settings/import');
+  const [form, setForm] = useState(null);
+  useEffect(() => { if (data) setForm({ ...data, source_text: (data.source_dirs || []).join('\n') }); }, [data]);
+  if (!form) return null;
+  const set = (k) => (e) => setForm({ ...form, [k]: e.target.type === 'checkbox' ? e.target.checked : e.target.value });
+  const body = () => ({
+    enabled: form.enabled, mode: form.mode, recycle_dir: form.recycle_dir.trim(),
+    min_age_minutes: Number(form.min_age_minutes),
+    source_dirs: form.source_text.split('\n').map((d) => d.trim()).filter(Boolean),
+  });
+  const dirty = data && JSON.stringify(body()) !== JSON.stringify({
+    enabled: data.enabled, mode: data.mode, recycle_dir: data.recycle_dir, min_age_minutes: data.min_age_minutes,
+    source_dirs: data.source_dirs });
+  const save = async () => {
+    try { await api.put('/api/settings/import', body()); toast('Ajustes de importación guardados'); reload(); }
+    catch (e) { toast('Error: ' + e.message); }
+  };
+  return html`
+    <div class="section">
+      <h3>Importación a la biblioteca</h3>
+      <p class="dim" style="margin:-4px 0 14px; max-width:760px">
+        Cuando una descarga termina, la coloca en su serie o película con el nombre de tu biblioteca
+        (<span class="mono">Serie/Season 01/Serie S01E05 - Título</span>, <span class="mono">Película (Año)</span>).
+        Solo toca lo que la app pidió o necesita. Déjalo desactivado si las descargas pasan antes por otro programa.
+      </p>
+      <div class="panel form">
+        <label class="check"><input type="checkbox" checked=${form.enabled} onChange=${set('enabled')} /> Importar automáticamente lo descargado</label>
+        <label class="field"><span>Carpetas donde terminan las descargas (una por línea)</span>
+          <textarea class="input mono" rows="3" value=${form.source_text} onInput=${set('source_text')} placeholder="F:/temp transmission"></textarea>
+          <small class="faint">La de Transmission y, si quieres, la carpeta "Incoming" de aMule. La carpeta vigilada de torrents se ignora.</small>
+        </label>
+        <div class="form-row">
+          <label class="field"><span>Al importar</span>
+            <select class="select" value=${form.mode} onChange=${set('mode')}>
+              <option value="copy">Copiar (el original sigue compartiéndose)</option>
+              <option value="move">Mover (libera espacio, deja de compartirse)</option>
+            </select>
+          </label>
+          <label class="field"><span>Descarga terminada si no cambia en (minutos)</span>
+            <input class="input" type="number" min="1" value=${form.min_age_minutes} onInput=${set('min_age_minutes')} />
+          </label>
+        </div>
+        <label class="field"><span>Carpeta para los archivos sustituidos por una mejora</span>
+          <input class="input mono" value=${form.recycle_dir} onInput=${set('recycle_dir')} placeholder="F:/temp transmission/_reemplazados" />
+          <small class="faint">El archivo de peor calidad nunca se borra: se mueve aquí. Sin carpeta, las mejoras no se importan.</small>
+        </label>
+      </div>
+      <div class="actions" style="margin-top:14px">
+        <button class="btn primary" disabled=${!dirty} onClick=${save}>Guardar</button>
+        <button class="btn" onClick=${() => api.post('/api/jobs/importer/start').then(() => go('activity'), (e) => toast(e.message))}>Importar ahora</button>
       </div>
     </div>`;
 }

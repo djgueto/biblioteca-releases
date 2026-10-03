@@ -30,6 +30,7 @@ from core.discovery.repository import WantedRepository
 from core.discovery.rules import APPROVED, DISMISSED, EXPIRED, IN_LIBRARY, REJECTED, WAITING, DiscoverySettings
 from core.discovery.service import DiscoveryService
 from core.download_clients import ED2K, TORRENT, build_download_dispatcher
+from core.importer.service import ImportSettings
 from core.library.parser import mediainfo_available
 from core.library.quality_scan import coverage as quality_coverage
 from core.library.roots import LibraryRoots, sync_library_roots
@@ -399,6 +400,32 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
             raise HTTPException(422, "Ajustes de novedades no válidos")
         settings.save(DatabaseManager())
         return get_discovery_settings()
+
+    @app.get("/api/settings/import")
+    def get_import_settings():
+        return ImportSettings.load(DatabaseManager()).to_dict()
+
+    @app.put("/api/settings/import")
+    def put_import_settings(body: dict):
+        current = ImportSettings.load(DatabaseManager()).to_dict()
+        unknown = set(body) - set(current)
+        if unknown:
+            raise HTTPException(422, f"Ajustes desconocidos: {', '.join(sorted(unknown))}")
+        merged = {**current, **body}
+        if merged["mode"] not in ("copy", "move"):
+            raise HTTPException(422, "El modo debe ser copiar o mover")
+        merged["source_dirs"] = [d.strip() for d in merged.get("source_dirs") or [] if d and d.strip()]
+        if merged["enabled"] and not merged["source_dirs"]:
+            raise HTTPException(422, "Indica al menos una carpeta de descargas")
+        missing = [d for d in merged["source_dirs"] if not Path(d).is_dir()]
+        if missing:
+            raise HTTPException(422, f"No existe la carpeta: {missing[0]}")
+        try:
+            merged["min_age_minutes"] = max(1, int(merged["min_age_minutes"]))
+        except (TypeError, ValueError):
+            raise HTTPException(422, "Minutos sin cambios no válidos")
+        ImportSettings(**merged).save(DatabaseManager())
+        return get_import_settings()
 
     @app.get("/api/settings/quality")
     def get_quality_profile():

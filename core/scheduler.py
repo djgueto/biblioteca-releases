@@ -157,6 +157,10 @@ class Scheduler(BackgroundJob):
             orphan_count = self.db.cleanup_orphaned_missing_episodes()
             self._log(f"   ✅ {orphan_count} episodios huérfanos eliminados")
 
+            # 2.2. Importar lo descargado (si está activado): justo antes de
+            # escanear, para que lo importado se vea en este mismo ciclo.
+            self.run_import()
+
             # 3. Escanear biblioteca
             self._progress(25, "📁 Escaneando biblioteca...")
             self._log("📁 Escaneando biblioteca local...")
@@ -635,6 +639,21 @@ class Scheduler(BackgroundJob):
             content_mode='single_file',
             label_prefix=_prefix,
         )
+
+    def run_import(self):
+        try:
+            from core.importer.service import ImportService
+
+            service = ImportService(self.db, log=self._log)
+            if not service.settings.enabled:
+                return
+            self._log("📥 Importando descargas terminadas a la biblioteca...")
+            result = service.run()
+            self._log(f"   ✅ Importación: {result['imported']} nuevos, {result['upgraded']} mejoras, "
+                      f"{result['skipped']} omitidos")
+        except Exception as e:
+            self.logger.error(f"Error importando descargas: {e}", exc_info=True)
+            self._log(f"   ⚠️ Error importando descargas: {e}")
 
     def update_agenda(self):
         try:

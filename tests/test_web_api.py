@@ -261,6 +261,18 @@ class TestWebApi(unittest.TestCase):
         with patch("web.app.get_cover_bytes", side_effect=lambda sid, url: None if "tmdb" in url else b"h"):
             self.assertEqual(self.client.get("/api/series/1/cover").content, b"h")  # respaldo Hispashare
 
+    def test_import_settings(self):
+        data = self.client.get("/api/settings/import").json()
+        self.assertFalse(data["enabled"])  # desactivada por defecto
+        downloads = os.path.join(self.tmp.name, "descargas")
+        os.makedirs(downloads)
+        self.assertEqual(self.client.put("/api/settings/import", json={"enabled": True, "source_dirs": []}).status_code, 422)
+        self.assertEqual(self.client.put("/api/settings/import", json={"source_dirs": ["/no/existe"]}).status_code, 422)
+        self.assertEqual(self.client.put("/api/settings/import", json={"mode": "borrar"}).status_code, 422)
+        r = self.client.put("/api/settings/import", json={"enabled": True, "source_dirs": [downloads, " "], "mode": "move"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual((r.json()["source_dirs"], r.json()["mode"]), ([downloads], "move"))
+
     def test_spa_fallback_and_static(self):
         self.assertIn("app.js", self.client.get("/series/1").text)
         self.assertEqual(self.client.get("/static/vendor/preact-htm.module.js").status_code, 200)
