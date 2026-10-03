@@ -172,8 +172,8 @@ class Settings:
         return cls.get_categories_by_mode('episodic')
 
     @classmethod
-    def get_paths_for_category(cls, category):
-        """Obtener todas las rutas configuradas para una categoría."""
+    def _configured_paths(cls, category):
+        """Rutas tal como están en el .env: (ruta, es_principal)."""
         config = cls.LIBRARY_CATEGORIES.get(category)
         if not config:
             return []
@@ -183,19 +183,60 @@ class Settings:
         paths = []
 
         if primary_value and primary_value.strip():
-            paths.append(primary_value.strip())
+            paths.append((primary_value.strip(), True))
 
         if additional_value and additional_value.strip():
             paths.extend(
-                path.strip()
+                (path.strip(), False)
                 for path in additional_value.split(';')
                 if path.strip()
             )
+        return paths
 
+    @staticmethod
+    def _path_key(path):
+        return path.replace('\\', '/').rstrip('/').lower()
+
+    @classmethod
+    def get_path_owner(cls, path):
+        """Biblioteca a la que pertenece una carpeta configurada en varias.
+
+        Si la misma carpeta está en dos bibliotecas, cada escaneo le
+        cambiaba la categoría al anterior (p. ej. "DOCUMENTALES (series)"
+        en Documentales y en Documentales Series acababa emparejada con
+        películas de TMDB). Gana la biblioteca donde es la ruta principal;
+        si no, la primera en LIBRARY_CATEGORIES.
+        """
+        key = cls._path_key(path)
+        owner = None
+        for category in cls.LIBRARY_CATEGORIES:
+            for configured, is_primary in cls._configured_paths(category):
+                if cls._path_key(configured) != key:
+                    continue
+                if is_primary:
+                    return category
+                owner = owner or category
+        return owner
+
+    @classmethod
+    def get_duplicated_paths(cls):
+        """{ruta: [categorías]} de las carpetas configuradas en más de una biblioteca."""
+        seen = {}
+        for category in cls.LIBRARY_CATEGORIES:
+            for path, _ in cls._configured_paths(category):
+                cats = seen.setdefault(cls._path_key(path), (path, []))[1]
+                if category not in cats:
+                    cats.append(category)
+        return {path: cats for path, cats in seen.values() if len(cats) > 1}
+
+    @classmethod
+    def get_paths_for_category(cls, category):
+        """Obtener todas las rutas configuradas para una categoría."""
         unique_paths = []
-        for path in paths:
-            if path not in unique_paths:
-                unique_paths.append(path)
+        for path, _ in cls._configured_paths(category):
+            if path in unique_paths or cls.get_path_owner(path) != category:
+                continue
+            unique_paths.append(path)
 
         return unique_paths
 
@@ -351,7 +392,13 @@ class Settings:
         )
         if not episodic_paths:
             errors.append("No hay rutas episódicas configuradas (series, dibujos o documentales series)")
-            
+
+        for path, categories in cls.get_duplicated_paths().items():
+            owner = cls.get_path_owner(path)
+            labels = ", ".join(cls.get_category_label(c) for c in categories)
+            errors.append(f"La carpeta {path} está en varias bibliotecas ({labels}); "
+                          f"solo se usa en {cls.get_category_label(owner)}")
+
         return errors
     
     @classmethod
