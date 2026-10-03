@@ -63,10 +63,23 @@ class GeneralSettingsUpdate(BaseModel):
     dontorrent_enabled: bool | None = None
     dontorrent_url: str | None = None
     torrent_watch_dir: str | None = None
+    autostart_scheduler: bool | None = None
 
 
 class HispashareUrlUpdate(BaseModel):
     url: str | None = None
+
+
+def autostart_enabled() -> bool:
+    """¿Arrancar el ciclo automático al iniciar la web? Ajuste de la web
+    (activado por defecto); WEB_SCHEDULER_AUTOSTART en el entorno manda si
+    está definido (Docker)."""
+    env = os.getenv("WEB_SCHEDULER_AUTOSTART")
+    if env is not None:
+        return env.lower() == "true"
+    from core.repositories.app_settings_repository import AppSettingsRepository
+
+    return bool(AppSettingsRepository(DatabaseManager()).get("autostart_scheduler", True))
 
 
 def _mask(secret: str) -> str:
@@ -140,11 +153,11 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
             db = DatabaseManager()
             db.initialize_database()
             sync_library_roots(db)
-        if os.getenv("WEB_SCHEDULER_AUTOSTART", "false").lower() == "true":
+        if init_db and autostart_enabled():
             if LibraryRepository(DatabaseManager()).path_health()["ok"]:
                 jobs.start("scheduler")
             else:
-                logger.error("WEB_SCHEDULER_AUTOSTART ignorado: las rutas de la BD no coinciden con las configuradas")
+                logger.error("Arranque automático del ciclo omitido: las rutas de la BD no coinciden con las configuradas")
         yield
         await asyncio.to_thread(jobs.stop_all)
 
@@ -284,6 +297,7 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
             "dontorrent_enabled": Settings.DONTORRENT_ENABLED,
             "dontorrent_url": Settings.DONTORRENT_URL,
             "torrent_watch_dir": Settings.get_torrent_watch_dir(),
+            "autostart_scheduler": autostart_enabled(),
         }
 
     @app.put("/api/settings/general")
@@ -310,6 +324,10 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
             values["DONTORRENT_URL"] = url
         if body.torrent_watch_dir is not None:
             values["TORRENT_WATCH_DIR"] = body.torrent_watch_dir.strip()
+        if body.autostart_scheduler is not None:
+            from core.repositories.app_settings_repository import AppSettingsRepository
+
+            AppSettingsRepository(DatabaseManager()).set("autostart_scheduler", body.autostart_scheduler)
         if values:
             Settings.update_env(values)
         return get_general_settings()

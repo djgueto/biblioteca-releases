@@ -34,6 +34,7 @@ from core.services.quality_profile import TIERS, tier_of
 from core.repositories.item_quality_repository import ItemQualityRepository
 from core.repositories.grab_history_repository import GrabHistoryRepository
 from core.repositories.provider_search_log import ProviderSearchLog
+from core.jobs.cycle_lock import CycleLock
 from core.library.quality_scan import MediaInfoUnavailable, measure_episodes, measure_items
 from config.settings import Settings
 
@@ -58,6 +59,7 @@ class Scheduler(BackgroundJob):
         self.item_quality_repository = ItemQualityRepository(self.db)
         self.grab_history_repository = GrabHistoryRepository(self.db)
         self.provider_search_log = ProviderSearchLog(self.db)
+        self.cycle_lock = CycleLock(self.db)
         self.missing_episodes_service = MissingEpisodesService(
             self.db,
             self.series_repository,
@@ -93,8 +95,21 @@ class Scheduler(BackgroundJob):
         """Ejecutar ciclo principal"""
         self.logger.info("Scheduler iniciado")
         while self.running:
+            if not self.cycle_lock.acquire():
+                # Otro proceso (la web o la app de escritorio) ya está en un
+                # ciclo sobre la misma base de datos: se espera a que acabe.
+                self._log(f"⏸️ Ya hay un ciclo en marcha en otro proceso ({self.cycle_lock.holder()}); "
+                          f"se vuelve a intentar en 10 minutos")
+                for _ in range(600):
+                    if not self.running:
+                        break
+                    time.sleep(1)
+                continue
             try:
-                self.execute_cycle()
+                try:
+                    self.execute_cycle()
+                finally:
+                    self.cycle_lock.release()
                 
                 # Esperar intervalo configurado
                 hours = Settings.CHECK_INTERVAL_HOURS
@@ -1206,6 +1221,24 @@ class Scheduler(BackgroundJob):
             self._log(f"   ❌ Error en barrido de contenido: {str(e)}")
             # No relanzar la excepción para no interrumpir el ciclo completo
             pass
+
+    def _log(self, message: str):
+        super()._log(message)
+        self._beat()
+
+    def _progress(self, percent: int, message: str):
+        super()._progress(percent, message)
+        self._beat()
+
+    def _beat(self):
+        """Señal de vida del bloqueo de ciclo (cada log/progreso del ciclo)."""
+        lock = getattr(self, "cycle_lock", None)
+        if lock is None:
+            return
+        try:
+            lock.heartbeat()
+        except Exception:
+            pass  # nunca tumbar el ciclo por la señal de vida
 
     def stop(self):
         """Detener el scheduler"""

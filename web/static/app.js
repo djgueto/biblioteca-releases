@@ -720,6 +720,7 @@ function GeneralSettings({ toast }) {
     <div class="section">
       <h3>Fuentes y descargas</h3>
       <div class="panel form">
+        <label class="check"><input type="checkbox" checked=${form.autostart_scheduler} onChange=${set('autostart_scheduler')} /> Iniciar el ciclo automático al arrancar la web</label>
         <label class="check"><input type="checkbox" checked=${form.wolfmax_enabled} onChange=${set('wolfmax_enabled')} /> Wolfmax4k</label>
         <label class="check"><input type="checkbox" checked=${form.dontorrent_enabled} onChange=${set('dontorrent_enabled')} /> DonTorrent</label>
         <label class="field"><span>Dirección de DonTorrent</span>

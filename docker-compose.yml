@@ -26,7 +26,6 @@ services:
     shm_size: "1gb"          # Chromium necesita más /dev/shm que los 64 MB por defecto
     environment:
       TZ: Europe/Madrid
-      WEB_SCHEDULER_AUTOSTART: "false"
       # Mismas bibliotecas y en el mismo orden que el .env de Windows
       # (Y: = NAS .100, Z: = NAS .101):
       SERIES_PATH: /media/nas101/SERIES
