@@ -40,6 +40,7 @@ from core.services.factory import build_domain_services
 from core.services.quality_profile import TIERS, QualityProfile
 from core.tmdb.metadata import TmdbMetadataService, image_url
 from web.jobs import JobAlreadyRunning, JobManager
+from web.periodic import PeriodicRunner
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +145,7 @@ def _serialize_offer(offer) -> dict:
 
 def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -> FastAPI:
     jobs = job_manager or JobManager()
+    periodic = PeriodicRunner(jobs)
     library_cache = _LibraryCache()
     jobs.add_listener(lambda msg: library_cache.invalidate() if msg.get("type") in ("series_updated", "job_finished") else None)
 
@@ -158,7 +160,10 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
                 jobs.start("scheduler")
             else:
                 logger.error("Arranque automático del ciclo omitido: las rutas de la BD no coinciden con las configuradas")
+        if init_db:
+            periodic.start()
         yield
+        periodic.stop()
         await asyncio.to_thread(jobs.stop_all)
 
     app = FastAPI(title="Biblioteca", lifespan=lifespan)
@@ -456,6 +461,29 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
             raise HTTPException(422, "Perfil de calidad no válido")
         QualityProfile(order=body.order, minimum=body.minimum).save(DatabaseManager())
         return get_quality_profile()
+
+    @app.get("/api/tasks")
+    def scheduled_tasks():
+        return {"tasks": periodic.status(), "cycle_interval_hours": Settings.CHECK_INTERVAL_HOURS}
+
+    @app.put("/api/settings/tasks")
+    def put_task_settings(body: dict):
+        intervals = body.get("intervals") or {}
+        try:
+            periodic.set_intervals({k: int(v) for k, v in intervals.items()})
+        except KeyError as e:
+            raise HTTPException(422, f"Tarea desconocida: {e}")
+        except (TypeError, ValueError):
+            raise HTTPException(422, "Intervalo no válido")
+        if body.get("cycle_interval_hours") is not None:
+            try:
+                hours = int(body["cycle_interval_hours"])
+            except (TypeError, ValueError):
+                raise HTTPException(422, "Intervalo del ciclo no válido")
+            if not 1 <= hours <= 168:
+                raise HTTPException(422, "El ciclo debe ser de 1 a 168 horas")
+            Settings.update_env({"CHECK_INTERVAL_HOURS": hours})
+        return scheduled_tasks()
 
     @app.get("/api/health", include_in_schema=False)
     def health():

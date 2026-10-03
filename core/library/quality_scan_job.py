@@ -25,7 +25,8 @@ class QualityScanJob(BackgroundJob):
                     self._report(db, label)
                     if not result["pending"] or not (result["measured"] or result["unreadable"]):
                         break
-            self._log(f"✅ Análisis de calidad: {totals['measured']} analizados, {totals['unreadable']} sin poder leer")
+            if totals["measured"] or totals["unreadable"]:
+                self._log(f"✅ Análisis de calidad: {totals['measured']} analizados, {totals['unreadable']} sin poder leer")
             self._finished(**totals)
         except Exception as e:
             self._error(str(e))

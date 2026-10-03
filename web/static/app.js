@@ -568,7 +568,7 @@ function DiscoverySettingsPanel({ toast }) {
 }
 
 // ---------------------------------------------------------------- activity
-function JobCard({ job, toast }) {
+function JobCard({ job, toast, schedule }) {
   const [busy, setBusy] = useState(false);
   const act = async (verb) => {
     setBusy(true);
@@ -589,12 +589,17 @@ function JobCard({ job, toast }) {
       <div class="bigbar"><span style=${`width:${job.running ? job.percent : 0}%`}></span></div>
       <div class="foot">
         <span>${job.running ? `${job.percent}%` : job.finished_at ? `Última ejecución: ${fmtDate(job.finished_at)}` : 'Sin ejecutar'}</span>
+        ${schedule && (schedule.cycle ? html`<span>Cada ${schedule.cycle} h</span>`
+          : !schedule.enabled ? html`<span>Solo a mano</span>`
+          : html`<span>${everyLabel(schedule.interval_minutes)} · próxima ${schedule.next_run ? schedule.next_run.slice(11, 16) : '—'}</span>`)}
         ${job.last_error && html`<span style="color:var(--bad)" title=${job.last_error}>Con errores</span>`}
       </div>
     </div>`;
 }
 
 function Activity({ live, toast }) {
+  const { data: tasks } = useFetch('/api/tasks', [live.tick, live.jobs.map((j) => j.running).join()]);
+  const schedule = Object.fromEntries((tasks?.tasks || []).map((t) => [t.name, t]));
   const box = useRef(null);
   const stick = useRef(true);
   useEffect(() => {
@@ -602,7 +607,8 @@ function Activity({ live, toast }) {
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   }, [live.logs]);
   return html`
-    <div class="jobs">${live.jobs.map((j) => html`<${JobCard} job=${j} toast=${toast} key=${j.name} />`)}</div>
+    <div class="jobs">${live.jobs.map((j) => html`<${JobCard} job=${j} toast=${toast} key=${j.name}
+      schedule=${j.name === 'scheduler' ? { cycle: tasks?.cycle_interval_hours } : schedule[j.name]} />`)}</div>
     <div class="section">
       <h3>Registro en directo</h3>
       <div class="console" ref=${box} onScroll=${(e) => { const el = e.target; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}>
@@ -682,7 +688,7 @@ function System() {
 
 // ---------------------------------------------------------------- settings
 function Settings({ toast }) {
-  return html`<${GeneralSettings} toast=${toast} /><${QualitySettings} toast=${toast} /><${DiscoverySettingsPanel} toast=${toast} /><${ImportSettingsPanel} toast=${toast} />`;
+  return html`<${GeneralSettings} toast=${toast} /><${QualitySettings} toast=${toast} /><${DiscoverySettingsPanel} toast=${toast} /><${ImportSettingsPanel} toast=${toast} /><${TaskSettings} toast=${toast} />`;
 }
 
 function GeneralSettings({ toast }) {
@@ -789,6 +795,45 @@ function ImportSettingsPanel({ toast }) {
         <button class="btn primary" disabled=${!dirty} onClick=${save}>Guardar</button>
         <button class="btn" onClick=${() => api.post('/api/jobs/importer/start').then(() => go('activity'), (e) => toast(e.message))}>Importar ahora</button>
       </div>
+    </div>`;
+}
+
+const INTERVAL_OPTIONS = [[0, 'Nunca (solo a mano)'], [5, 'Cada 5 min'], [15, 'Cada 15 min'], [30, 'Cada 30 min'],
+  [60, 'Cada hora'], [180, 'Cada 3 h'], [360, 'Cada 6 h'], [720, 'Cada 12 h'], [1440, 'Cada día']];
+const everyLabel = (m) => (INTERVAL_OPTIONS.find(([v]) => v === m) || [0, `Cada ${m} min`])[1];
+
+function TaskSettings({ toast }) {
+  const { data, reload } = useFetch('/api/tasks');
+  const [form, setForm] = useState(null);
+  useEffect(() => { if (data) setForm({ cycle: data.cycle_interval_hours, intervals: Object.fromEntries(data.tasks.map((t) => [t.name, t.interval_minutes])) }); }, [data]);
+  if (!form) return null;
+  const dirty = data && (form.cycle !== data.cycle_interval_hours || data.tasks.some((t) => form.intervals[t.name] !== t.interval_minutes));
+  const save = async () => {
+    try { await api.put('/api/settings/tasks', { intervals: form.intervals, cycle_interval_hours: Number(form.cycle) }); toast('Tareas programadas guardadas'); reload(); }
+    catch (e) { toast('Error: ' + e.message); }
+  };
+  return html`
+    <div class="section">
+      <h3>Tareas programadas</h3>
+      <p class="dim" style="margin:-4px 0 14px; max-width:760px">Cada tarea se ejecuta sola con su propio ritmo, además de dentro del ciclo completo.</p>
+      <div class="panel form">
+        <label class="field"><span>Ciclo completo (buscar y descargar en todas las fuentes)</span>
+          <select class="select" value=${form.cycle} onChange=${(e) => setForm({ ...form, cycle: Number(e.target.value) })}>
+            ${[1, 2, 3, 4, 6, 8, 12, 24].map((h) => html`<option value=${h}>Cada ${h} h</option>`)}
+          </select>
+          <small class="faint">Es lo que más peticiones hace a las webs: no conviene bajarlo mucho.</small>
+        </label>
+        <div class="form-row">
+          ${data.tasks.map((t) => html`
+            <label class="field"><span>${t.label}</span>
+              <select class="select" value=${form.intervals[t.name]} onChange=${(e) => setForm({ ...form, intervals: { ...form.intervals, [t.name]: Number(e.target.value) } })}>
+                ${INTERVAL_OPTIONS.map(([v, l]) => html`<option value=${v}>${l}</option>`)}
+              </select>
+              ${!t.enabled && t.interval_minutes > 0 && html`<small class="faint">Su interruptor está apagado: no se ejecuta.</small>`}
+            </label>`)}
+        </div>
+      </div>
+      <div class="actions" style="margin-top:14px"><button class="btn primary" disabled=${!dirty} onClick=${save}>Guardar</button></div>
     </div>`;
 }
 
