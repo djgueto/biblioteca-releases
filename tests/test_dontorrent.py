@@ -247,6 +247,20 @@ class TestProvider(unittest.TestCase):
         self.assertEqual(offer.quality.resolution_height, 720)
         self.assertIsNone(provider.resolve_download(self.item, offer))
 
+    def test_upgrades_only_episodes_below_the_page_quality(self):
+        conn = self.db.get_connection()
+        conn.execute("DELETE FROM missing_episodes")
+        conn.executemany(
+            "INSERT INTO local_episodes (series_id, season, episode, filename, file_path, resolution_height, codec, "
+            "quality_source) VALUES (1, 4, ?, 'f', ?, ?, 'x264', ?)",
+            [(1, "/e1", 480, "mediainfo"), (2, "/e2", 720, "mediainfo"), (3, "/e3", 480, "filename")])
+        conn.commit()
+        handle = self._provider().resolve_download(self.item, None, missing_only=False)
+        # Página 720p: mejora el 1 (SD medido). El 2 ya es 720p y el 3 no está
+        # medido con MediaInfo: no se tocan.
+        self.assertEqual([c.args[0] for c in self.client.fetch_torrent.call_args_list], [21])
+        self.assertEqual(len(handle.payload["grabbed"]), 1)
+
     def test_series_missing_without_offer(self):
         repo = SourceOfferRepository(self.db)
         self.assertEqual([s["id"] for s in repo.series_missing_without_offer("dontorrent", ["series"])], [1])
@@ -256,3 +270,60 @@ class TestProvider(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMovies(unittest.TestCase):
+    def setUp(self):
+        from core.dontorrent.client import MoviePage
+
+        self.db = DatabaseManager(":memory:")
+        self.db.initialize_database()
+        self.db.get_connection().execute(
+            "INSERT INTO series (id, name, folder_path, content_category, tmdb_name, year) "
+            "VALUES (7, 'dune', '/m/Dune.mkv', 'movies', 'Dune', 2021)")
+        self.client = MagicMock()
+        self.client.search.return_value = [
+            SearchResult("u-1984-4k", "pelicula", "Dune", None, "4K", quality_from_label("4K")),
+            SearchResult("u-2021-1080", "pelicula", "Dune", None, "BDremux-1080p", quality_from_label("BDremux-1080p")),
+            SearchResult("u-serie", "serie", "Dune", 1, "HDTV", quality_from_label("HDTV")),
+        ]
+        pages = {"u-1984-4k": MoviePage(1984, "4K", 501, "peliculas"),
+                 "u-2021-1080": MoviePage(2021, "BDremux-1080p", 502, "peliculas")}
+        self.client.movie.side_effect = lambda url: pages[url]
+        self.client.fetch_torrent.side_effect = lambda cid, tabla: (f"{cid}.torrent", TORRENT_BYTES)
+        self.dispatcher = MagicMock()
+        self.dispatcher.can_handle.return_value = True
+        self.dispatcher.grab.side_effect = lambda r: f"/watch/{r.filename}"
+        self.item = {"id": 7, "name": "dune", "tmdb_name": "Dune", "year": 2021, "content_category": "movies"}
+
+    def tearDown(self):
+        self.db.close()
+
+    def _provider(self):
+        return DontorrentSourceProvider(self.db, self.dispatcher, self.client)
+
+    def test_movie_offer_checks_year(self):
+        offer = self._provider().find_candidate(self.item, content_mode="single_file")
+        # El 4K es la de 1984: se descarta aunque sea mejor calidad.
+        self.assertEqual((offer.source_url, offer.quality.resolution_height), ("u-2021-1080", 1080))
+
+    def test_download_movie_once(self):
+        provider = self._provider()
+        offer = provider.find_candidate(self.item, content_mode="single_file")
+        handle = provider.resolve_download(self.item, offer, missing_only=True)
+        self.assertEqual(handle.payload["grabbed"], ["/watch/502.torrent"])
+        self.assertTrue(GrabHistoryRepository(self.db).recently_grabbed_item(7, 7))
+        self.assertIsNone(self._provider().resolve_download(self.item, offer, missing_only=True))
+
+    def test_movie_upgrade_only_if_better_than_measured_file(self):
+        from core.repositories.item_quality_repository import ItemQualityRepository
+
+        repo = ItemQualityRepository(self.db)
+        repo.save(7, "/m/Dune.mkv", file_path=None, quality={"resolution_height": 1080, "codec": "x264", "hdr": "sdr"},
+                  source="mediainfo")
+        provider = self._provider()
+        offer = provider.find_candidate(self.item, content_mode="single_file")  # BDremux-1080p, códec desconocido
+        self.assertIsNone(provider.resolve_download(self.item, offer, missing_only=False))
+        repo.save(7, "/m/Dune.mkv", file_path=None, quality={"resolution_height": 720, "codec": "x264", "hdr": "sdr"},
+                  source="mediainfo")
+        self.assertIsNotNone(provider.resolve_download(self.item, offer, missing_only=False))

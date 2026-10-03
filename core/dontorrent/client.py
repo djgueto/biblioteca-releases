@@ -150,6 +150,37 @@ def parse_episode_links(html: str) -> list[EpisodeLink]:
     return links
 
 
+@dataclass(frozen=True)
+class MoviePage:
+    year: int | None
+    format_label: str
+    content_id: int
+    tabla: str
+
+
+_YEAR_RE = re.compile(r"A[ñn]o:?\s*((?:19|20)\d{2})")
+_FORMAT_RE = re.compile(r"Formato:\s*(\S+)")
+
+
+def parse_movie_page(html: str) -> MoviePage | None:
+    """Ficha de película: año (en el título "Descargar X Año 2026 Torrent"),
+    formato ("BluRay-1080p", "4K"...) y el botón de descarga."""
+    soup = BeautifulSoup(html, "html.parser")
+    button = soup.select_one(".protected-download[data-content-id][data-tabla]")
+    if button is None:
+        return None
+    title = soup.title.get_text(" ", strip=True) if soup.title else ""
+    text = " ".join(soup.get_text(" ", strip=True).split())
+    year_match = _YEAR_RE.search(title) or _YEAR_RE.search(text)
+    format_match = _FORMAT_RE.search(text)
+    return MoviePage(
+        year=int(year_match.group(1)) if year_match else None,
+        format_label=format_match.group(1).strip() if format_match else "",
+        content_id=int(button["data-content-id"]),
+        tabla=button["data-tabla"],
+    )
+
+
 def solve_pow(challenge: str, difficulty: int = POW_DIFFICULTY) -> int:
     target = "0" * difficulty
     nonce = 0
@@ -198,6 +229,12 @@ class DontorrentClient:
         response = self.session.get(page_url, timeout=self.timeout)
         response.raise_for_status()
         return parse_episode_links(response.text)
+
+    def movie(self, page_url: str) -> MoviePage | None:
+        self._throttle()
+        response = self.session.get(page_url, timeout=self.timeout)
+        response.raise_for_status()
+        return parse_movie_page(response.text)
 
     def fetch_torrent(self, content_id: int, tabla: str) -> tuple[str, bytes]:
         """Resuelve la prueba de trabajo y descarga el .torrent → (nombre, bytes)."""

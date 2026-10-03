@@ -72,5 +72,22 @@ class TestWolfmaxRelink(unittest.TestCase):
         self.assertEqual(self._searched(), [1, 2, 3])
 
 
+    def test_rotation_for_dontorrent(self):
+        dontorrent = MagicMock()
+        dontorrent.find_candidate.side_effect = lambda item, content_mode: SourceOffer(
+            "dontorrent", f"https://dontorrent.test/pelicula/{item['id']}", quality=Quality(2160))
+        self.scheduler.providers["dontorrent"] = dontorrent
+        self.scheduler.rotate_provider_searches("dontorrent", limit=10)
+        searched = [c.args[0]["id"] for c in dontorrent.find_candidate.call_args_list]
+        # Sin "caducados" (eso es de Wolfmax): faltantes y por debajo de 4K. Tener
+        # enlace de Wolfmax no cuenta como tenerlo de DonTorrent.
+        self.assertEqual(searched, [2, 3])
+        modes = [c.kwargs["content_mode"] for c in dontorrent.find_candidate.call_args_list]
+        self.assertEqual(modes, ["episodic", "single_file"])
+        saved = self.db.get_connection().execute(
+            "SELECT series_id FROM source_offers WHERE provider = 'dontorrent' ORDER BY series_id").fetchall()
+        self.assertEqual([r[0] for r in saved], [2, 3])
+
+
 if __name__ == "__main__":
     unittest.main()
