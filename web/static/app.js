@@ -85,6 +85,7 @@ const ICONS = {
   eye: 'M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z|M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z',
   eyeoff: 'M17.9 17.9A10.7 10.7 0 0 1 12 20c-7 0-11-8-11-8a19.8 19.8 0 0 1 5.1-5.9|M9.9 4.2A10 10 0 0 1 12 4c7 0 11 8 11 8a19.6 19.6 0 0 1-2.2 3.2|M1 1l22 22',
   refresh: 'M21 12a9 9 0 1 1-2.6-6.4L21 8|M21 3v5h-5',
+  calendar: 'M3 6h18v15H3z|M3 10h18|M8 3v4|M16 3v4',
   sparkle: 'M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z|M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9z',
   sliders: 'M4 21v-7|M4 10V3|M12 21v-9|M12 8V3|M20 21v-5|M20 12V3|M1 14h6|M9 8h6|M17 16h6',
 };
@@ -398,6 +399,70 @@ function Wanted({ query, tick }) {
         </tbody>
       </table>
     </div>`;
+}
+
+// ---------------------------------------------------------------- calendar
+const CAL_STATUS = {
+  have: { label: 'En disco', cls: 'ok' },
+  grabbed: { label: 'Descargando', cls: 'accent' },
+  missing: { label: 'Falta', cls: 'bad' },
+  upcoming: { label: 'Próximo', cls: '' },
+};
+const dayLabel = (iso, today) => {
+  if (iso === today) return 'Hoy';
+  const d = new Date(iso + 'T00:00:00');
+  const diff = Math.round((d - new Date(today + 'T00:00:00')) / 86400000);
+  const name = d.toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long' });
+  return diff === 1 ? `Mañana · ${name}` : diff === -1 ? `Ayer · ${name}` : name.charAt(0).toUpperCase() + name.slice(1);
+};
+
+function Calendar({ live, toast }) {
+  const [offset, setOffset] = useState(0); // semanas
+  const range = useMemo(() => {
+    const base = new Date();
+    const start = new Date(base); start.setDate(base.getDate() - 7 + offset * 28);
+    const end = new Date(start); end.setDate(start.getDate() + 37);
+    const iso = (d) => d.toISOString().slice(0, 10);
+    return { start: iso(start), end: iso(end) };
+  }, [offset]);
+  const { data, loading } = useFetch(`/api/calendar?start=${range.start}&end=${range.end}`, [live.tick]);
+  const running = live.jobs.find((j) => j.name === 'agenda' && j.running);
+  const days = useMemo(() => {
+    const map = new Map();
+    for (const e of data?.entries || []) { if (!map.has(e.date)) map.set(e.date, []); map.get(e.date).push(e); }
+    return [...map.entries()];
+  }, [data]);
+  const refresh = async () => { try { await api.post('/api/jobs/agenda/start'); toast('Actualizando calendario…'); } catch (e) { toast(e.message); } };
+
+  return html`
+    <div class="toolbar">
+      <button class="btn small" onClick=${() => setOffset(offset - 1)}>← Anterior</button>
+      <button class="btn small" disabled=${offset === 0} onClick=${() => setOffset(0)}>Hoy</button>
+      <button class="btn small" onClick=${() => setOffset(offset + 1)}>Siguiente →</button>
+      <span class="muted">${range.start} — ${range.end}</span>
+      <span style="flex:1"></span>
+      <button class="btn" disabled=${!!running} onClick=${refresh}><${Icon} d=${ICONS.refresh} size=${15} /> ${running ? running.message : 'Actualizar calendario'}</button>
+    </div>
+    <p class="dim" style="margin:-4px 0 18px">Los episodios solo se buscan en las fuentes una vez emitidos. Las películas son los estrenos de Novedades.</p>
+    ${loading && !data ? html`<div class="loading"><div class="spinner"></div></div>`
+      : !days.length ? html`<div class="empty">Nada en estas fechas. Si acabas de empezar, pulsa "Actualizar calendario".</div>`
+      : html`<div class="agenda">
+        ${days.map(([date, entries]) => html`
+          <div class=${'agenda-day' + (date === data.today ? ' today' : date < data.today ? ' past' : '')}>
+            <div class="agenda-date">${dayLabel(date, data.today)}</div>
+            <div class="panel">
+              ${entries.map((e) => html`
+                <div class=${'agenda-row' + (e.series_id ? ' click' : '')} onClick=${() => e.series_id && go('series/' + e.series_id)}>
+                  <img class="agenda-thumb" loading="lazy" src=${e.poster_url || (e.series_id ? `/api/series/${e.series_id}/cover` : '')} onError=${(ev) => { ev.target.style.visibility = 'hidden'; }} alt="" />
+                  <div class="agenda-text">
+                    <div class="agenda-title">${e.title}</div>
+                    <div class="faint">${e.kind === 'movie' ? '🎬 ' : ''}${e.subtitle} · ${e.category_label}</div>
+                  </div>
+                  <span class=${'pill ' + CAL_STATUS[e.status].cls}>${CAL_STATUS[e.status].label}</span>
+                </div>`)}
+            </div>
+          </div>`)}
+      </div>`}`;
 }
 
 // ---------------------------------------------------------------- discovery
@@ -733,6 +798,7 @@ function QualitySettings({ toast }) {
 const NAV = [
   { id: 'library', label: 'Biblioteca', icon: ICONS.library },
   { id: 'discovery', label: 'Novedades', icon: ICONS.sparkle },
+  { id: 'calendar', label: 'Calendario', icon: ICONS.calendar },
   { id: 'wanted', label: 'Buscados', icon: ICONS.wanted },
   { id: 'activity', label: 'Actividad', icon: ICONS.activity },
   { id: 'settings', label: 'Ajustes', icon: ICONS.sliders },
@@ -749,7 +815,7 @@ function App() {
 
   const [page, arg] = route;
   const running = live.jobs.find((j) => j.running);
-  const titles = { library: 'Biblioteca', discovery: 'Novedades', wanted: 'Buscados', activity: 'Actividad', settings: 'Ajustes', system: 'Sistema', series: '' };
+  const titles = { library: 'Biblioteca', calendar: 'Calendario', discovery: 'Novedades', wanted: 'Buscados', activity: 'Actividad', settings: 'Ajustes', system: 'Sistema', series: '' };
   const searchable = page === 'library' || page === 'wanted';
 
   let body;
@@ -757,6 +823,7 @@ function App() {
   else if (page === 'wanted') body = html`<${Wanted} query=${query} tick=${live.tick} />`;
   else if (page === 'activity') body = html`<${Activity} live=${live} toast=${toast} />`;
   else if (page === 'system') body = html`<${System} />`;
+  else if (page === 'calendar') body = html`<${Calendar} live=${live} toast=${toast} />`;
   else if (page === 'discovery') body = html`<${Discovery} live=${live} toast=${toast} />`;
   else if (page === 'settings') body = html`<${Settings} toast=${toast} />`;
   else body = html`<${Library} category=${arg || 'all'} query=${query} tick=${live.tick} categories=${categories || []} />`;

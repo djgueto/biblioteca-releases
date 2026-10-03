@@ -23,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from config.settings import Settings
+from core.agenda.service import AgendaService
 from core.covers import get_cover_bytes
 from core.database.db_manager import DatabaseManager
 from core.discovery.repository import WantedRepository
@@ -331,6 +332,20 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
         )
         library_cache.invalidate()
         return {"id": series_id, "hispashare_url": url or None}
+
+    # --- calendario -------------------------------------------------------
+    @app.get("/api/calendar")
+    def calendar(start: str | None = None, end: str | None = None):
+        from datetime import date, timedelta
+
+        today = date.today()
+        start = start or (today - timedelta(days=7)).isoformat()
+        end = end or (today + timedelta(days=30)).isoformat()
+        entries = AgendaService(DatabaseManager()).entries(start, end)
+        for entry in entries:
+            if entry.get("poster_path"):
+                entry["poster_url"] = image_url(entry.pop("poster_path"), "w185")
+        return {"today": today.isoformat(), "start": start, "end": end, "entries": entries}
 
     # --- novedades --------------------------------------------------------
     @app.get("/api/discovery")

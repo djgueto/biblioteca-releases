@@ -191,6 +191,10 @@ class Scheduler(BackgroundJob):
             self._progress(60, "🆕 Revisando novedades...")
             self._log("🆕 Revisando novedades de TMDB/IMDb...")
             self.run_discovery()
+
+            # 5.2. Calendario de emisiones (qué sale y cuándo)
+            self._log("📅 Actualizando calendario de emisiones...")
+            self.update_agenda()
             
             # 6. Detectar episodios faltantes
             self._progress(65, "🔍 Detectando episodios faltantes...")
@@ -629,6 +633,16 @@ class Scheduler(BackgroundJob):
             content_mode='single_file',
             label_prefix=_prefix,
         )
+
+    def update_agenda(self):
+        try:
+            from core.agenda.service import AgendaService
+
+            result = AgendaService(self.db).rebuild()
+            self._log(f"   ✅ Calendario: {result['episodes']} episodios de {result['series']} series en emisión")
+        except Exception as e:
+            self.logger.error(f"Error actualizando el calendario: {e}", exc_info=True)
+            self._log(f"   ⚠️ Error actualizando el calendario: {e}")
 
     def run_discovery(self):
         try:

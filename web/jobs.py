@@ -32,11 +32,13 @@ JOB_LABELS = {
     "scheduler": "Ciclo automático",
     "discovery": "Buscar novedades",
     "quality_scan": "Analizar calidad",
+    "agenda": "Actualizar calendario",
     "tmdb_recalc": "Recalcular TMDB",
 }
 
 
 def _default_factories() -> dict[str, Callable[[EventBus], BackgroundJob]]:
+    from core.agenda.job import AgendaJob
     from core.discovery.job import DiscoveryJob
     from core.library.quality_scan_job import QualityScanJob
     from core.scheduler import Scheduler
@@ -46,6 +48,7 @@ def _default_factories() -> dict[str, Callable[[EventBus], BackgroundJob]]:
         "scheduler": lambda bus: Scheduler(event_bus=bus),
         "discovery": lambda bus: DiscoveryJob(event_bus=bus),
         "quality_scan": lambda bus: QualityScanJob(event_bus=bus),
+        "agenda": lambda bus: AgendaJob(event_bus=bus),
         "tmdb_recalc": lambda bus: TMDBRecalcJob(event_bus=bus),
     }
 
