@@ -22,19 +22,24 @@ for _name in ("stdout", "stderr"):
     if getattr(sys, _name) is None:
         setattr(sys, _name, open(os.devnull, "w", encoding="utf-8"))
 
+os.environ["BIBLIOTECA_DESKTOP"] = "1"
+
 # Al ejecutar desde el código fuente (python packaging/desktop/launcher.py).
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from config.settings import Settings  # noqa: E402
+from web import runtime  # noqa: E402
 from web.__main__ import local_url, serve, wait_and_open  # noqa: E402
 
-# Por defecto solo desde este equipo; WEB_HOST=0.0.0.0 para abrirlo a la red.
-HOST = os.getenv("WEB_HOST", "127.0.0.1")
+# Solo desde este equipo, salvo que en Ajustes → Acceso se haya permitido la
+# red local (o WEB_HOST lo fuerce).
+HOST = os.getenv("WEB_HOST") or ("0.0.0.0" if Settings.WEB_ALLOW_LAN else "127.0.0.1")
 PORT = int(os.getenv("WEB_PORT", "9797"))
 URL = local_url(HOST, PORT)
 # WEB_OPEN_BROWSER=false: no abrir el navegador al arrancar (p. ej. al iniciar sesión).
-OPEN_BROWSER = os.getenv("WEB_OPEN_BROWSER", "true").lower() != "false"
+OPEN_BROWSER = os.getenv("WEB_OPEN_BROWSER", "true").lower() != "false" and not os.getenv("BIBLIOTECA_RESTARTED")
 
 
 def open_when_ready():
@@ -66,11 +71,17 @@ def run_tray(server: threading.Thread) -> bool:
         icon.stop()
         os._exit(0)  # uvicorn corre en otro hilo: se cierra todo el proceso
 
-    icon = pystray.Icon("biblioteca", _icon_image(), "Biblioteca", menu=pystray.Menu(
-        pystray.MenuItem("Abrir Biblioteca", open_ui, default=True),
-        pystray.MenuItem(f"Dirección: {URL}", None, enabled=False),
-        pystray.MenuItem("Salir", quit_app),
-    ))
+    def restart_app(icon, _item=None):
+        icon.stop()
+        runtime.restart(delay=0)
+
+    lan = [f"http://{ip}:{PORT}" for ip in runtime.lan_addresses()] if runtime.listening_on_network(HOST) else []
+    items = [pystray.MenuItem("Abrir Biblioteca", open_ui, default=True)]
+    items += [pystray.MenuItem(f"Desde el móvil: {u}", None, enabled=False) for u in lan[:2]]
+    if not lan:
+        items.append(pystray.MenuItem("Solo desde este PC (Ajustes → Acceso)", None, enabled=False))
+    items += [pystray.MenuItem("Reiniciar", restart_app), pystray.MenuItem("Salir", quit_app)]
+    icon = pystray.Icon("biblioteca", _icon_image(), "Biblioteca", menu=pystray.Menu(*items))
     threading.Thread(target=open_when_ready, daemon=True).start()
     try:
         icon.run()

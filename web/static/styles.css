@@ -320,3 +320,8 @@ textarea.input { resize: vertical; }
 .setup-step.active { border-color: var(--accent); }
 .setup-step .n { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: rgba(127, 127, 127, .15); flex: none; }
 .setup-step.done .n { background: rgba(52, 211, 153, .18); color: var(--ok, #34d399); }
+
+/* acceso: login y dirección para el móvil */
+.login-wrap { min-height: 100vh; display: grid; place-items: center; padding: 16px; }
+.login { width: 100%; max-width: 360px; }
+.lan-url { font-size: 18px; font-weight: 600; overflow-wrap: anywhere; }

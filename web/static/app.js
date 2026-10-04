@@ -7,6 +7,7 @@ async function request(method, path, body) {
     headers: body ? { 'Content-Type': 'application/json' } : undefined,
     body: body ? JSON.stringify(body) : undefined,
   });
+  if (res.status === 401 && !path.startsWith('/api/auth/')) dispatchEvent(new Event('auth-required'));
   if (!res.ok) {
     let detail = res.statusText;
     try { detail = (await res.json()).detail || detail; } catch (_) {}
@@ -1000,6 +1001,7 @@ function Setup({ toast }) {
     libraries: html`<${LibrariesSettings} toast=${toast} onSaved=${reload} />`,
     sources: html`<${SourcesSettings} toast=${toast} onSaved=${reload} />`,
     downloads: html`<${GeneralSettings} toast=${toast} onSaved=${reload} /><${SourcesSettings} toast=${toast} onSaved=${reload} />`,
+    access: html`<${AccessSettings} toast=${toast} onSaved=${reload} />`,
   };
   const scanNow = () => { api.post('/api/jobs/library_scan/start').catch(() => {}); go('activity'); };
   return html`
@@ -1023,9 +1025,112 @@ function Setup({ toast }) {
 }
 
 
+// ---------------------------------------------------------------- acceso: login y seguridad
+function Login({ onDone }) {
+  const [form, setForm] = useState({ username: '', password: '' });
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const submit = async (e) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try { await api.post('/api/auth/login', form); onDone(); } catch (err) { setError(err.message); }
+    setBusy(false);
+  };
+  return html`
+    <div class="login-wrap">
+      <form class="panel form login" onSubmit=${submit}>
+        <div class="brand" style="margin-bottom:6px"><span class="brand-mark"><${Icon} d=${ICONS.library} /></span> Biblioteca</div>
+        <label class="field"><span>Usuario</span>
+          <input class="input" autofocus autocomplete="username" value=${form.username} onInput=${(e) => setForm({ ...form, username: e.target.value })} /></label>
+        <label class="field"><span>Contraseña</span>
+          <input class="input" type="password" autocomplete="current-password" value=${form.password} onInput=${(e) => setForm({ ...form, password: e.target.value })} /></label>
+        ${error && html`<div class="pill bad">${error}</div>`}
+        <button class="btn primary" disabled=${busy || !form.username || !form.password}>Entrar</button>
+      </form>
+    </div>`;
+}
+
+async function restartAndWait(toast) {
+  try { await api.post('/api/system/restart'); } catch (e) { toast('Error: ' + e.message); return; }
+  toast('Reiniciando…');
+  await new Promise((r) => setTimeout(r, 2500));
+  for (let i = 0; i < 40; i++) {
+    try { await fetch('/api/health', { cache: 'no-store' }); location.reload(); return; } catch (_) {}
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  toast('No vuelve a responder: ábrela de nuevo desde el icono o el acceso directo');
+}
+
+function AccessSettings({ toast, onSaved }) {
+  const { data, reload } = useFetch('/api/settings/access');
+  const [form, setForm] = useState({ username: '', password: '', password2: '', current_password: '' });
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { if (data) setForm((f) => ({ ...f, username: data.username || f.username })); }, [data]);
+  if (!data) return html`<div class="loading"><div class="spinner"></div></div>`;
+  const put = async (body, ok) => {
+    setBusy(true);
+    try { await api.put('/api/settings/access', body); toast(ok); reload(); onSaved && onSaved(); setForm((f) => ({ ...f, password: '', password2: '', current_password: '' })); }
+    catch (e) { toast('Error: ' + e.message); }
+    setBusy(false);
+  };
+  const savePassword = () => {
+    if (form.password !== form.password2) { toast('Las contraseñas no coinciden'); return; }
+    put({ username: form.username, password: form.password, current_password: form.current_password || undefined },
+      data.auth_enabled ? 'Contraseña cambiada' : 'Contraseña creada: desde otros dispositivos se pedirá al entrar');
+  };
+  const toggleLan = (on) => put(on && !data.auth_enabled
+    ? { allow_lan: true, username: form.username, password: form.password }
+    : { allow_lan: on }, on ? 'Acceso desde la red activado: reinicia para aplicarlo' : 'Acceso desde la red desactivado: reinicia para aplicarlo');
+  const passwordReady = form.username && form.password.length >= 6 && form.password === form.password2;
+  return html`
+    <div class="section">
+      <h3>Acceso desde el móvil y otros dispositivos</h3>
+      <div class="panel form">
+        ${data.desktop ? html`
+          <label class="check"><input type="checkbox" checked=${data.allow_lan} disabled=${busy || (!data.auth_enabled && !passwordReady)}
+            onChange=${(e) => toggleLan(e.target.checked)} /> Permitir el acceso desde otros dispositivos de mi red (móvil, tablet, tele)</label>
+          ${!data.auth_enabled && html`<small class="faint">Para activarlo, crea antes un usuario y contraseña aquí abajo: así nadie más de tu wifi puede cambiar nada.</small>`}
+          ${data.restart_needed && html`
+            <div class="review-box" style="margin:0">
+              <div>Hay que reiniciar la app para aplicar el cambio. Windows puede preguntar si permites el acceso a la red: elige <b>Redes privadas</b>.</div>
+              <div class="actions" style="margin:10px 0 0"><button class="btn primary" onClick=${() => restartAndWait(toast)}>Reiniciar ahora</button></div>
+            </div>`}`
+          : html`<div class="dim">${data.docker ? 'En Docker la app siempre es accesible desde la red.' : 'Accesible desde la red local.'}</div>`}
+        ${data.lan_urls.length > 0 && html`
+          <div class="field"><span>Abre esta dirección en el móvil (conectado a la misma wifi)</span>
+            ${data.lan_urls.map((u) => html`<a class="mono lan-url" href=${u} target="_blank" rel="noopener">${u}</a>`)}
+          </div>`}
+      </div>
+    </div>
+    <div class="section">
+      <h3>Usuario y contraseña</h3>
+      <p class="dim" style="margin:-4px 0 14px; max-width:760px">
+        ${data.auth_enabled
+          ? `Activada para «${data.username}».${data.desktop ? ' Desde este PC no se pide; desde otros dispositivos, sí.' : ''}`
+          : 'Sin contraseña, cualquiera que llegue a esta dirección puede usar la app y cambiar los ajustes.'}
+      </p>
+      <div class="panel form">
+        <div class="form-row">
+          <label class="field"><span>Usuario</span><input class="input" autocomplete="username" value=${form.username} onInput=${(e) => setForm({ ...form, username: e.target.value })} /></label>
+          ${data.auth_enabled && !data.desktop && html`<label class="field"><span>Contraseña actual</span><input class="input" type="password" autocomplete="current-password" value=${form.current_password} onInput=${(e) => setForm({ ...form, current_password: e.target.value })} /></label>`}
+          <label class="field"><span>${data.auth_enabled ? 'Nueva contraseña' : 'Contraseña'}</span><input class="input" type="password" autocomplete="new-password" value=${form.password} onInput=${(e) => setForm({ ...form, password: e.target.value })} placeholder="Mínimo 6 caracteres" /></label>
+          <label class="field"><span>Repítela</span><input class="input" type="password" autocomplete="new-password" value=${form.password2} onInput=${(e) => setForm({ ...form, password2: e.target.value })} /></label>
+        </div>
+      </div>
+      <div class="actions" style="margin-top:14px">
+        <button class="btn primary" disabled=${busy || !passwordReady} onClick=${savePassword}>${data.auth_enabled ? 'Cambiar contraseña' : 'Crear contraseña'}</button>
+        ${data.auth_enabled && html`<button class="btn danger" disabled=${busy || data.allow_lan && data.desktop}
+          title=${data.allow_lan && data.desktop ? 'Desactiva antes el acceso desde la red' : ''}
+          onClick=${() => confirm('¿Quitar la contraseña? Cualquiera que llegue a la dirección podrá usar la app.') && put({ password: '', current_password: form.current_password || undefined }, 'Contraseña quitada')}>Quitar contraseña</button>`}
+        ${data.auth_enabled && !data.desktop && html`<button class="btn" onClick=${() => api.post('/api/auth/logout').then(() => location.reload())}>Cerrar sesión</button>`}
+      </div>
+    </div>`;
+}
+
 // ---------------------------------------------------------------- settings
 function Settings({ toast }) {
-  return html`<${LibrariesSettings} toast=${toast} /><${GeneralSettings} toast=${toast} /><${SourcesSettings} toast=${toast} /><${QualitySettings} toast=${toast} /><${DiscoverySettingsPanel} toast=${toast} /><${ImportSettingsPanel} toast=${toast} /><${TaskSettings} toast=${toast} />`;
+  return html`<${LibrariesSettings} toast=${toast} /><${GeneralSettings} toast=${toast} /><${SourcesSettings} toast=${toast} /><${QualitySettings} toast=${toast} /><${DiscoverySettingsPanel} toast=${toast} /><${ImportSettingsPanel} toast=${toast} /><${TaskSettings} toast=${toast} /><${AccessSettings} toast=${toast} />`;
 }
 
 function GeneralSettings({ toast, onSaved }) {
@@ -1248,6 +1353,20 @@ const NAV = [
 ];
 
 function App() {
+  const [auth, setAuth] = useState(null);
+  const checkAuth = useCallback(() => api.get('/api/auth/status').then(setAuth, () => setAuth({ required: false })), []);
+  useEffect(() => {
+    checkAuth();
+    const onRequired = () => setAuth((a) => ({ ...(a || {}), required: true }));
+    addEventListener('auth-required', onRequired);
+    return () => removeEventListener('auth-required', onRequired);
+  }, []);
+  if (!auth) return html`<div class="loading"><div class="spinner"></div></div>`;
+  if (auth.required) return html`<${Login} onDone=${() => location.reload()} />`;
+  return html`<${Shell} />`;
+}
+
+function Shell() {
   const route = useRoute();
   const live = useLive();
   const [query, setQuery] = useState('');

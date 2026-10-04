@@ -171,6 +171,8 @@ def setup_status() -> dict:
          or bool(getattr(Settings, "WOLFMAX_UPGRADE_ENABLED", False))},
         {"id": "downloads", "label": "Cliente de descargas (torrent o eMule/aMule)", "required": False,
          "done": dispatcher.can_handle(TORRENT) or dispatcher.can_handle(ED2K)},
+        {"id": "access", "label": "Acceso desde el móvil y contraseña", "required": False,
+         "done": bool(Settings.WEB_AUTH_USER and Settings.WEB_AUTH_PASSWORD)},
     ]
     return {"complete": all(s["done"] for s in steps if s["required"]), "steps": steps}
 

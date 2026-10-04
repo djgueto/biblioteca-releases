@@ -37,6 +37,14 @@ def serve(host: str, port: int, open_browser: bool = False):
     setup_logger()
     import uvicorn
 
+    from web import runtime
+
+    # Para Ajustes → Acceso: si escucha en la red o solo en este equipo.
+    os.environ["BIBLIOTECA_BOUND_HOST"] = host
+    os.environ["WEB_PORT"] = str(port)
+    if os.getenv("BIBLIOTECA_RESTARTED"):
+        runtime.wait_port_free(port)  # el proceso anterior aún lo está soltando
+
     from web.app import create_app
 
     if open_browser:

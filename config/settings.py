@@ -72,6 +72,12 @@ class Settings:
     APP_VERSION = os.getenv("APP_VERSION", "dev")
     DATA_DIR = str(DATA_DIR)
 
+    # Acceso a la web (ver web/auth.py). La contraseña se guarda como hash.
+    WEB_ALLOW_LAN = os.getenv("WEB_ALLOW_LAN", "False").lower() == "true"  # app de escritorio
+    WEB_AUTH_USER = os.getenv("WEB_AUTH_USER", "")
+    WEB_AUTH_PASSWORD = os.getenv("WEB_AUTH_PASSWORD", "")
+    WEB_SECRET_KEY = os.getenv("WEB_SECRET_KEY", "")
+
     # APIs
     TMDB_API_KEY = os.getenv("TMDB_API_KEY", "")
     # IMDb no tiene API pública: OMDb (omdbapi.com) da sus notas con una clave

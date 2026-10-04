@@ -29,7 +29,8 @@ from core.library.roots import sync_library_roots
 from core.repositories import LibraryRepository
 from web.jobs import JobManager
 from web.periodic import PeriodicRunner
-from web.routes import calendar, discovery, items, library, settings, setup, system
+from web.auth import AuthMiddleware
+from web.routes import access, calendar, discovery, items, library, settings, setup, system
 from web.routes.settings import autostart_enabled
 
 logger = logging.getLogger(__name__)
@@ -112,9 +113,11 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
 
     app = FastAPI(title="Biblioteca", lifespan=lifespan)
     app.add_middleware(GZipMiddleware, minimum_size=2048)
+    app.add_middleware(AuthMiddleware)
     app.state.jobs = jobs
     app.state.library_cache = ctx.library_cache
 
+    app.include_router(access.router)
     app.include_router(setup.router)
     for module in (library, items, calendar, discovery, settings, system):
         app.include_router(module.build(ctx))

@@ -76,6 +76,20 @@ El asistente pide lo imprescindible:
 
 Después, *Escanear biblioteca* y listo: el ciclo automático hace el resto.
 
+## Entrar desde el móvil
+
+- **App de escritorio:** por seguridad, al principio solo funciona en ese PC.
+  En *Ajustes → Acceso desde el móvil* crea un usuario y contraseña, activa
+  «Permitir el acceso desde otros dispositivos de mi red» y pulsa
+  *Reiniciar ahora*. Windows preguntará si permites el acceso a la red:
+  elige **Redes privadas**. La dirección para el móvil aparece en esa misma
+  pantalla y en el menú del icono de la bandeja. Desde el propio PC no se
+  pide contraseña.
+- **Docker / desde el código:** ya escucha en la red; crea la contraseña en
+  *Ajustes → Usuario y contraseña* (o en el asistente).
+
+La contraseña se guarda cifrada (hash PBKDF2) y la sesión dura 30 días.
+
 ## Dónde se guardan los datos
 
 | Instalación | Carpeta |
