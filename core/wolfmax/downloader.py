@@ -27,8 +27,8 @@ from bs4 import BeautifulSoup
 
 from core.browser import new_system_chrome, system_chrome_configured
 
-# gibberish-aes.js está en scripts/wolfmax_extractor/ junto al wolfmax_dl.py original
-_GIBBERISH_JS = Path(__file__).parents[2] / 'scripts' / 'wolfmax_extractor' / 'gibberish-aes.js'
+# Librería AES que usa la propia web de Wolfmax para descifrar sus enlaces.
+_GIBBERISH_JS = Path(__file__).with_name('gibberish-aes.js')
 _REAL_KEY = 'fee631d2cffda38a78b96ee6d2dfb43a'
 
 BASE_URL = 'https://wolfmax4k.com'

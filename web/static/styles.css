@@ -167,6 +167,8 @@ button { font: inherit; color: inherit; }
 .season:last-child { border-bottom: 0; }
 .season-head { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; font-weight: 600; }
 .season-head .muted { color: var(--text-faint); font-weight: 400; font-size: 13px; }
+.season-head .season-date { font-weight: 400; font-size: 13px; }
+@media (max-width: 560px) { .season-head { flex-wrap: wrap; row-gap: 4px; } }
 .progress { flex: 1; max-width: 220px; height: 6px; border-radius: 6px; background: var(--bg-elev-2); overflow: hidden; }
 .progress span { display: block; height: 100%; background: var(--ok); }
 .eps { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -211,6 +213,29 @@ textarea.input { resize: vertical; }
 .check { display: flex; align-items: center; gap: 10px; font-weight: 600; cursor: pointer; }
 .check input { width: 16px; height: 16px; accent-color: var(--accent); }
 .inline-edit { display: flex; gap: 8px; margin-top: 10px; max-width: 640px; }
+
+/* ---------- revisar match ---------- */
+.review-box {
+  max-width: 760px; margin: 0 0 14px; padding: 12px 14px; border-radius: var(--radius-sm);
+  background: rgba(167, 139, 250, .1); border: 1px solid rgba(167, 139, 250, .35); line-height: 1.5;
+}
+
+/* ---------- corregir TMDB ---------- */
+.tmdb-picker { margin-top: 14px; padding: 14px; max-width: 760px; }
+.tmdb-results { display: grid; gap: 8px; margin-top: 12px; max-height: 460px; overflow-y: auto; }
+.tmdb-result {
+  display: grid; grid-template-columns: 54px 1fr auto; gap: 12px; align-items: start;
+  padding: 8px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg-elev-2);
+}
+.tmdb-result.current { border-color: var(--accent); }
+.tmdb-result img, .tmdb-result .noimg { width: 54px; aspect-ratio: 2 / 3; object-fit: cover; border-radius: 4px; background: var(--bg-hover); }
+.tmdb-result .name { font-weight: 650; }
+.tmdb-result .desc { color: var(--text-dim); font-size: 12.5px; line-height: 1.45; margin-top: 3px; }
+@media (max-width: 560px) {
+  .tmdb-result { grid-template-columns: 46px 1fr; }
+  .tmdb-result .btn { grid-column: 2; justify-self: start; }
+  .inline-edit { flex-wrap: wrap; }
+}
 .overview { color: var(--text-dim); max-width: 760px; margin: 0 0 14px; line-height: 1.6; }
 
 /* ---------- calendar ---------- */
@@ -277,3 +302,21 @@ textarea.input { resize: vertical; }
   .hero { grid-template-columns: 1fr; padding: 18px; }
   .hero .poster { width: 150px; }
 }
+
+/* configuración: selector de carpetas, bibliotecas y asistente */
+.folder-picker { margin-top: 8px; padding: 12px; max-width: 640px; }
+.folder-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; min-width: 0; }
+.folder-head .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.folder-list { max-height: 260px; overflow: auto; display: grid; gap: 2px; }
+.folder { text-align: left; background: none; border: 0; color: inherit; padding: 6px 8px; border-radius: 6px; cursor: pointer; font: inherit; }
+.folder:hover { background: var(--hover, rgba(127, 127, 127, .12)); }
+.library-row { padding-bottom: 12px; border-bottom: 1px solid var(--line, rgba(127, 127, 127, .15)); }
+.library-row:last-child { border-bottom: 0; padding-bottom: 0; }
+.path-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; }
+.path-row .mono { overflow-wrap: anywhere; }
+.setup-steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; margin-bottom: 18px; }
+.setup-step { display: flex; align-items: center; gap: 10px; text-align: left; padding: 12px; border-radius: 10px; cursor: pointer;
+  border: 1px solid var(--line, rgba(127, 127, 127, .2)); background: transparent; color: inherit; font: inherit; }
+.setup-step.active { border-color: var(--accent); }
+.setup-step .n { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: rgba(127, 127, 127, .15); flex: none; }
+.setup-step.done .n { background: rgba(52, 211, 153, .18); color: var(--ok, #34d399); }

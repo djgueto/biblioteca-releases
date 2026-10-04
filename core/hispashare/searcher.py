@@ -101,6 +101,9 @@ class HispashareSearcher:
         """
         query_candidates = self.build_query_candidates(series_name)
         aggregated_results = {}
+        rejected = self._rejected_keys(series_id)
+        # Aquí y no arriba: core.repositories importa este módulo (import circular).
+        from core.repositories.source_repository import source_key
 
         for query in query_candidates:
             self.logger.info(
@@ -111,6 +114,8 @@ class HispashareSearcher:
 
             results = self.extract_results(content_mode)
             for result in results:
+                if rejected and source_key(result['url']) in rejected:
+                    continue  # el usuario dijo que esta ficha no es
                 aggregated_results[result['url']] = result
 
             if not aggregated_results:
@@ -154,6 +159,17 @@ class HispashareSearcher:
                 f"[{content_mode}] No se encontró un match adecuado para: {series_name}"
             )
         return None
+
+    def _rejected_keys(self, series_id):
+        if not self.db_manager or not series_id:
+            return set()
+        try:
+            from core.repositories.source_repository import SourceRepository
+
+            return SourceRepository(self.db_manager).rejected_keys(series_id)
+        except Exception as exc:
+            self.logger.debug(f"No se pudieron leer las fichas rechazadas de {series_id}: {exc}")
+            return set()
 
     def _strip_accents(self, value):
         normalized = unicodedata.normalize("NFKD", value or "")

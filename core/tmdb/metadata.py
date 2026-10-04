@@ -56,6 +56,10 @@ class TmdbMetaRepository:
         columns = {r[1] for r in conn.execute("PRAGMA table_info(tmdb_meta)")}
         if "poster_other_language" not in columns:
             conn.execute("ALTER TABLE tmdb_meta ADD COLUMN poster_other_language TEXT")
+        # Temporadas de una serie (número, estreno, episodios). NULL = aún no
+        # se pidió la ficha completa; '[]' = la serie no tiene temporadas.
+        if "seasons_json" not in columns:
+            conn.execute("ALTER TABLE tmdb_meta ADD COLUMN seasons_json TEXT")
         conn.commit()
 
     def get(self, tmdb_id: int, media_type: str, max_age_days: int | None = MAX_AGE_DAYS) -> dict | None:
@@ -69,6 +73,8 @@ class TmdbMetaRepository:
             return None
         meta = dict(row)
         meta["genre_ids"] = json.loads(meta.get("genre_ids") or "[]")
+        seasons_json = meta.pop("seasons_json", None)
+        meta["seasons"] = json.loads(seasons_json) if seasons_json is not None else None
         return meta
 
     def save(self, meta: dict) -> None:
@@ -77,8 +83,8 @@ class TmdbMetaRepository:
             """
             INSERT INTO tmdb_meta (tmdb_id, media_type, title, original_title, release_date, poster_path,
                                    poster_other_language, backdrop_path, overview, vote_average, vote_count,
-                                   imdb_id, genre_ids, status, fetched_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                                   imdb_id, genre_ids, status, seasons_json, fetched_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(tmdb_id, media_type) DO UPDATE SET
                 title = excluded.title, original_title = excluded.original_title,
                 release_date = excluded.release_date, poster_path = excluded.poster_path,
@@ -86,13 +92,16 @@ class TmdbMetaRepository:
                 backdrop_path = excluded.backdrop_path, overview = excluded.overview,
                 vote_average = excluded.vote_average, vote_count = excluded.vote_count,
                 imdb_id = COALESCE(excluded.imdb_id, tmdb_meta.imdb_id), genre_ids = excluded.genre_ids,
-                status = excluded.status, fetched_at = CURRENT_TIMESTAMP
+                status = excluded.status,
+                seasons_json = COALESCE(excluded.seasons_json, tmdb_meta.seasons_json),
+                fetched_at = CURRENT_TIMESTAMP
             """,
             (meta["tmdb_id"], meta["media_type"], meta.get("title"), meta.get("original_title"),
              meta.get("release_date"), meta.get("poster_path"), meta.get("poster_other_language"),
              meta.get("backdrop_path"), meta.get("overview"),
              meta.get("vote_average"), meta.get("vote_count"), meta.get("imdb_id"),
-             json.dumps(meta.get("genre_ids") or []), meta.get("status")),
+             json.dumps(meta.get("genre_ids") or []), meta.get("status"),
+             json.dumps(meta["seasons"]) if meta.get("seasons") is not None else None),
         )
         conn.commit()
 
@@ -115,6 +124,12 @@ def meta_from_tmdb(data: dict, media_type: str) -> dict:
         "imdb_id": imdb_id or None,
         "genre_ids": genre_ids,
         "status": data.get("status"),
+        # Solo viene en la ficha completa de una serie, no en los listados.
+        "seasons": [
+            {"season": s["season_number"], "air_date": s.get("air_date") or None,
+             "episode_count": s.get("episode_count"), "name": s.get("name")}
+            for s in data["seasons"] if s.get("season_number") is not None
+        ] if isinstance(data.get("seasons"), list) else None,
     }
 
 
@@ -144,12 +159,16 @@ class TmdbMetadataService:
             self._client = TMDBClient(Settings.TMDB_API_KEY)
         return self._client
 
-    def get(self, tmdb_id: int | None, media_type: str, *, refresh: bool = False) -> dict | None:
+    def get(self, tmdb_id: int | None, media_type: str, *, refresh: bool = False,
+            need_seasons: bool = False) -> dict | None:
+        """need_seasons: la ficha de una serie necesita sus temporadas; si la
+        caché es anterior a guardarlas (o viene de un listado) se pide de
+        nuevo. Las carátulas no lo piden: serían miles de peticiones."""
         if not tmdb_id:
             return None
         if not refresh:
             cached = self.repo.get(tmdb_id, media_type)
-            if cached:
+            if cached and not (need_seasons and media_type == "tv" and cached.get("seasons") is None):
                 return cached
         if not Settings.TMDB_API_KEY:
             return self.repo.get(tmdb_id, media_type, max_age_days=None)
@@ -171,5 +190,6 @@ class TmdbMetadataService:
         self.repo.save(meta)
         return self.repo.get(tmdb_id, media_type, max_age_days=None)
 
-    def for_item(self, item: dict) -> dict | None:
-        return self.get(item.get("tmdb_id"), media_type_for_category(item.get("content_category")))
+    def for_item(self, item: dict, *, need_seasons: bool = False) -> dict | None:
+        return self.get(item.get("tmdb_id"), media_type_for_category(item.get("content_category")),
+                        need_seasons=need_seasons)

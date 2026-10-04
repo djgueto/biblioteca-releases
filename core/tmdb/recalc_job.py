@@ -67,6 +67,10 @@ class TMDBRecalcJob(BackgroundJob):
                 try:
                     tmdb_id = series.get("tmdb_id")
 
+                    if tmdb_id and (series.get("confidence_score") or 0) >= 1.0 and not series.get("needs_review"):
+                        # Elegida o confirmada a mano: no se vuelve a puntuar.
+                        continue
+
                     if tmdb_id:
                         details = tmdb.get_series_details(tmdb_id)
                         if not details:

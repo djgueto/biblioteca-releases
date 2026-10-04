@@ -94,8 +94,12 @@ const qualityLabel = (h) => (!h ? null : h >= 2000 ? '4K' : h >= 1000 ? '1080p' 
 const displayName = (it) => it.tmdb_name || it.name;
 const hdrLabel = (h) => ({ dolby_vision: 'Dolby Vision', hdr10: 'HDR10' })[h] || null;
 const fmtDate = (s) => (s ? new Date(s.replace(' ', 'T')).toLocaleString('es-ES', { dateStyle: 'short', timeStyle: 'short' }) : '—');
+// '2024-03-12' → '12 mar 2024' (sin pasar por la zona horaria)
+const fmtDay = (s) => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d).toLocaleDateString('es-ES', { day: 'numeric', month: 'short', year: 'numeric' }); };
 const PALETTE = ['#3b4a6b', '#4b3b6b', '#6b3b55', '#3b6b62', '#6b5a3b', '#3b5c6b', '#58406b'];
 const phColor = (id) => PALETTE[id % PALETTE.length];
+// La carátula se cachea un día en el navegador: al corregir el TMDB cambia la URL.
+const coverUrl = (item) => `/api/series/${item.id}/cover?v=${item.tmdb_id || 0}`;
 
 function Poster({ item }) {
   const [failed, setFailed] = useState(false);
@@ -104,7 +108,7 @@ function Poster({ item }) {
   return html`
     <div class="poster" style=${showImg ? '' : `background: linear-gradient(160deg, ${phColor(item.id)}, #161922)`}>
       ${showImg
-        ? html`<img loading="lazy" decoding="async" src=${`/api/series/${item.id}/cover`} alt="" onError=${() => setFailed(true)} />`
+        ? html`<img loading="lazy" decoding="async" src=${coverUrl(item)} alt="" onError=${() => setFailed(true)} />`
         : html`<div class="ph">${displayName(item)}</div>`}
       <div class="badges">
         <span>${q && html`<span class=${'badge' + (q === '4K' ? ' q4k' : '')}>${q}</span>`}</span>
@@ -193,18 +197,85 @@ function Library({ category, query, tick, categories }) {
         ${shown < items.length && html`<div ref=${sentinel} style="height:1px"></div>`}`}`;
 }
 
+// ---------------------------------------------------------------- corregir TMDB
+// El nombre de la carpeta sin año ni etiquetas de calidad: mejor punto de partida para buscar.
+const searchTerm = (name) => (name || '').replace(/[._]+/g, ' ').replace(/\s*[\[(].*$/, '').replace(/\b(19|20)\d{2}\b.*$/, '').trim() || name || '';
+
+function TmdbPicker({ item, toast, onClose, onSaved }) {
+  const [query, setQuery] = useState(() => searchTerm(item.name));
+  const [state, setState] = useState({ loading: false, results: null, error: null });
+  const [saving, setSaving] = useState(null);
+  const kind = item.content_mode === 'episodic' ? 'serie' : 'película';
+
+  const search = async (q = query) => {
+    if (!q.trim()) return;
+    setState({ loading: true, results: null, error: null });
+    try {
+      const data = await api.get(`/api/series/${item.id}/tmdb_search?q=${encodeURIComponent(q.trim())}`);
+      setState({ loading: false, results: data.results, error: null });
+    } catch (e) { setState({ loading: false, results: null, error: e.message }); }
+  };
+  useEffect(() => { search(); }, []);
+
+  const choose = async (r) => {
+    if (!confirm(`¿Identificar «${displayName(item)}» como «${r.title}»${r.year ? ` (${r.year})` : ''}?\n\n`
+      + 'Se recalcularán los episodios que faltan y las fuentes guardadas se volverán a comprobar en el próximo ciclo.')) return;
+    setSaving(r.id);
+    try {
+      const res = await api.put(`/api/series/${item.id}/tmdb`, { tmdb_id: r.id });
+      toast(`Identificado como ${res.tmdb_name}${res.renamed_to ? ` · carpeta renombrada a «${res.renamed_to}»` : ''}`);
+      onSaved();
+    } catch (e) { toast('Error: ' + e.message); }
+    setSaving(null);
+  };
+
+  return html`
+    <div class="panel tmdb-picker">
+      <div class="inline-edit" style="margin-top:0;max-width:none">
+        <input class="input" autofocus value=${query} onInput=${(e) => setQuery(e.target.value)}
+          placeholder=${`Título de la ${kind}, ID de TMDB o enlace de themoviedb.org`}
+          onKeyDown=${(e) => e.key === 'Enter' && search()} />
+        <button class="btn primary" disabled=${state.loading} onClick=${() => search()}><${Icon} d=${ICONS.search} size=${16} /> Buscar</button>
+        <button class="btn" onClick=${onClose}>Cerrar</button>
+      </div>
+      <div class="faint" style="font-size:12px;margin-top:6px">También puedes pegar el enlace de la ficha correcta en themoviedb.org o su número.</div>
+      ${state.loading && html`<div class="loading" style="padding:30px"><div class="spinner"></div></div>`}
+      ${state.error && html`<div class="empty" style="padding:24px">${state.error}</div>`}
+      ${state.results && state.results.length === 0 && html`<div class="empty" style="padding:24px">TMDB no encuentra nada con esa búsqueda.</div>`}
+      ${state.results && state.results.length > 0 && html`
+        <div class="tmdb-results">
+          ${state.results.map((r) => html`
+            <div class=${'tmdb-result' + (r.current ? ' current' : '')} key=${r.id}>
+              ${r.poster_url ? html`<img src=${r.poster_url} alt="" loading="lazy" />` : html`<div class="noimg"></div>`}
+              <div>
+                <div class="name">${r.title} ${r.year && html`<span class="faint" style="font-weight:400">(${r.year})</span>`}
+                  ${r.current && html` <span class="pill accent">Actual</span>`}</div>
+                <div class="faint" style="font-size:12px">
+                  ${r.original_title && r.original_title !== r.title ? r.original_title + ' · ' : ''}TMDB ${r.id}${r.vote_average ? ` · ★ ${r.vote_average.toFixed(1)}` : ''}
+                </div>
+                ${r.overview && html`<div class="desc">${r.overview}</div>`}
+              </div>
+              <button class="btn small" disabled=${r.current || saving !== null} onClick=${() => choose(r)}>
+                ${saving === r.id ? 'Guardando…' : r.current ? 'Actual' : 'Elegir'}
+              </button>
+            </div>`)}
+        </div>`}
+    </div>`;
+}
+
 // ---------------------------------------------------------------- detail
 function SeriesDetail({ id, tick, toast }) {
   const { data: it, loading, error, reload } = useFetch(`/api/series/${id}`, [tick]);
   const [busy, setBusy] = useState(false);
   const [editUrl, setEditUrl] = useState(null); // null = no se está editando
+  const [editTmdb, setEditTmdb] = useState(false);
   if (loading && !it) return html`<div class="loading"><div class="spinner"></div></div>`;
   if (error) return html`<div class="empty">${error.message}</div>`;
 
   const local = it.seasons.reduce((n, s) => n + s.local.length, 0);
   const missing = it.seasons.reduce((n, s) => n + s.missing.length, 0);
   const best = Math.max(it.file_quality?.resolution_height || 0, ...it.seasons.flatMap((s) => s.local.map((e) => e.resolution_height || 0)));
-  const cover = it.has_cover ? `/api/series/${it.id}/cover` : null;
+  const cover = it.has_cover ? coverUrl(it) : null;
   const bestOffer = it.offers.filter((o) => o.available).sort((a, b) => (b.resolution || 0) - (a.resolution || 0))[0];
   const toggleMonitored = async () => {
     setBusy(true);
@@ -226,6 +297,53 @@ function SeriesDetail({ id, tick, toast }) {
     } catch (e) { toast('Error: ' + e.message); }
     setBusy(false);
   };
+  const rejectHispashare = async () => {
+    if (!confirm('¿Esta ficha de Hispashare no es la correcta?\n\n'
+      + 'Se quitará el enlace, no se descargará nada más de ella y la búsqueda automática nunca volverá a elegirla. '
+      + 'En el próximo ciclo se buscará la correcta; si no existe, se volverá a intentar cada mes.\n\n'
+      + 'Las demás fuentes (Wolfmax, DonTorrent) no se tocan: se siguen buscando y usando igual.')) return;
+    setBusy(true);
+    try {
+      await api.post(`/api/series/${it.id}/hispashare_reject`);
+      toast('Ficha descartada: se buscará la correcta en el próximo ciclo');
+      reload();
+    } catch (e) { toast('Error: ' + e.message); }
+    setBusy(false);
+  };
+  const confirmTmdb = async () => {
+    setBusy(true);
+    try {
+      const res = await api.post(`/api/series/${it.id}/tmdb_confirm`);
+      toast(res.missing_count != null ? `Confirmada · ${res.missing_count} episodios faltan` : 'Confirmada');
+      reload();
+    } catch (e) { toast('Error: ' + e.message); }
+    setBusy(false);
+  };
+  const toggleSearch = async () => {
+    setBusy(true);
+    try {
+      await api.put(`/api/series/${it.id}/hispashare_search`, { enabled: !!it.search_disabled });
+      toast(it.search_disabled ? 'Se buscará en Hispashare en el próximo ciclo' : 'No se buscará en Hispashare');
+      reload();
+    } catch (e) { toast('Error: ' + e.message); }
+    setBusy(false);
+  };
+  const searchNow = async () => {
+    try {
+      await api.post(`/api/series/${it.id}/hispashare_search_now`);
+      toast('Buscando en Hispashare… (el progreso está en Actividad)');
+    } catch (e) { toast('Error: ' + e.message); }
+  };
+  const rematchTmdb = async () => {
+    setBusy(true);
+    try {
+      const res = await api.post(`/api/series/${it.id}/tmdb_rematch`);
+      toast(res.matched ? `Identificada: ${res.tmdb_name} (${res.year ?? '?'}) · ${Math.round(res.confidence_score * 100)}%`
+        : 'No se encontró una ficha fiable: corrígela a mano');
+      reload();
+    } catch (e) { toast('Error: ' + e.message); }
+    setBusy(false);
+  };
   const tmdb = it.tmdb || {};
   const heroBg = tmdb.backdrop_url || cover;
 
@@ -241,10 +359,29 @@ function SeriesDetail({ id, tick, toast }) {
           ${it.confidence_score != null && html`<span>Confianza <b>${Math.round(it.confidence_score * 100)}%</b></span>`}
           ${it.needs_review ? html`<span class="pill" style="background:rgba(167,139,250,.15);color:var(--violet)">Revisar match</span>` : null}
           ${!it.monitored && html`<span class="pill">No vigilado</span>`}
-          ${it.search_disabled ? html`<span class="pill bad">Búsqueda desactivada</span>` : null}
+          ${it.search_disabled ? html`<span class="pill bad" title=${(it.search_disabled_manual ? 'La apagaste a mano: no se buscará en Hispashare hasta que la vuelvas a activar' : 'No se encontró en Hispashare') + '. Wolfmax y DonTorrent se siguen buscando igual.'}>
+            ${it.search_disabled_manual ? 'Sin búsqueda en Hispashare'
+              : `No está en Hispashare${it.search_retry_at ? ` · se reintenta el ${fmtDay(it.search_retry_at)}` : ''}`}</span>` : null}
           ${tmdb.vote_average ? html`<span>TMDB <b>${tmdb.vote_average.toFixed(1)}</b> <span class="faint">(${tmdb.vote_count} votos)</span></span>` : null}
           ${tmdb.imdb_id && html`<a href=${`https://www.imdb.com/title/${tmdb.imdb_id}/`} target="_blank" rel="noopener"><b>IMDb</b> ${tmdb.imdb_id}</a>`}
         </div>
+        ${it.needs_review && html`
+          <div class="review-box">
+            <div>
+              <b>¿Es esta la ${it.content_mode === 'episodic' ? 'serie' : 'película'} correcta?</b>
+              ${it.tmdb_id
+                ? html` La identificación automática no estaba segura${it.confidence_score != null ? ` (confianza ${Math.round(it.confidence_score * 100)}%)` : ''}.`
+                : ' No tiene ficha de TMDB.'}
+              ${it.same_tmdb?.length > 0 && html`<div style="margin-top:4px">La misma ficha de TMDB la tiene también:
+                ${it.same_tmdb.map((s, i) => html`${i ? ', ' : ' '}<a href=${'#/series/' + s.id}>${s.name}</a> <span class="faint">(${s.category_label})</span>`)}.
+                Si son la misma obra en dos carpetas, una de las dos sobra; si no, corrige la que esté mal.</div>`}
+              <div class="faint" style="font-size:12px;margin-top:4px">Mientras esté en revisión no se calculan sus episodios que faltan, no sale en el calendario y DonTorrent no la busca.</div>
+            </div>
+            <div class="actions" style="margin:10px 0 0">
+              ${it.tmdb_id && html`<button class="btn primary" disabled=${busy} onClick=${confirmTmdb}>Sí, es correcta</button>`}
+              ${!editTmdb && html`<button class="btn" onClick=${() => setEditTmdb(true)}>${it.tmdb_id ? 'No, corregir TMDB' : 'Vincular con TMDB'}</button>`}
+            </div>
+          </div>`}
         ${tmdb.overview && html`<p class="overview">${tmdb.overview}</p>`}
         <div class="path">${it.folder_path}</div>
         ${it.content_mode === 'episodic' && html`
@@ -272,7 +409,22 @@ function SeriesDetail({ id, tick, toast }) {
           </button>
           ${it.hispashare_url && html`<a class="btn" href=${it.hispashare_url} target="_blank" rel="noopener">Abrir en Hispashare</a>`}
           ${editUrl === null && html`<button class="btn" onClick=${() => setEditUrl(it.hispashare_url || '')}>${it.hispashare_url ? 'Cambiar enlace de Hispashare' : 'Añadir enlace de Hispashare'}</button>`}
+          ${it.hispashare_url && editUrl === null && html`<button class="btn danger" disabled=${busy} onClick=${rejectHispashare}>Enlace incorrecto</button>`}
+          ${!it.hispashare_url && html`<button class="btn" disabled=${busy} onClick=${toggleSearch}>
+            ${it.search_disabled ? 'Volver a buscar en Hispashare' : 'No buscar en Hispashare'}</button>`}
+          ${!it.search_disabled_manual && html`<button class="btn" disabled=${busy} onClick=${searchNow}
+            title="Abre Hispashare y busca la ficha ahora, sin esperar al ciclo">Buscar ahora en Hispashare</button>`}
+          ${!editTmdb && !it.needs_review && html`<button class="btn" onClick=${() => setEditTmdb(true)}>${it.tmdb_id ? 'Corregir TMDB' : 'Vincular con TMDB'}</button>`}
+          <button class="btn" disabled=${busy} onClick=${rematchTmdb} title="Vuelve a identificarla automáticamente con TMDB">Reidentificar</button>
         </div>
+        ${it.rejected_sources?.length > 0 && html`
+          <div class="faint" style="font-size:12px;margin-top:8px">
+            Fichas descartadas (no se volverán a elegir solas):
+            ${it.rejected_sources.map((r, i) => html`${i ? ', ' : ' '}<a href=${r.source_url} target="_blank" rel="noopener">${r.provider} ${(r.source_url.match(/id=(\d+)/) || [])[1] || ''}</a>`)}
+            <span> · para volver a usar una, ponla a mano con «Añadir enlace de Hispashare».</span>
+          </div>`}
+        ${editTmdb && html`<${TmdbPicker} item=${it} toast=${toast} onClose=${() => setEditTmdb(false)}
+          onSaved=${() => { setEditTmdb(false); reload(); }} />`}
         ${editUrl !== null && html`
           <div class="inline-edit">
             <input class="input mono" autofocus value=${editUrl} onInput=${(e) => setEditUrl(e.target.value)}
@@ -305,6 +457,8 @@ function SeriesDetail({ id, tick, toast }) {
               <div class="season">
                 <div class="season-head">
                   ${s.season === 0 ? 'Especiales' : `Temporada ${s.season}`}
+                  ${s.air_date && html`<span class="faint season-date" title=${s.episode_count ? `${s.episode_count} episodios según TMDB` : ''}>
+                    ${s.air_date > new Date().toISOString().slice(0, 10) ? 'Se estrena el' : 'Estreno'} ${fmtDay(s.air_date)}</span>`}
                   <span class="muted">${s.local.length}/${total}</span>
                   <div class="progress"><span style=${`width:${(100 * s.local.length) / total}%`}></span></div>
                 </div>
@@ -581,7 +735,8 @@ function JobCard({ job, toast, schedule }) {
         <span class=${'dot' + (job.running ? ' on' : '')}></span>
         <h4>${job.label}</h4>
         <span style="flex:1"></span>
-        ${job.running
+        ${job.name === 'source_search' && !job.running ? html`<span class="faint" style="font-size:12px">Se lanza desde la ficha</span>`
+          : job.running
           ? html`<button class="btn small danger" disabled=${busy || job.stopping} onClick=${() => act('stop')}><${Icon} d=${ICONS.stop} size=${14} /> ${job.stopping ? 'Deteniendo…' : 'Detener'}</button>`
           : html`<button class="btn small primary" disabled=${busy} onClick=${() => act('start')}><${Icon} d=${ICONS.play} size=${14} /> Iniciar</button>`}
       </div>
@@ -667,6 +822,8 @@ function System() {
       <div class="panel">
         <table class="list"><tbody>
           <tr><td>TMDB</td><td>${data.tmdb_configured ? html`<span class="pill ok">API key configurada</span>` : html`<span class="pill bad">Falta API key</span>`}</td></tr>
+          <tr><td>Versión</td><td class="mono">${data.version}</td></tr>
+          <tr><td>Carpeta de datos</td><td class="mono dim">${data.data_dir}</td></tr>
           <tr><td>Intervalo del ciclo automático</td><td>${data.check_interval_hours} h</td></tr>
           <tr><td>Calidad analizada con MediaInfo</td><td>
             ${!data.mediainfo_available ? html`<span class="pill bad">MediaInfo no disponible</span>` : html`
@@ -686,12 +843,192 @@ function System() {
     </div>`;
 }
 
-// ---------------------------------------------------------------- settings
-function Settings({ toast }) {
-  return html`<${GeneralSettings} toast=${toast} /><${QualitySettings} toast=${toast} /><${DiscoverySettingsPanel} toast=${toast} /><${ImportSettingsPanel} toast=${toast} /><${TaskSettings} toast=${toast} />`;
+// ---------------------------------------------------------------- setup: carpetas, bibliotecas, fuentes
+function FolderPicker({ start, onPick, onClose }) {
+  const [path, setPath] = useState(start || '');
+  const { data, error, loading } = useFetch(`/api/fs?path=${encodeURIComponent(path)}`);
+  return html`
+    <div class="panel folder-picker">
+      <div class="folder-head">
+        <button class="btn small" disabled=${!data || data.parent === null} onClick=${() => setPath(data.parent)} title="Subir"><${Icon} d=${ICONS.back} size=${14} /></button>
+        <span class="mono dim">${path || 'Unidades / raíz'}</span>
+      </div>
+      <div class="folder-list">
+        ${loading && !data && html`<div class="loading" style="padding:20px"><div class="spinner"></div></div>`}
+        ${error && html`<div class="empty" style="padding:16px">${error.message}</div>`}
+        ${data && data.dirs.length === 0 && html`<div class="faint" style="padding:12px">Sin subcarpetas</div>`}
+        ${data && data.dirs.map((d) => html`<button class="folder" onClick=${() => setPath(d.path)}>📁 ${d.name}</button>`)}
+      </div>
+      <div class="actions" style="margin-top:10px">
+        <button class="btn primary" disabled=${!path} onClick=${() => onPick(path)}>Usar esta carpeta</button>
+        <button class="btn" onClick=${onClose}>Cancelar</button>
+      </div>
+    </div>`;
 }
 
-function GeneralSettings({ toast }) {
+function PathInput({ value, onChange, placeholder }) {
+  const [picking, setPicking] = useState(false);
+  return html`
+    <div class="inline-edit" style="margin-top:0;max-width:none">
+      <input class="input mono" value=${value} onInput=${(e) => onChange(e.target.value)} placeholder=${placeholder || ''} />
+      <button class="btn" onClick=${() => setPicking(!picking)}>Elegir…</button>
+    </div>
+    ${picking && html`<${FolderPicker} start=${value} onClose=${() => setPicking(false)} onPick=${(p) => { onChange(p); setPicking(false); }} />`}`;
+}
+
+function LibrariesSettings({ toast, onSaved }) {
+  const { data, reload } = useFetch('/api/settings/libraries');
+  const [draft, setDraft] = useState(null);
+  const [adding, setAdding] = useState(null); // biblioteca con el selector abierto
+  const [saving, setSaving] = useState(false);
+  useEffect(() => { if (data) setDraft(Object.fromEntries(data.libraries.map((l) => [l.id, l.paths.map((p) => p.path)]))); }, [data]);
+  if (!draft) return html`<div class="loading"><div class="spinner"></div></div>`;
+  const original = Object.fromEntries(data.libraries.map((l) => [l.id, l.paths.map((p) => p.path)]));
+  const dirty = JSON.stringify(draft) !== JSON.stringify(original);
+  const accessible = Object.fromEntries(data.libraries.flatMap((l) => l.paths.map((p) => [p.path, p.accessible])));
+  const setPaths = (id, paths) => setDraft({ ...draft, [id]: paths });
+  const save = async () => {
+    setSaving(true);
+    try {
+      const res = await api.put('/api/settings/libraries', { libraries: draft });
+      const moved = res.relocation?.status === 'relocated' && res.relocation.changes;
+      toast(moved ? `Bibliotecas guardadas · ${res.relocation.changes} rutas reubicadas` : 'Bibliotecas guardadas');
+      reload();
+      onSaved && onSaved();
+    } catch (e) { toast('Error: ' + e.message); }
+    setSaving(false);
+  };
+  const scan = () => api.post('/api/jobs/library_scan/start').then(() => go('activity'), (e) => toast(e.message));
+  return html`
+    <div class="section" style="margin-top:0">
+      <h3>Bibliotecas</h3>
+      <p class="dim" style="margin:-4px 0 14px; max-width:760px">
+        Las carpetas donde están tus series y películas: cada subcarpeta es una serie o una película.
+        Una misma carpeta solo puede estar en una biblioteca.
+      </p>
+      <div class="panel form">
+        ${data.libraries.map((lib) => html`
+          <div class="field library-row">
+            <span>${lib.label} <span class="faint" style="font-weight:400">· ${lib.content_mode === 'episodic' ? 'por episodios' : 'un archivo por título'}</span></span>
+            ${draft[lib.id].map((path, i) => html`
+              <div class="path-row">
+                <span class="mono">${path}</span>
+                ${accessible[path] === false && html`<span class="pill bad">No accesible</span>`}
+                <button class="btn small danger" onClick=${() => setPaths(lib.id, draft[lib.id].filter((_, j) => j !== i))}>Quitar</button>
+              </div>`)}
+            ${adding === lib.id
+              ? html`<${FolderPicker} onClose=${() => setAdding(null)} onPick=${(p) => { setPaths(lib.id, [...draft[lib.id], p]); setAdding(null); }} />`
+              : html`<div><button class="btn small" onClick=${() => setAdding(lib.id)}>+ Añadir carpeta</button></div>`}
+          </div>`)}
+      </div>
+      <div class="actions" style="margin-top:14px">
+        <button class="btn primary" disabled=${!dirty || saving} onClick=${save}>Guardar</button>
+        <button class="btn" disabled=${dirty} onClick=${scan} title="Lee las carpetas y vincula con TMDB lo nuevo">Escanear biblioteca</button>
+      </div>
+    </div>`;
+}
+
+function SourcesSettings({ toast, onSaved }) {
+  const { data, reload } = useFetch('/api/settings/sources');
+  const [form, setForm] = useState(null);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => { if (data) setForm({ ...data }); }, [data]);
+  if (!form) return html`<div class="loading"><div class="spinner"></div></div>`;
+  const set = (k) => (e) => setForm({ ...form, [k]: e.target.type === 'checkbox' ? e.target.checked : e.target.value });
+  const dirty = Object.keys(form).some((k) => form[k] !== data[k]);
+  const save = async () => {
+    setSaving(true);
+    try {
+      await api.put('/api/settings/sources', Object.fromEntries(Object.entries(form).filter(([k, v]) => v !== data[k])));
+      toast('Ajustes guardados');
+      reload();
+      onSaved && onSaved();
+    } catch (e) { toast('Error: ' + e.message); }
+    setSaving(false);
+  };
+  return html`
+    <div class="section">
+      <h3>Hispashare</h3>
+      <div class="panel form">
+        <div class="form-row">
+          <label class="field"><span>Usuario</span><input class="input" value=${form.hispashare_user} onInput=${set('hispashare_user')} autocomplete="off" /></label>
+          <label class="field"><span>Contraseña</span><input class="input" type="password" value=${form.hispashare_pass} onInput=${set('hispashare_pass')} autocomplete="new-password" /></label>
+        </div>
+        <label class="check"><input type="checkbox" checked=${form.selenium_headless} onChange=${set('selenium_headless')} /> Navegador oculto (desmárcalo solo para ver qué hace)</label>
+      </div>
+    </div>
+    <div class="section">
+      <h3>eMule / aMule</h3>
+      <p class="dim" style="margin:-4px 0 14px; max-width:760px">La interfaz web de eMule, o de aMule (amuleweb) en Linux y NAS. Desde Docker usa la IP del equipo, no «localhost».</p>
+      <div class="panel form">
+        <div class="form-row">
+          <label class="field"><span>Dirección</span><input class="input mono" value=${form.emule_url} onInput=${set('emule_url')} placeholder="http://192.168.1.10:4711" /></label>
+          <label class="field"><span>Usuario</span><input class="input" value=${form.emule_username} onInput=${set('emule_username')} /></label>
+          <label class="field"><span>Contraseña</span><input class="input" type="password" value=${form.emule_password} onInput=${set('emule_password')} autocomplete="new-password" /></label>
+        </div>
+        <label class="check"><input type="checkbox" checked=${form.emule_auto_send} onChange=${set('emule_auto_send')} /> Enviar automáticamente lo que encuentre en Hispashare</label>
+      </div>
+    </div>
+    <div class="section">
+      <h3>Mejoras de calidad y límites</h3>
+      <div class="panel form">
+        <label class="check"><input type="checkbox" checked=${form.upgrade_enabled} onChange=${set('upgrade_enabled')} /> Buscar mejoras de calidad de lo que ya tienes</label>
+        <div class="form-row">
+          <label class="field"><span>Series a mejorar por ciclo</span><input class="input" type="number" min="0" value=${form.upgrade_max_series_per_cycle} onInput=${set('upgrade_max_series_per_cycle')} /></label>
+          <label class="field"><span>Enlaces de mejora por ciclo</span><input class="input" type="number" min="0" value=${form.upgrade_max_links_per_cycle} onInput=${set('upgrade_max_links_per_cycle')} /></label>
+          <label class="field"><span>Descargas de Wolfmax por ciclo</span><input class="input" type="number" min="0" value=${form.wolfmax_max_downloads_per_cycle} onInput=${set('wolfmax_max_downloads_per_cycle')} /></label>
+          <label class="field"><span>Tamaño mínimo de película (GB)</span><input class="input" type="number" min="0" step="0.5" value=${form.minimum_movie_size_gb} onInput=${set('minimum_movie_size_gb')} /></label>
+        </div>
+        <label class="field"><span>Carpeta temporal de Wolfmax</span>
+          <${PathInput} value=${form.wolfmax_staging_dir} onChange=${(v) => setForm({ ...form, wolfmax_staging_dir: v })} placeholder="Opcional" />
+        </label>
+        <label class="check"><input type="checkbox" checked=${form.auto_rename_folder} onChange=${set('auto_rename_folder')} /> Renombrar la carpeta al nombre de TMDB al corregir la identificación</label>
+      </div>
+      <div class="actions" style="margin-top:14px">
+        <button class="btn primary" disabled=${!dirty || saving} onClick=${save}>Guardar</button>
+      </div>
+    </div>`;
+}
+
+function Setup({ toast }) {
+  const { data, reload } = useFetch('/api/setup');
+  const [step, setStep] = useState(null);
+  if (!data) return html`<div class="loading"><div class="spinner"></div></div>`;
+  const current = step || (data.steps.find((s) => !s.done) || data.steps[0]).id;
+  const panels = {
+    tmdb: html`<${GeneralSettings} toast=${toast} onSaved=${reload} />`,
+    libraries: html`<${LibrariesSettings} toast=${toast} onSaved=${reload} />`,
+    sources: html`<${SourcesSettings} toast=${toast} onSaved=${reload} />`,
+    downloads: html`<${GeneralSettings} toast=${toast} onSaved=${reload} /><${SourcesSettings} toast=${toast} onSaved=${reload} />`,
+  };
+  const scanNow = () => { api.post('/api/jobs/library_scan/start').catch(() => {}); go('activity'); };
+  return html`
+    <p class="dim" style="margin:0 0 16px; max-width:760px">
+      ${data.complete
+        ? 'Lo imprescindible está listo. Puedes seguir ajustando el resto o empezar a usar la biblioteca.'
+        : 'Para empezar hacen falta una clave de TMDB (gratuita, en themoviedb.org) y las carpetas de tu biblioteca.'}
+    </p>
+    <div class="setup-steps">
+      ${data.steps.map((s, i) => html`
+        <button class=${'setup-step' + (s.id === current ? ' active' : '') + (s.done ? ' done' : '')} onClick=${() => setStep(s.id)}>
+          <span class="n">${s.done ? '✓' : i + 1}</span>
+          <span>${s.label}${!s.required && html`<span class="faint"> · opcional</span>`}</span>
+        </button>`)}
+    </div>
+    ${data.complete && html`<div class="actions" style="margin:0 0 18px">
+      <button class="btn primary" onClick=${scanNow}>Escanear la biblioteca ahora</button>
+      <button class="btn" onClick=${() => go('library')}>Ir a la biblioteca</button>
+    </div>`}
+    ${panels[current]}`;
+}
+
+
+// ---------------------------------------------------------------- settings
+function Settings({ toast }) {
+  return html`<${LibrariesSettings} toast=${toast} /><${GeneralSettings} toast=${toast} /><${SourcesSettings} toast=${toast} /><${QualitySettings} toast=${toast} /><${DiscoverySettingsPanel} toast=${toast} /><${ImportSettingsPanel} toast=${toast} /><${TaskSettings} toast=${toast} />`;
+}
+
+function GeneralSettings({ toast, onSaved }) {
   const { data, reload } = useFetch('/api/settings/general');
   const [form, setForm] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -706,11 +1043,12 @@ function GeneralSettings({ toast }) {
       await api.put('/api/settings/general', changed);
       toast('Ajustes guardados');
       reload();
+      onSaved && onSaved();
     } catch (e) { toast('Error: ' + e.message); }
     setSaving(false);
   };
   return html`
-    <div class="section" style="margin-top:0">
+    <div class="section">
       <h3>Claves de API</h3>
       <div class="panel form">
         <label class="field"><span>TMDB API key</span>
@@ -734,7 +1072,8 @@ function GeneralSettings({ toast }) {
           <small class="faint">Cambia de dominio a menudo: actualízala aquí cuando ocurra.</small>
         </label>
         <label class="field"><span>Carpeta vigilada por el cliente torrent</span>
-          <input class="input mono" value=${form.torrent_watch_dir} onInput=${set('torrent_watch_dir')} />
+          <${PathInput} value=${form.torrent_watch_dir} onChange=${(v) => setForm({ ...form, torrent_watch_dir: v })} placeholder="La carpeta «watch» de qBittorrent / Transmission" />
+          <small class="faint">Los .torrent se dejan aquí y tu cliente torrent los recoge solo.</small>
         </label>
       </div>
       <div class="actions" style="margin-top:14px">
@@ -904,6 +1243,7 @@ const NAV = [
   { id: 'wanted', label: 'Buscados', icon: ICONS.wanted },
   { id: 'activity', label: 'Actividad', icon: ICONS.activity },
   { id: 'settings', label: 'Ajustes', icon: ICONS.sliders },
+  { id: 'setup', label: 'Asistente', icon: ICONS.sparkle },
   { id: 'system', label: 'Sistema', icon: ICONS.system },
 ];
 
@@ -913,11 +1253,13 @@ function App() {
   const [query, setQuery] = useState('');
   const [msg, setMsg] = useState(null);
   const { data: categories } = useFetch('/api/categories', [live.tick]);
+  const { data: setup } = useFetch('/api/setup');
+  useEffect(() => { if (setup && !setup.complete && route[0] !== 'setup') go('setup'); }, [setup]);
   const toast = useCallback((m) => { setMsg(m); setTimeout(() => setMsg(null), 2600); }, []);
 
   const [page, arg] = route;
   const running = live.jobs.find((j) => j.running);
-  const titles = { library: 'Biblioteca', calendar: 'Calendario', discovery: 'Novedades', wanted: 'Buscados', activity: 'Actividad', settings: 'Ajustes', system: 'Sistema', series: '' };
+  const titles = { setup: 'Configuración inicial', library: 'Biblioteca', calendar: 'Calendario', discovery: 'Novedades', wanted: 'Buscados', activity: 'Actividad', settings: 'Ajustes', system: 'Sistema', series: '' };
   const searchable = page === 'library' || page === 'wanted';
 
   let body;
@@ -928,6 +1270,7 @@ function App() {
   else if (page === 'calendar') body = html`<${Calendar} live=${live} toast=${toast} />`;
   else if (page === 'discovery') body = html`<${Discovery} live=${live} toast=${toast} />`;
   else if (page === 'settings') body = html`<${Settings} toast=${toast} />`;
+  else if (page === 'setup') body = html`<${Setup} toast=${toast} />`;
   else body = html`<${Library} category=${arg || 'all'} query=${query} tick=${live.tick} categories=${categories || []} />`;
 
   return html`

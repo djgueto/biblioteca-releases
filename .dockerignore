@@ -1,4 +1,5 @@
 .git
+.github
 .gitignore
 .vscode
 .idea
@@ -15,10 +16,15 @@ env
 *.log
 *.log.*
 cache
+backups
+downloads
+data
+config/*.env
 tests
-ui
-main.py
+docs
+scripts
 debug-*.md
 media_encoder_log.txt
-scripts/*
-!scripts/wolfmax_extractor/gibberish-aes.js
+packaging/desktop
+dist
+build

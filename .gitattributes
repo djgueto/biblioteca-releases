@@ -1,0 +1,4 @@
+* text=auto
+# Scripts que se ejecutan en Linux (Docker): siempre LF, también en Windows.
+*.sh text eol=lf
+Dockerfile text eol=lf

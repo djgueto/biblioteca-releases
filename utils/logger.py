@@ -22,8 +22,11 @@ def setup_logger():
     logger.addHandler(console_handler)
     
     # Handler para archivo (con rotación para que no crezca indefinidamente)
+    from config.settings import Settings
+
+    os.makedirs(os.path.dirname(Settings.LOG_FILE), exist_ok=True)
     file_handler = RotatingFileHandler(
-        os.getenv('LOG_FILE', 'series_manager.log'),
+        Settings.LOG_FILE,
         maxBytes=10 * 1024 * 1024,  # 10 MB por archivo
         backupCount=5,  # hasta 5 archivos de respaldo (series_manager.log.1 .. .5)
         encoding='utf-8',

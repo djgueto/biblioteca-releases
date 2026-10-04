@@ -3,109 +3,39 @@
 Arranque: `python -m web` (ver web/__main__.py). Usa un único proceso: los
 jobs corren en hilos del propio servidor, así que no debe lanzarse con varios
 workers de uvicorn.
+
+Las rutas están en web/routes/, una por área; aquí solo se monta la app, el
+arranque en segundo plano y la caché de la biblioteca.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import threading
 import time
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
 
-from config.settings import Settings
-from core.agenda.service import AgendaService
-from core.covers import get_cover_bytes
 from core.database.db_manager import DatabaseManager
-from core.discovery.repository import WantedRepository
-from core.discovery.rules import APPROVED, DISMISSED, EXPIRED, IN_LIBRARY, REJECTED, WAITING, DiscoverySettings
-from core.discovery.service import DiscoveryService
-from core.download_clients import ED2K, TORRENT, build_download_dispatcher
-from core.importer.service import ImportSettings
-from core.library.parser import mediainfo_available
-from core.library.quality_scan import coverage as quality_coverage
-from core.library.roots import LibraryRoots, sync_library_roots
-from core.repositories import DecisionLogRepository, LibraryRepository, SeriesRepository, SourceOfferRepository
-from core.repositories.grab_history_repository import GrabHistoryRepository
-from core.services.factory import build_domain_services
-from core.services.quality_profile import TIERS, QualityProfile
-from core.tmdb.metadata import TmdbMetadataService, image_url
-from web.jobs import JobAlreadyRunning, JobManager
+from core.library.roots import sync_library_roots
+from core.repositories import LibraryRepository
+from web.jobs import JobManager
 from web.periodic import PeriodicRunner
+from web.routes import calendar, discovery, items, library, settings, setup, system
+from web.routes.settings import autostart_enabled
 
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
 LIBRARY_CACHE_SECONDS = 30
-
-
-class MonitoredUpdate(BaseModel):
-    monitored: bool
-
-
-class QualityProfileUpdate(BaseModel):
-    order: list[str]
-    minimum: str
-
-
-class GeneralSettingsUpdate(BaseModel):
-    tmdb_api_key: str | None = None
-    omdb_api_key: str | None = None
-    wolfmax_enabled: bool | None = None
-    dontorrent_enabled: bool | None = None
-    dontorrent_url: str | None = None
-    torrent_watch_dir: str | None = None
-    autostart_scheduler: bool | None = None
-
-
-class HispashareUrlUpdate(BaseModel):
-    url: str | None = None
-
-
-def autostart_enabled() -> bool:
-    """¿Arrancar el ciclo automático al iniciar la web? Ajuste de la web
-    (activado por defecto); WEB_SCHEDULER_AUTOSTART en el entorno manda si
-    está definido (Docker)."""
-    env = os.getenv("WEB_SCHEDULER_AUTOSTART")
-    if env is not None:
-        return env.lower() == "true"
-    from core.repositories.app_settings_repository import AppSettingsRepository
-
-    return bool(AppSettingsRepository(DatabaseManager()).get("autostart_scheduler", True))
-
-
-def _mask(secret: str) -> str:
-    """Las claves nunca salen enteras hacia el navegador."""
-    secret = secret or ""
-    return f"••••••{secret[-4:]}" if len(secret) > 4 else ("••••" if secret else "")
-
-
-def _tmdb_key_works(key: str) -> bool:
-    import requests
-
-    try:
-        return requests.get("https://api.themoviedb.org/3/configuration", params={"api_key": key}, timeout=10).status_code == 200
-    except requests.RequestException:
-        return False
-
-
-def _omdb_key_works(key: str) -> bool:
-    import requests
-
-    try:
-        r = requests.get("https://www.omdbapi.com/", params={"apikey": key, "i": "tt0133093"}, timeout=10)
-        return r.status_code == 200 and r.json().get("Response") == "True"
-    except (requests.RequestException, ValueError):
-        return False
 
 
 class _LibraryCache:
@@ -131,23 +61,20 @@ class _LibraryCache:
             self._items = None
 
 
-def _serialize_offer(offer) -> dict:
-    return {
-        "provider": offer.provider,
-        "source_url": offer.source_url,
-        "resolution": offer.quality.resolution_height,
-        "codec": offer.quality.codec,
-        "hdr": offer.quality.hdr.name.lower(),
-        "match_score": offer.match_score,
-        "available": offer.available,
-    }
+@dataclass
+class AppContext:
+    """Lo que comparten las rutas: jobs en marcha, tareas programadas y caché."""
+
+    jobs: JobManager
+    periodic: PeriodicRunner
+    library_cache: _LibraryCache
 
 
 def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -> FastAPI:
     jobs = job_manager or JobManager()
-    periodic = PeriodicRunner(jobs)
-    library_cache = _LibraryCache()
-    jobs.add_listener(lambda msg: library_cache.invalidate() if msg.get("type") in ("series_updated", "job_finished") else None)
+    ctx = AppContext(jobs=jobs, periodic=PeriodicRunner(jobs), library_cache=_LibraryCache())
+    jobs.add_listener(
+        lambda msg: ctx.library_cache.invalidate() if msg.get("type") in ("series_updated", "job_finished") else None)
 
     def prepare_database():
         # Antes de servir: la reubicación de bibliotecas cambia rutas de la BD.
@@ -156,18 +83,21 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
         sync_library_roots(db)
 
     def start_background():
-        # Ya con el servidor respondiendo (la BD suele estar en el NAS).
+        # Ya con el servidor respondiendo (la BD puede estar en un NAS).
         try:
             if autostart_enabled():
-                if LibraryRepository(DatabaseManager()).path_health()["ok"]:
+                if not setup.setup_status()["complete"]:
+                    logger.info("Arranque automático del ciclo omitido: falta completar la configuración inicial")
+                elif LibraryRepository(DatabaseManager()).path_health()["ok"]:
                     jobs.start("scheduler", wait_for_interval=True)
                 else:
                     logger.error("Arranque automático del ciclo omitido: las rutas de la BD no coinciden con las configuradas")
         except Exception:
             logger.exception("Error en el arranque automático del ciclo")
-        periodic.start()
+        if os.getenv("WEB_PERIODIC_TASKS", "true").lower() != "false":
+            ctx.periodic.start()
         try:
-            library_cache.get()  # la primera visita no espera a la consulta
+            ctx.library_cache.get()  # la primera visita no espera a la consulta
         except Exception:
             logger.exception("No se pudo precargar la biblioteca")
 
@@ -177,385 +107,17 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
             await asyncio.to_thread(prepare_database)
             threading.Thread(target=start_background, name="arranque", daemon=True).start()
         yield
-        periodic.stop()
+        ctx.periodic.stop()
         await asyncio.to_thread(jobs.stop_all)
 
     app = FastAPI(title="Biblioteca", lifespan=lifespan)
     app.add_middleware(GZipMiddleware, minimum_size=2048)
     app.state.jobs = jobs
+    app.state.library_cache = ctx.library_cache
 
-    # --- biblioteca -----------------------------------------------------
-    @app.get("/api/categories")
-    def categories():
-        items = library_cache.get()
-        counts: dict[str, int] = {}
-        for item in items:
-            counts[item["content_category"]] = counts.get(item["content_category"], 0) + 1
-        return [
-            {"id": key, "label": cfg["label"], "content_mode": cfg["content_mode"], "count": counts.get(key, 0)}
-            for key, cfg in Settings.get_library_categories().items()
-        ]
-
-    @app.get("/api/library")
-    def library():
-        return library_cache.get()
-
-    @app.get("/api/series/{series_id}")
-    def series_detail(series_id: int):
-        db = DatabaseManager()
-        repo = LibraryRepository(db)
-        item = repo.get_item(series_id)
-        if item is None:
-            raise HTTPException(404, "No existe")
-
-        seasons: dict[int, dict] = {}
-        for ep in db.get_local_episodes(series_id):
-            season = seasons.setdefault(ep["season"], {"season": ep["season"], "local": [], "missing": []})
-            measured = ep.get("quality_source") == "mediainfo"
-            season["local"].append({
-                "episode": ep.get("episode"), "filename": ep.get("filename"), "size_mb": ep.get("size_mb"),
-                "measured": measured,
-                # Sin analizar con MediaInfo no se muestra calidad: el nombre no es fiable.
-                **{k: (ep.get(k) if measured else None) for k in ("resolution_height", "codec", "hdr")},
-            })
-        for ep in db.get_missing_episodes_for_series(series_id):
-            season = seasons.setdefault(ep["season"], {"season": ep["season"], "local": [], "missing": []})
-            season["missing"].append({k: ep.get(k) for k in ("episode", "name", "air_date")})
-
-        item["seasons"] = [seasons[k] for k in sorted(seasons)]
-        item["offers"] = [_serialize_offer(o) for o in SourceOfferRepository(db).get_all_for_series(series_id)]
-        item["history"] = DecisionLogRepository(db).list_for_series(series_id, limit=30)
-        item["grabs"] = GrabHistoryRepository(db).list_for_series(series_id)
-        meta = TmdbMetadataService(db).for_item(item) if item.get("tmdb_id") else None
-        item["tmdb"] = {
-            "overview": meta.get("overview"),
-            "vote_average": meta.get("vote_average"),
-            "vote_count": meta.get("vote_count"),
-            "imdb_id": meta.get("imdb_id"),
-            "backdrop_url": image_url(meta.get("backdrop_path"), "w1280"),
-            "release_date": meta.get("release_date"),
-        } if meta else None
-        return item
-
-    @app.get("/api/series/{series_id}/cover")
-    def series_cover(series_id: int):
-        db = DatabaseManager()
-        item = db.get_series_by_id(series_id)
-        if not item:
-            raise HTTPException(404, "No existe")
-        item = dict(item)
-        # Orden: cartel de TMDB en español/inglés/sin texto, la carátula de
-        # Hispashare, y solo si no hay otra cosa el de TMDB en otro idioma.
-        meta = (TmdbMetadataService(db).for_item(item) if item.get("tmdb_id") else None) or {}
-        candidates = [
-            image_url(meta.get("poster_path"), "w342"),
-            LibraryRepository(db).cover_url(item),
-            image_url(meta.get("poster_other_language"), "w342"),
-        ]
-        for cover_url in filter(None, candidates):
-            data = get_cover_bytes(series_id, cover_url)
-            if data:
-                return Response(data, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=86400"})
-        raise HTTPException(404, "Sin carátula")
-
-    @app.put("/api/series/{series_id}/monitored")
-    def set_monitored(series_id: int, body: MonitoredUpdate):
-        db = DatabaseManager()
-        SeriesRepository(db).set_monitored(series_id, body.monitored)
-        DecisionLogRepository(db).append(
-            series_id,
-            "monitored_changed",
-            "Serie monitorizada" if body.monitored else "Serie marcada como no monitorizada",
-            {"monitored": body.monitored, "origin": "web"},
-        )
-        library_cache.invalidate()
-        return {"id": series_id, "monitored": body.monitored}
-
-    @app.get("/api/wanted")
-    def wanted():
-        return LibraryRepository(DatabaseManager()).list_missing()
-
-    # --- sistema --------------------------------------------------------
-    @app.get("/api/status")
-    def status():
-        dispatcher = build_download_dispatcher()
-        return {
-            "jobs": jobs.state(),
-            "download_clients": [
-                {"protocol": TORRENT, "label": "Torrent (carpeta vigilada)",
-                 "configured": dispatcher.can_handle(TORRENT), "target": Settings.get_torrent_watch_dir()},
-                {"protocol": ED2K, "label": "eMule / aMule",
-                 "configured": dispatcher.can_handle(ED2K), "target": Settings.EMULE_URL},
-            ],
-            "providers": [
-                {"name": "hispashare", "label": "Hispashare", "protocol": ED2K,
-                 "enabled": bool(Settings.HISPASHARE_USER)},
-                {"name": "wolfmax", "label": "Wolfmax4k", "protocol": TORRENT,
-                 "enabled": bool(getattr(Settings, "WOLFMAX_UPGRADE_ENABLED", False))},
-                {"name": "dontorrent", "label": f"DonTorrent ({Settings.DONTORRENT_URL})", "protocol": TORRENT,
-                 "enabled": Settings.DONTORRENT_ENABLED},
-            ],
-            "tmdb_configured": bool(Settings.TMDB_API_KEY),
-            "library_paths": LibraryRepository(DatabaseManager()).path_health(),
-            "quality_coverage": quality_coverage(DatabaseManager()),
-            "mediainfo_available": mediainfo_available(),
-            "library_roots": [
-                {"category": r.category, "label": Settings.get_category_label(r.category),
-                 "path": r.path, "accessible": Path(r.path).exists()}
-                for r in LibraryRoots(DatabaseManager()).configured()
-            ],
-            "check_interval_hours": Settings.CHECK_INTERVAL_HOURS,
-        }
-
-    @app.get("/api/settings/general")
-    def get_general_settings():
-        return {
-            "tmdb_api_key": _mask(Settings.TMDB_API_KEY),
-            "omdb_api_key": _mask(Settings.OMDB_API_KEY),
-            "wolfmax_enabled": bool(getattr(Settings, "WOLFMAX_UPGRADE_ENABLED", False)),
-            "dontorrent_enabled": Settings.DONTORRENT_ENABLED,
-            "dontorrent_url": Settings.DONTORRENT_URL,
-            "torrent_watch_dir": Settings.get_torrent_watch_dir(),
-            "autostart_scheduler": autostart_enabled(),
-        }
-
-    @app.put("/api/settings/general")
-    def put_general_settings(body: GeneralSettingsUpdate):
-        values = {}
-        if body.tmdb_api_key is not None and body.tmdb_api_key.strip() != _mask(Settings.TMDB_API_KEY):
-            key = body.tmdb_api_key.strip()
-            if key and not _tmdb_key_works(key):
-                raise HTTPException(422, "TMDB rechaza esa API key")
-            values["TMDB_API_KEY"] = key
-        if body.omdb_api_key is not None and body.omdb_api_key.strip() != _mask(Settings.OMDB_API_KEY):
-            key = body.omdb_api_key.strip()
-            if key and not _omdb_key_works(key):
-                raise HTTPException(422, "OMDb (IMDb) rechaza esa API key")
-            values["OMDB_API_KEY"] = key
-        if body.wolfmax_enabled is not None:
-            values["WOLFMAX_UPGRADE_ENABLED"] = body.wolfmax_enabled
-        if body.dontorrent_enabled is not None:
-            values["DONTORRENT_ENABLED"] = body.dontorrent_enabled
-        if body.dontorrent_url is not None:
-            url = body.dontorrent_url.strip().rstrip("/")
-            if not url.startswith(("http://", "https://")):
-                raise HTTPException(422, "La dirección de DonTorrent debe empezar por https://")
-            values["DONTORRENT_URL"] = url
-        if body.torrent_watch_dir is not None:
-            values["TORRENT_WATCH_DIR"] = body.torrent_watch_dir.strip()
-        if body.autostart_scheduler is not None:
-            from core.repositories.app_settings_repository import AppSettingsRepository
-
-            AppSettingsRepository(DatabaseManager()).set("autostart_scheduler", body.autostart_scheduler)
-        if values:
-            Settings.update_env(values)
-        return get_general_settings()
-
-    @app.put("/api/series/{series_id}/hispashare_url")
-    def set_hispashare_url(series_id: int, body: HispashareUrlUpdate):
-        url = (body.url or "").strip()
-        if url and not url.startswith(("http://", "https://")):
-            raise HTTPException(422, "El enlace debe empezar por https://")
-        db = DatabaseManager()
-        if not db.get_series_by_id(series_id):
-            raise HTTPException(404, "No existe")
-        # Mismo camino que la edición manual del escritorio (ManualUpdateTask).
-        services = build_domain_services(db)
-        changes = {"hispashare_url": url or None}
-        saved = services["series_repository"].save_manual_changes(series_id, changes, recalculate_missing=False)
-        services["reconciliation_service"].on_manual_update(
-            series_id, saved.get("previous_item") or {}, saved.get("updated_item") or {}, changes,
-            is_library=Settings.get_category_content_mode(
-                (saved.get("updated_item") or {}).get("content_category")) == "single_file",
-        )
-        library_cache.invalidate()
-        return {"id": series_id, "hispashare_url": url or None}
-
-    # --- calendario -------------------------------------------------------
-    @app.get("/api/calendar")
-    def calendar(start: str | None = None, end: str | None = None):
-        from datetime import date, timedelta
-
-        today = date.today()
-        start = start or (today - timedelta(days=7)).isoformat()
-        end = end or (today + timedelta(days=30)).isoformat()
-        entries = AgendaService(DatabaseManager()).entries(start, end)
-        for entry in entries:
-            if entry.get("poster_path"):
-                entry["poster_url"] = image_url(entry.pop("poster_path"), "w185")
-        return {"today": today.isoformat(), "start": start, "end": end, "entries": entries}
-
-    # --- novedades --------------------------------------------------------
-    @app.get("/api/discovery")
-    def discovery_list(status: str = "approved"):
-        db = DatabaseManager()
-        repo = WantedRepository(db)
-        statuses = {"approved": [APPROVED], "waiting": [WAITING], "rejected": [REJECTED, EXPIRED, DISMISSED],
-                    "in_library": [IN_LIBRARY]}.get(status, [status])
-        items = repo.list(statuses)
-        for item in items:
-            item["poster_url"] = image_url(item.get("poster_path"), "w342")
-            item["category_label"] = Settings.get_category_label(item.get("category"))
-        return {"items": items, "counts": repo.counts()}
-
-    @app.post("/api/discovery/{wanted_id}/approve")
-    def discovery_approve(wanted_id: int):
-        db = DatabaseManager()
-        if WantedRepository(db).get(wanted_id) is None:
-            raise HTTPException(404, "No existe")
-        series_id = DiscoveryService(db).approve(wanted_id, reason="Añadida a mano")
-        library_cache.invalidate()
-        return {"id": wanted_id, "series_id": series_id}
-
-    @app.post("/api/discovery/{wanted_id}/dismiss")
-    def discovery_dismiss(wanted_id: int):
-        db = DatabaseManager()
-        if WantedRepository(db).get(wanted_id) is None:
-            raise HTTPException(404, "No existe")
-        DiscoveryService(db).dismiss(wanted_id)
-        library_cache.invalidate()
-        return {"id": wanted_id}
-
-    @app.get("/api/settings/discovery")
-    def get_discovery_settings():
-        return {**DiscoverySettings.load(DatabaseManager()).to_dict(),
-                "all_categories": [{"id": k, "label": v["label"]} for k, v in Settings.get_library_categories().items()]}
-
-    @app.put("/api/settings/discovery")
-    def put_discovery_settings(body: dict):
-        current = DiscoverySettings.load(DatabaseManager()).to_dict()
-        unknown = set(body) - set(current) - {"all_categories"}
-        if unknown:
-            raise HTTPException(422, f"Ajustes desconocidos: {', '.join(sorted(unknown))}")
-        merged = {**current, **{k: v for k, v in body.items() if k in current}}
-        try:
-            settings = DiscoverySettings(**merged)
-            for key in ("min_tmdb", "min_imdb"):
-                if not 0 <= float(getattr(settings, key)) <= 10:
-                    raise ValueError(key)
-        except (TypeError, ValueError):
-            raise HTTPException(422, "Ajustes de novedades no válidos")
-        settings.save(DatabaseManager())
-        return get_discovery_settings()
-
-    @app.get("/api/settings/import")
-    def get_import_settings():
-        return ImportSettings.load(DatabaseManager()).to_dict()
-
-    @app.put("/api/settings/import")
-    def put_import_settings(body: dict):
-        current = ImportSettings.load(DatabaseManager()).to_dict()
-        unknown = set(body) - set(current)
-        if unknown:
-            raise HTTPException(422, f"Ajustes desconocidos: {', '.join(sorted(unknown))}")
-        merged = {**current, **body}
-        if merged["mode"] not in ("copy", "move"):
-            raise HTTPException(422, "El modo debe ser copiar o mover")
-        merged["source_dirs"] = [d.strip() for d in merged.get("source_dirs") or [] if d and d.strip()]
-        if merged["enabled"] and not merged["source_dirs"]:
-            raise HTTPException(422, "Indica al menos una carpeta de descargas")
-        missing = [d for d in merged["source_dirs"] if not Path(d).is_dir()]
-        if missing:
-            raise HTTPException(422, f"No existe la carpeta: {missing[0]}")
-        try:
-            merged["min_age_minutes"] = max(1, int(merged["min_age_minutes"]))
-        except (TypeError, ValueError):
-            raise HTTPException(422, "Minutos sin cambios no válidos")
-        ImportSettings(**merged).save(DatabaseManager())
-        return get_import_settings()
-
-    @app.get("/api/settings/quality")
-    def get_quality_profile():
-        profile = QualityProfile.load(DatabaseManager())
-        return {**profile.to_dict(), "tiers": [{"id": t, "label": TIERS[t]} for t in profile.order]}
-
-    @app.put("/api/settings/quality")
-    def put_quality_profile(body: QualityProfileUpdate):
-        if set(body.order) != set(TIERS) or len(body.order) != len(TIERS) or body.minimum not in TIERS:
-            raise HTTPException(422, "Perfil de calidad no válido")
-        QualityProfile(order=body.order, minimum=body.minimum).save(DatabaseManager())
-        return get_quality_profile()
-
-    @app.get("/api/tasks")
-    def scheduled_tasks():
-        return {"tasks": periodic.status(), "cycle_interval_hours": Settings.CHECK_INTERVAL_HOURS}
-
-    @app.put("/api/settings/tasks")
-    def put_task_settings(body: dict):
-        intervals = body.get("intervals") or {}
-        try:
-            periodic.set_intervals({k: int(v) for k, v in intervals.items()})
-        except KeyError as e:
-            raise HTTPException(422, f"Tarea desconocida: {e}")
-        except (TypeError, ValueError):
-            raise HTTPException(422, "Intervalo no válido")
-        if body.get("cycle_interval_hours") is not None:
-            try:
-                hours = int(body["cycle_interval_hours"])
-            except (TypeError, ValueError):
-                raise HTTPException(422, "Intervalo del ciclo no válido")
-            if not 1 <= hours <= 168:
-                raise HTTPException(422, "El ciclo debe ser de 1 a 168 horas")
-            Settings.update_env({"CHECK_INTERVAL_HOURS": hours})
-        return scheduled_tasks()
-
-    @app.get("/api/health", include_in_schema=False)
-    def health():
-        return {"ok": True}
-
-    @app.get("/api/logs")
-    def logs(limit: int = 300):
-        return jobs.recent_logs(limit)
-
-    @app.post("/api/jobs/{name}/start")
-    def start_job(name: str):
-        if name == "scheduler":
-            health = LibraryRepository(DatabaseManager()).path_health()
-            if not health["ok"]:
-                raise HTTPException(
-                    409,
-                    f"Solo {health['in_configured_roots']} de {health['total']} elementos de la base de datos "
-                    "están dentro de las rutas de biblioteca configuradas. Un ciclo crearía duplicados: "
-                    "revisa las rutas (o migra las de la BD) antes de iniciarlo.",
-                )
-        try:
-            jobs.start(name)
-        except KeyError:
-            raise HTTPException(404, "Tarea desconocida")
-        except JobAlreadyRunning:
-            raise HTTPException(409, "La tarea ya está en marcha")
-        return jobs.state()
-
-    @app.post("/api/jobs/{name}/stop")
-    def stop_job(name: str):
-        try:
-            jobs.stop(name)
-        except KeyError:
-            raise HTTPException(404, "Tarea desconocida")
-        return jobs.state()
-
-    @app.websocket("/api/ws")
-    async def events(ws: WebSocket):
-        await ws.accept()
-        loop = asyncio.get_running_loop()
-        queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=1000)
-
-        def enqueue(message: dict):
-            # Llamado desde los hilos de los jobs.
-            def put():
-                if not queue.full():
-                    queue.put_nowait(message)
-            loop.call_soon_threadsafe(put)
-
-        remove = jobs.add_listener(enqueue)
-        try:
-            await ws.send_text(json.dumps({"type": "hello", "jobs": jobs.state()}))
-            while True:
-                await ws.send_text(json.dumps(await queue.get(), ensure_ascii=False))
-        except (WebSocketDisconnect, RuntimeError):
-            pass
-        finally:
-            remove()
+    app.include_router(setup.router)
+    for module in (library, items, calendar, discovery, settings, system):
+        app.include_router(module.build(ctx))
 
     # --- interfaz -------------------------------------------------------
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

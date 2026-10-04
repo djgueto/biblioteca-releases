@@ -1506,8 +1506,8 @@ class ContentScanner:
                     return
             
             # Guardar enlaces en archivo
-            downloads_dir = Path("downloads")
-            downloads_dir.mkdir(exist_ok=True)
+            downloads_dir = Path(Settings.DOWNLOADS_DIR)
+            downloads_dir.mkdir(parents=True, exist_ok=True)
             
             from datetime import datetime
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

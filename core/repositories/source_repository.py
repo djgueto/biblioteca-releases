@@ -1,5 +1,19 @@
 from __future__ import annotations
 
+from urllib.parse import parse_qs, urlparse
+
+
+def source_key(url: str) -> str:
+    """Forma comparable de una URL de ficha. En Hispashare la identifica su
+    `id` (?view=title&id=77), escriba como escriba el resto de la URL."""
+    url = (url or "").strip()
+    parsed = urlparse(url)
+    if "hispashare" in parsed.netloc.lower() or not parsed.netloc:  # también "/?view=title&id=77"
+        title_id = (parse_qs(parsed.query).get("id") or [None])[0]
+        if title_id:
+            return f"hispashare:{title_id}"
+    return url.lower().rstrip("/")
+
 
 class SourceRepository:
     def __init__(self, db_manager):
@@ -31,7 +45,54 @@ class SourceRepository:
             "CREATE INDEX IF NOT EXISTS idx_source_matches_series_id "
             "ON source_matches(series_id)"
         )
+        # Fichas que el usuario marcó como incorrectas para un elemento: la
+        # búsqueda automática nunca vuelve a elegirlas para él.
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rejected_sources (
+                series_id INTEGER NOT NULL,
+                provider TEXT NOT NULL,
+                source_key TEXT NOT NULL,
+                source_url TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (series_id, provider, source_key)
+            )
+            """
+        )
         conn.commit()
+
+    # --- fichas rechazadas ---------------------------------------------------
+    def reject(self, series_id: int, source_url: str, provider: str = "hispashare") -> None:
+        conn = self.db.get_connection()
+        conn.execute(
+            "INSERT OR IGNORE INTO rejected_sources (series_id, provider, source_key, source_url) VALUES (?, ?, ?, ?)",
+            (series_id, provider, source_key(source_url), source_url),
+        )
+        conn.commit()
+
+    def unreject(self, series_id: int, source_url: str, provider: str = "hispashare") -> None:
+        conn = self.db.get_connection()
+        conn.execute(
+            "DELETE FROM rejected_sources WHERE series_id = ? AND provider = ? AND source_key = ?",
+            (series_id, provider, source_key(source_url)),
+        )
+        conn.commit()
+
+    def rejected_keys(self, series_id: int, provider: str = "hispashare") -> set[str]:
+        rows = self.db.get_connection().execute(
+            "SELECT source_key FROM rejected_sources WHERE series_id = ? AND provider = ?", (series_id, provider)
+        ).fetchall()
+        return {row[0] for row in rows}
+
+    def is_rejected(self, series_id: int, source_url: str, provider: str = "hispashare") -> bool:
+        return bool(source_url) and source_key(source_url) in self.rejected_keys(series_id, provider)
+
+    def list_rejected(self, series_id: int) -> list[dict]:
+        rows = self.db.get_connection().execute(
+            "SELECT provider, source_url, created_at FROM rejected_sources WHERE series_id = ? ORDER BY created_at DESC",
+            (series_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def get_current(self, series_id: int, provider: str = "hispashare") -> dict | None:
         conn = self.db.get_connection()
@@ -144,6 +205,11 @@ class SourceRepository:
         source_url = (payload.get("source_url") or "").strip()
         cover_url = payload.get("cover_url") or ""
         match_status = payload.get("match_status", "confirmed")
+
+        if match_status == "confirmed" and self.is_rejected(series_id, source_url, provider):
+            # Lo encontrado automáticamente nunca pisa un "esta no es" del
+            # usuario (que sí puede volver a ponerla a mano: 'manual').
+            return False
 
         if match_status == "confirmed":
             conflicting_series_id = self._url_claimed_by_another_series(series_id, source_url, provider)

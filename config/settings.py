@@ -1,16 +1,41 @@
 import os
+import sys
 from pathlib import Path
 from dotenv import load_dotenv
 
+APP_NAME = "Biblioteca"
+# Código y recursos (en la app empaquetada, la carpeta temporal de PyInstaller).
 BASE_DIR = Path(__file__).resolve().parents[1]
-# En Docker el .env vive en el volumen de configuración (APP_ENV_FILE=/config/.env).
-ENV_PATH = Path(os.getenv("APP_ENV_FILE") or BASE_DIR / ".env")
+
+
+def default_data_dir() -> Path:
+    """Dónde viven .env, base de datos, cachés, logs y copias de seguridad.
+
+    1. APP_DATA_DIR si está definida (Docker: /config).
+    2. La carpeta del código si ya tiene un .env (instalaciones de antes y
+       desarrollo): así nada cambia de sitio.
+    3. La carpeta de datos de usuario del sistema (app instalada).
+    """
+    env = os.getenv("APP_DATA_DIR")
+    if env:
+        return Path(env).expanduser()
+    if not getattr(sys, "frozen", False) and (BASE_DIR / ".env").exists():
+        return BASE_DIR
+    if os.name == "nt":
+        return Path(os.getenv("APPDATA") or Path.home() / "AppData" / "Roaming") / APP_NAME
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / APP_NAME
+    return Path(os.getenv("XDG_CONFIG_HOME") or Path.home() / ".config") / APP_NAME.lower()
+
+
+DATA_DIR = default_data_dir()
+ENV_PATH = Path(os.getenv("APP_ENV_FILE") or DATA_DIR / ".env")
 load_dotenv(dotenv_path=ENV_PATH)
 
 def _resolve_path(value: str) -> str:
     p = Path(value).expanduser()
     if not p.is_absolute():
-        p = (BASE_DIR / p).resolve()
+        p = (DATA_DIR / p).resolve()
     return str(p)
 
 def write_env_values(path: Path, values: dict[str, str]) -> None:
@@ -44,6 +69,9 @@ def write_env_values(path: Path, values: dict[str, str]) -> None:
 
 
 class Settings:
+    APP_VERSION = os.getenv("APP_VERSION", "dev")
+    DATA_DIR = str(DATA_DIR)
+
     # APIs
     TMDB_API_KEY = os.getenv("TMDB_API_KEY", "")
     # IMDb no tiene API pública: OMDb (omdbapi.com) da sus notas con una clave
@@ -56,7 +84,7 @@ class Settings:
     HISPASHARE_BASE_URL = "https://www.hispashare.org"
     
     # eMule
-    EMULE_URL = os.getenv("EMULE_URL", "http://localhost:4711")
+    EMULE_URL = os.getenv("EMULE_URL", "")  # p. ej. http://192.168.1.10:4711 (vacío = sin eMule)
     EMULE_USERNAME = os.getenv("EMULE_USERNAME", "admin")
     EMULE_PASSWORD = os.getenv("EMULE_PASSWORD", "")
     EMULE_AUTO_SEND = os.getenv("EMULE_AUTO_SEND", "False").lower() == "true"
@@ -89,6 +117,10 @@ class Settings:
     
     DB_PATH = _resolve_path(os.getenv("DB_PATH", "series_manager.db"))
     COVER_CACHE_DIR = _resolve_path(os.getenv("COVER_CACHE_DIR", "cache/covers"))
+    LOG_FILE = _resolve_path(os.getenv("LOG_FILE", "series_manager.log"))
+    BACKUPS_DIR = _resolve_path(os.getenv("BACKUPS_DIR", "backups"))
+    # Listas de enlaces ed2k que guarda el escaneo de Hispashare.
+    DOWNLOADS_DIR = _resolve_path(os.getenv("DOWNLOADS_DIR", "downloads"))
 
     LIBRARY_CATEGORIES = {
         'series': {

@@ -178,6 +178,111 @@ class TestWebApi(unittest.TestCase):
         self.assertEqual((r.status_code, r.content), (200, b"\xff\xd8jpeg"))
         self.assertEqual(self.client.get("/api/series/2/cover").status_code, 404)
 
+    def _fake_tmdb(self):
+        thrones = {"id": 1399, "name": "Juego de tronos", "original_name": "Game of Thrones",
+                   "first_air_date": "2011-04-17", "overview": "Siete reinos.", "poster_path": "/got.jpg"}
+
+        def request(_client, endpoint, params=None):
+            if endpoint == "search/tv":
+                return {"results": [thrones, {"id": 10, "name": "Serie A", "first_air_date": "2020-01-01"}]}
+            if endpoint == "tv/1399":
+                return thrones
+            return None
+
+        return [
+            patch.object(Settings, "TMDB_API_KEY", "clave"),
+            patch.object(Settings, "AUTO_RENAME_FOLDER_ON_TMDB_ASSIGN", False),
+            patch("core.tmdb.api_client.TMDBClient._make_request", request),
+            patch("core.services.missing_episodes_service.MissingEpisodesService.rebuild_for_series",
+                  return_value={"recalculated_missing": True, "missing_count": 4}),
+        ]
+
+    def test_tmdb_search_by_title_id_and_link(self):
+        self.assertEqual(self.client.get("/api/series/1/tmdb_search?q=tronos").status_code, 409)  # sin API key
+        patches = self._fake_tmdb()
+        for p in patches:
+            p.start()
+        try:
+            results = self.client.get("/api/series/1/tmdb_search?q=tronos").json()["results"]
+            self.assertEqual([(r["id"], r["year"], r["current"]) for r in results],
+                             [(1399, 2011, False), (10, 2020, True)])
+            by_id = self.client.get("/api/series/1/tmdb_search?q=1399").json()["results"]
+            self.assertEqual([r["title"] for r in by_id], ["Juego de tronos"])
+            link = self.client.get("/api/series/1/tmdb_search",
+                                   params={"q": "https://www.themoviedb.org/tv/1399-game-of-thrones"}).json()
+            self.assertEqual(link["results"][0]["id"], 1399)
+            wrong_kind = self.client.get("/api/series/1/tmdb_search",
+                                         params={"q": "https://www.themoviedb.org/movie/603"})
+            self.assertEqual(wrong_kind.status_code, 422)
+        finally:
+            for p in patches:
+                p.stop()
+
+    def test_set_tmdb_corrects_identity(self):
+        sqlite3.connect(self.db_path).execute("UPDATE series SET needs_review = 1 WHERE id = 1").connection.commit()
+        patches = self._fake_tmdb()
+        for p in patches:
+            p.start()
+        try:
+            self.client.get("/api/library")
+            r = self.client.put("/api/series/1/tmdb", json={"tmdb_id": 1399})
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual((r.json()["tmdb_name"], r.json()["year"], r.json()["missing_count"]),
+                             ("Juego de tronos", 2011, 4))
+            self.assertEqual(self.client.put("/api/series/1/tmdb", json={"tmdb_id": 5}).status_code, 422)
+        finally:
+            for p in patches:
+                p.stop()
+        detail = self.client.get("/api/series/1").json()
+        self.assertEqual((detail["tmdb_id"], detail["tmdb_name"], detail["needs_review"]), (1399, "Juego de tronos", False))
+        self.assertIn("tmdb_changed", [h["decision_type"] for h in detail["history"]])
+        items = {i["id"]: i for i in self.client.get("/api/library").json()}
+        self.assertEqual(items[1]["tmdb_id"], 1399)  # la caché de la biblioteca se invalidó
+
+    def test_seasons_show_premiere_date(self):
+        from core.tmdb.metadata import TmdbMetaRepository
+
+        # Caché antigua sin temporadas: la ficha pide la serie completa una vez.
+        TmdbMetaRepository(DatabaseManager()).save({"tmdb_id": 10, "media_type": "tv", "title": "Serie A"})
+        full = {"id": 10, "name": "Serie A", "seasons": [
+            {"season_number": 0, "air_date": None, "episode_count": 2},
+            {"season_number": 1, "air_date": "2020-01-01", "episode_count": 8}]}
+        calls = []
+
+        def request(_client, endpoint, params=None):
+            calls.append(endpoint)
+            return full if endpoint == "tv/10" else None
+
+        with patch.object(Settings, "TMDB_API_KEY", "clave"), \
+                patch("core.tmdb.api_client.TMDBClient._make_request", request):
+            season = self.client.get("/api/series/1").json()["seasons"][0]
+            self.assertEqual((season["air_date"], season["episode_count"]), ("2020-01-01", 8))
+            self.client.get("/api/series/1")  # ya en caché
+            self.client.get("/api/series/1/cover")  # las carátulas no piden temporadas
+        self.assertEqual(calls, ["tv/10"])
+
+    def test_confirm_tmdb_clears_review(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("UPDATE series SET needs_review = 1, confidence_score = 0.55 WHERE id = 1")
+        conn.execute("INSERT INTO series (id, name, folder_path, content_category, tmdb_id) "
+                     "VALUES (3, 'copia', '/media/series/copia', 'series', 10)")
+        conn.commit()
+        conn.close()
+        detail = self.client.get("/api/series/1").json()
+        self.assertTrue(detail["needs_review"])
+        self.assertEqual([s["id"] for s in detail["same_tmdb"]], [3])
+
+        with patch("core.services.missing_episodes_service.MissingEpisodesService.rebuild_for_series",
+                   return_value={"recalculated_missing": True, "missing_count": 2}) as rebuild, \
+                patch.object(Settings, "TMDB_API_KEY", "clave"):
+            r = self.client.post("/api/series/1/tmdb_confirm")
+        self.assertEqual((r.status_code, r.json()["missing_count"]), (200, 2))
+        rebuild.assert_called_once_with(1)
+        detail = self.client.get("/api/series/1").json()
+        self.assertEqual((detail["needs_review"], detail["confidence_score"], detail["tmdb_id"]), (False, 1.0, 10))
+        self.assertIn("tmdb_confirmed", [h["decision_type"] for h in detail["history"]])
+        self.assertEqual(self.client.post("/api/series/2/tmdb_confirm").status_code, 409)  # sin TMDB
+
     def test_jobs_endpoints_and_websocket(self):
         with self.client.websocket_connect("/api/ws") as ws:
             self.assertEqual(ws.receive_json()["type"], "hello")
@@ -235,7 +340,7 @@ class TestWebApi(unittest.TestCase):
             self.assertIn("DONTORRENT_ENABLED=True", text)
             self.assertIn("DONTORRENT_URL=https://dontorrent.nuevo", text)
             self.assertTrue(Settings.DONTORRENT_ENABLED)
-            with patch("web.app._tmdb_key_works", return_value=False):
+            with patch("web.routes.settings._tmdb_key_works", return_value=False):
                 self.assertEqual(self.client.put("/api/settings/general", json={"tmdb_api_key": "mala"}).status_code, 422)
             self.assertEqual(self.client.put("/api/settings/general", json={"dontorrent_url": "dontorrent.x"}).status_code, 422)
 
@@ -250,15 +355,45 @@ class TestWebApi(unittest.TestCase):
         self.assertFalse(self.client.get("/api/series/2").json()["hispashare_url"])
         self.assertEqual(self.client.put("/api/series/2/hispashare_url", json={"url": "ftp://x"}).status_code, 422)
 
+    def test_tmdb_rematch(self):
+        self.assertEqual(self.client.post("/api/series/2/tmdb_rematch").status_code, 409)  # sin API key
+        match = {"tmdb_id": 603, "name": "Peli B", "year": 2021, "confidence_score": 0.97, "needs_review": False}
+        with patch.object(Settings, "TMDB_API_KEY", "clave"), \
+                patch("core.tmdb.auto_matcher.TMDBAutoMatcher.match_content", return_value=match):
+            r = self.client.post("/api/series/2/tmdb_rematch")
+            self.assertEqual(self.client.post("/api/series/99/tmdb_rematch").status_code, 404)
+        self.assertEqual((r.status_code, r.json()["matched"], r.json()["tmdb_id"]), (200, True, 603))
+        detail = self.client.get("/api/series/2").json()
+        self.assertEqual(detail["tmdb_id"], 603)
+        self.assertIn("tmdb_rescan_matched", [h["decision_type"] for h in detail["history"]])
+
+    def test_hispashare_search_now_starts_job_for_that_item(self):
+        started = []
+        jobs = JobManager({"source_search": lambda bus, **opts: started.append(opts) or _GatedJob(bus, self.gate)})
+        client = TestClient(create_app(jobs, init_db=False))
+        try:
+            with patch.object(Settings, "HISPASHARE_USER", ""):
+                self.assertEqual(client.post("/api/series/1/hispashare_search_now").status_code, 409)
+            with patch.object(Settings, "HISPASHARE_USER", "u"), patch.object(Settings, "HISPASHARE_PASS", "p"):
+                self.assertEqual(client.post("/api/series/1/hispashare_search_now").status_code, 200)
+                self.assertEqual(client.post("/api/series/1/hispashare_search_now").status_code, 409)  # ya en marcha
+                self.assertEqual(client.post("/api/series/99/hispashare_search_now").status_code, 404)
+            self.assertEqual(started, [{"series_id": 1}])
+            # Sin elemento no tiene sentido lanzarla desde la lista de tareas.
+            self.assertEqual(client.post("/api/jobs/source_search/start").status_code, 422)
+        finally:
+            self.gate.set()
+            client.close()
+
     def test_cover_prefers_tmdb_poster(self):
         from core.tmdb.metadata import TmdbMetaRepository
 
         TmdbMetaRepository(DatabaseManager()).save({"tmdb_id": 10, "media_type": "tv", "poster_path": "/p.jpg"})
-        with patch("web.app.get_cover_bytes", side_effect=lambda sid, url: b"tmdb" if "image.tmdb.org" in url else b"h") as get:
+        with patch("web.routes.library.get_cover_bytes", side_effect=lambda sid, url: b"tmdb" if "image.tmdb.org" in url else b"h") as get:
             r = self.client.get("/api/series/1/cover")
         self.assertEqual(r.content, b"tmdb")
         self.assertEqual(get.call_args.args[1], "https://image.tmdb.org/t/p/w342/p.jpg")
-        with patch("web.app.get_cover_bytes", side_effect=lambda sid, url: None if "tmdb" in url else b"h"):
+        with patch("web.routes.library.get_cover_bytes", side_effect=lambda sid, url: None if "tmdb" in url else b"h"):
             self.assertEqual(self.client.get("/api/series/1/cover").content, b"h")  # respaldo Hispashare
 
     def test_import_settings(self):

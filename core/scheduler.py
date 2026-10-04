@@ -5,10 +5,7 @@ from pathlib import Path
 import re
 
 from core.auth.hispashare_login import HispashareAuth
-from core.library.scanner import LibraryScanner
-from core.library.category_scanner import CategoryLibraryScanner
-from core.tmdb.api_client import TMDBClient
-from core.tmdb.auto_matcher import TMDBAutoMatcher
+from core.library.sync import LibrarySync
 from core.hispashare.searcher import HispashareSearcher
 from core.hispashare.content_scanner import ContentScanner
 from core.wolfmax.category_scanner import WolfmaxCategoryScanner, WOLFMAX_CATEGORY_URLS, _normalize, _title_score
@@ -102,7 +99,7 @@ class Scheduler(BackgroundJob):
             self._wait_until_due()
         while self.running:
             if not self.cycle_lock.acquire():
-                # Otro proceso (la web o la app de escritorio) ya está en un
+                # Otro proceso (otro servidor sobre la misma BD) ya está en un
                 # ciclo sobre la misma base de datos: se espera a que acabe.
                 self._log(f"⏸️ Ya hay un ciclo en marcha en otro proceso ({self.cycle_lock.holder()}); "
                           f"se vuelve a intentar en 10 minutos")
@@ -240,6 +237,10 @@ class Scheduler(BackgroundJob):
             missing_count = self.detect_missing()
             self._log(f"   ✅ {missing_count} episodios faltantes detectados")
 
+            # 6.0. Lo que no se encontró hace tiempo vuelve a buscarse (por si
+            # lo han subido); lo que el usuario apagó, no.
+            self.retry_disabled_searches()
+
             # 6.1. Buscar URLs para series nuevas sin episodios faltantes
             self._progress(70, "🔎 Buscando URLs para series nuevas...")
             self._log("🔎 Buscando URLs en Hispashare para series nuevas sin episodios faltantes...")
@@ -336,124 +337,29 @@ class Scheduler(BackgroundJob):
             self.logger.error(f"Error en login: {e}")
             raise
     
+    def _library_sync(self):
+        return LibrarySync(
+            self.db,
+            self.series_repository,
+            self.reconciliation_service,
+            self.decision_log_repository,
+            log=self._log,
+            should_continue=lambda: self.running,
+            on_matched=lambda series_id, match: self._emit(TMDB_MATCHED, series_id=series_id, match=match),
+        )
+
     def scan_library(self):
-        """Escanear biblioteca de series"""
-        try:
-            series_list = LibraryScanner.scan_all_episodic_categories(db_manager=self.db)
-            
-            # Limpiar duplicados existentes antes de procesar nuevas series
-            self._log("🧹 Limpiando episodios duplicados...")
-            cleaned_count = self.db.cleanup_duplicate_episodes()
-            if cleaned_count > 0:
-                self._log(f"   ✅ {cleaned_count} episodios duplicados eliminados")
-            
-            # Guardar en base de datos
-            for series in series_list:
-                self.db.insert_or_update_series(series)
-            
-            return series_list
-            
-        except Exception as e:
-            self.logger.error(f"Error en scan: {e}")
-            raise
+        """Escanear bibliotecas episódicas."""
+        return self._library_sync().scan_episodic()
 
     def scan_single_file_library(self):
         """Escanear bibliotecas de contenido de archivo unico."""
-        try:
-            discovered_items = []
+        return self._library_sync().scan_single_file()
 
-            for category in Settings.get_single_file_categories():
-                scanner = CategoryLibraryScanner(
-                    category,
-                    Settings.get_paths_for_category(category),
-                    skip_paths=self.db.get_unmonitored_folder_paths(),
-                )
-                items = scanner.scan()
-                for item in items:
-                    item_data = {
-                        'name': item.get('name', ''),
-                        'folder_path': item.get('path', ''),
-                        'content_category': category,
-                    }
-                    self.db.insert_or_update_series(item_data)
-                    discovered_items.append(item_data)
-
-            return discovered_items
-
-        except Exception as e:
-            self.logger.error(f"Error escaneando bibliotecas de archivo unico: {e}")
-            raise
-    
     def match_tmdb(self, series_list):
-        """Vincular series con TMDB"""
-        try:
-            tmdb_client = TMDBClient(Settings.TMDB_API_KEY)
-            matcher = TMDBAutoMatcher(tmdb_client)
-            
-            matched = 0
-            for series in series_list:
-                # Si ya tiene TMDB ID, saltar
-                if series.get('tmdb_id'):
-                    continue
-                
-                content_type = Settings.get_category_label(series.get('content_category', 'series'))
-                self._log(f"   🔗 Matching [{content_type}]: {series['name']}...")
+        """Vincular con TMDB lo que aún no tiene ficha."""
+        return self._library_sync().match_unmatched(series_list)
 
-                try:
-                    match_result = matcher.match_content(series)
-
-                    if match_result:
-                        series['tmdb_id'] = match_result['tmdb_id']
-                        series['year'] = match_result['year']
-                        series['confidence_score'] = match_result['confidence_score']
-                        series['needs_review'] = match_result['needs_review']
-
-                        update_result = self.series_repository.update_tmdb_identity(series['id'], match_result)
-                        self.reconciliation_service.on_tmdb_changed(
-                            series['id'],
-                            update_result.get('previous_item') or {},
-                            update_result.get('updated_item') or {},
-                            is_library=(
-                                Settings.get_category_content_mode(series.get('content_category', 'series'))
-                                == 'single_file'
-                            ),
-                            rebuild_missing=False,
-                        )
-                        self.decision_log_repository.append(
-                            series['id'],
-                            'tmdb_scheduler_matched',
-                            'TMDB asignado desde el scheduler',
-                            {
-                                'tmdb_id': match_result.get('tmdb_id'),
-                                'name': match_result.get('name'),
-                                'year': match_result.get('year'),
-                                'confidence_score': match_result.get('confidence_score'),
-                            },
-                        )
-                        matched += 1
-
-                        # Emitir señal para actualizar la interfaz en tiempo real
-                        self._emit(TMDB_MATCHED, series_id=series['id'], match=match_result)
-
-                        confidence_emoji = "✅" if match_result['confidence_score'] >= 0.85 else "⚠️"
-                        self._log(
-                            f"      {confidence_emoji} {match_result['name']} "
-                            f"({match_result['year']}) - "
-                            f"Confianza: {match_result['confidence_score']:.1%}"
-                        )
-                    else:
-                        self._log(f"      ❌ No se encontró match")
-                except Exception as series_error:
-                    self.logger.error(f"Error haciendo match TMDB de '{series.get('name')}': {series_error}")
-                    self._log(f"      ❌ Error en match: {series_error}")
-                    continue
-            
-            self._log(f"   ✅ {matched} elementos vinculados con TMDB")
-            
-        except Exception as e:
-            self.logger.error(f"Error en match_tmdb: {e}")
-            raise
-    
     def detect_missing(self):
         """Detectar episodios faltantes"""
         try:
@@ -621,6 +527,17 @@ class Scheduler(BackgroundJob):
         except Exception as e:
             self.logger.error(f"Error en {method_name}: {e}")
             raise
+
+    def retry_disabled_searches(self):
+        try:
+            retried = self.db.retry_expired_searches()
+        except Exception as e:
+            self.logger.error(f"Error reactivando búsquedas antiguas: {e}", exc_info=True)
+            return
+        if retried:
+            names = ", ".join(r["name"] for r in retried[:5]) + ("…" if len(retried) > 5 else "")
+            self._log(f"🔁 Se vuelve a buscar en Hispashare lo que no se encontró hace más de "
+                      f"{self.db.SEARCH_RETRY_DAYS} días ({len(retried)}): {names}")
 
     def search_hispashare(self, driver):
         """Buscar series en Hispashare - solo las que tienen episodios faltantes"""

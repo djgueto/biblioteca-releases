@@ -1,6 +1,6 @@
-"""Un solo ciclo a la vez aunque haya varios procesos (web y escritorio).
+"""Un solo ciclo a la vez aunque haya varios procesos (p. ej. dos servidores sobre la misma BD).
 
-Ambas apps arrancan su ciclo sobre la misma base de datos; sin esto los dos
+Si dos servidores arrancan su ciclo sobre la misma base de datos, sin esto los dos
 ciclos buscarían y descargarían lo mismo a la vez. El ciclo que tiene el
 bloqueo renueva su "señal de vida" (heartbeat) mientras trabaja; si el
 proceso muere, la señal caduca y otro puede tomar el relevo.
