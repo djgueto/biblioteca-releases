@@ -132,6 +132,13 @@ class ReconciliationService:
         if "hispashare_url" in changes:
             manual_url = (changes.get("hispashare_url") or "").strip()
             if manual_url:
+                # Ponerla a mano anula un "esta no es" anterior.
+                self.source_repository.unreject(series_id, manual_url)
+                if self.source_offer_repository is not None:
+                    current_offer = self.source_offer_repository.get(series_id, "hispashare")
+                    if current_offer and current_offer.source_url != manual_url:
+                        # La oferta era de la ficha anterior.
+                        self.source_offer_repository.delete(series_id, "hispashare")
                 cover_url = self.series_repository.db.derive_hispashare_cover_url(manual_url) or ""
                 self.source_repository.save_match(
                     series_id,
@@ -155,6 +162,9 @@ class ReconciliationService:
                     series_id,
                     "La URL Hispashare se limpió manualmente",
                 )
+                if self.source_offer_repository is not None:
+                    # Si no, el ciclo revisaría la URL de la oferta y la reviviría.
+                    self.source_offer_repository.delete(series_id, "hispashare")
                 self.decision_log_repository.append(
                     series_id,
                     "source_cleared_manual",
@@ -179,6 +189,32 @@ class ReconciliationService:
             "recheck_hispashare_url": False,
             "previous_hispashare_url": "",
         }
+
+    def reject_source(self, series_id: int, provider: str = "hispashare") -> str | None:
+        """El usuario dice que la ficha asignada no es la de este elemento:
+        se quita, se olvida su oferta, nunca se vuelve a elegir sola y se
+        vuelve a buscar la correcta. Devuelve la URL rechazada."""
+        current = self.source_repository.get_current(series_id, provider) or {}
+        url = (current.get("source_url") or "").strip() if current.get("match_status") != "cleared" else ""
+        if not url and self.source_offer_repository is not None:
+            offer = self.source_offer_repository.get(series_id, provider)
+            url = (offer.source_url or "").strip() if offer else ""
+        if not url:
+            return None
+        self.source_repository.reject(series_id, url, provider)
+        self.source_repository.clear_current(series_id, "Marcada como incorrecta por el usuario", provider=provider)
+        if self.source_offer_repository is not None:
+            self.source_offer_repository.delete(series_id, provider)
+        if provider == "hispashare":
+            self.series_repository.mark_search_enabled(series_id)
+        self.decision_log_repository.append(
+            series_id,
+            "source_rejected",
+            f"Ficha de {provider} marcada como incorrecta: no se volverá a usar",
+            {"provider": provider, "source_url": url},
+        )
+        self._publish(SERIES_UPDATED, {"series_id": series_id})
+        return url
 
     def _publish(self, event_type: str, payload: dict):
         if self.event_bus is not None:

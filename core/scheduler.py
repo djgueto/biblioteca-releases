@@ -240,6 +240,10 @@ class Scheduler(BackgroundJob):
             missing_count = self.detect_missing()
             self._log(f"   ✅ {missing_count} episodios faltantes detectados")
 
+            # 6.0. Lo que no se encontró hace tiempo vuelve a buscarse (por si
+            # lo han subido); lo que el usuario apagó, no.
+            self.retry_disabled_searches()
+
             # 6.1. Buscar URLs para series nuevas sin episodios faltantes
             self._progress(70, "🔎 Buscando URLs para series nuevas...")
             self._log("🔎 Buscando URLs en Hispashare para series nuevas sin episodios faltantes...")
@@ -621,6 +625,17 @@ class Scheduler(BackgroundJob):
         except Exception as e:
             self.logger.error(f"Error en {method_name}: {e}")
             raise
+
+    def retry_disabled_searches(self):
+        try:
+            retried = self.db.retry_expired_searches()
+        except Exception as e:
+            self.logger.error(f"Error reactivando búsquedas antiguas: {e}", exc_info=True)
+            return
+        if retried:
+            names = ", ".join(r["name"] for r in retried[:5]) + ("…" if len(retried) > 5 else "")
+            self._log(f"🔁 Se vuelve a buscar en Hispashare lo que no se encontró hace más de "
+                      f"{self.db.SEARCH_RETRY_DAYS} días ({len(retried)}): {names}")
 
     def search_hispashare(self, driver):
         """Buscar series en Hispashare - solo las que tienen episodios faltantes"""

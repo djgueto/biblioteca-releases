@@ -11,9 +11,11 @@ import asyncio
 import json
 import logging
 import os
+import re
 import threading
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -34,11 +36,17 @@ from core.importer.service import ImportSettings
 from core.library.parser import mediainfo_available
 from core.library.quality_scan import coverage as quality_coverage
 from core.library.roots import LibraryRoots, sync_library_roots
-from core.repositories import DecisionLogRepository, LibraryRepository, SeriesRepository, SourceOfferRepository
+from core.repositories import (
+    DecisionLogRepository,
+    LibraryRepository,
+    SeriesRepository,
+    SourceOfferRepository,
+    SourceRepository,
+)
 from core.repositories.grab_history_repository import GrabHistoryRepository
 from core.services.factory import build_domain_services
 from core.services.quality_profile import TIERS, QualityProfile
-from core.tmdb.metadata import TmdbMetadataService, image_url
+from core.tmdb.metadata import TmdbMetadataService, image_url, media_type_for_category
 from web.jobs import JobAlreadyRunning, JobManager
 from web.periodic import PeriodicRunner
 
@@ -69,6 +77,32 @@ class GeneralSettingsUpdate(BaseModel):
 
 class HispashareUrlUpdate(BaseModel):
     url: str | None = None
+
+
+class TmdbUpdate(BaseModel):
+    tmdb_id: int
+
+
+class SearchToggle(BaseModel):
+    enabled: bool
+
+
+TMDB_LINK = re.compile(r"themoviedb\.org/(tv|movie)/(\d+)")
+
+
+def _tmdb_result(data: dict, current_id) -> dict:
+    date = data.get("first_air_date") or data.get("release_date") or ""
+    overview = data.get("overview") or ""
+    return {
+        "id": data["id"],
+        "title": data.get("name") or data.get("title") or "Sin nombre",
+        "original_title": data.get("original_name") or data.get("original_title") or "",
+        "year": int(date[:4]) if date[:4].isdigit() else None,
+        "overview": overview if len(overview) <= 320 else overview[:320].rsplit(" ", 1)[0] + "…",
+        "poster_url": image_url(data.get("poster_path"), "w185"),
+        "vote_average": data.get("vote_average"),
+        "current": data["id"] == current_id,
+    }
 
 
 def autostart_enabled() -> bool:
@@ -226,7 +260,35 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
         item["offers"] = [_serialize_offer(o) for o in SourceOfferRepository(db).get_all_for_series(series_id)]
         item["history"] = DecisionLogRepository(db).list_for_series(series_id, limit=30)
         item["grabs"] = GrabHistoryRepository(db).list_for_series(series_id)
-        meta = TmdbMetadataService(db).for_item(item) if item.get("tmdb_id") else None
+        item["rejected_sources"] = SourceRepository(db).list_rejected(series_id)
+        # Otro elemento con la misma ficha de TMDB: es uno de los motivos de
+        # "Revisar match" (dos carpetas que dicen ser la misma obra).
+        item["same_tmdb"] = [
+            {"id": r[0], "name": r[1], "category_label": Settings.get_category_label(r[2])}
+            for r in db.get_connection().execute(
+                "SELECT id, COALESCE(NULLIF(tmdb_name, ''), name), content_category FROM series "
+                "WHERE tmdb_id = ? AND id != ?", (item.get("tmdb_id"), series_id)).fetchall()
+            if item.get("tmdb_id")
+            and media_type_for_category(r[2]) == media_type_for_category(item.get("content_category"))
+        ]
+        item["search_disabled_manual"] = bool(item.get("search_disabled_manual"))
+        disabled_at = item.get("search_disabled_at")
+        item["search_retry_at"] = (
+            (datetime.fromisoformat(str(disabled_at)) + timedelta(days=db.SEARCH_RETRY_DAYS)).strftime("%Y-%m-%d")
+            if item.get("search_disabled") and not item["search_disabled_manual"] and disabled_at else None
+        )
+        episodic = item.get("content_mode") == "episodic"
+        tmdb_service = TmdbMetadataService(db)
+        meta = tmdb_service.for_item(item, need_seasons=episodic) if item.get("tmdb_id") else None
+        if meta and episodic and meta.get("seasons") is not None \
+                and set(seasons) - {s["season"] for s in meta["seasons"]}:
+            # Hay una temporada que la caché aún no conocía (recién anunciada).
+            meta = tmdb_service.get(item["tmdb_id"], "tv", refresh=True) or meta
+        season_info = {s["season"]: s for s in (meta or {}).get("seasons") or []}
+        for season in item["seasons"]:
+            info = season_info.get(season["season"]) or {}
+            season["air_date"] = info.get("air_date")
+            season["episode_count"] = info.get("episode_count")
         item["tmdb"] = {
             "overview": meta.get("overview"),
             "vote_average": meta.get("vote_average"),
@@ -370,6 +432,135 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
         )
         library_cache.invalidate()
         return {"id": series_id, "hispashare_url": url or None}
+
+    @app.post("/api/series/{series_id}/hispashare_reject")
+    def reject_hispashare(series_id: int):
+        db = DatabaseManager()
+        if not db.get_series_by_id(series_id):
+            raise HTTPException(404, "No existe")
+        rejected = build_domain_services(db)["reconciliation_service"].reject_source(series_id, "hispashare")
+        if not rejected:
+            raise HTTPException(409, "No tiene ficha de Hispashare asignada")
+        library_cache.invalidate()
+        return {"id": series_id, "rejected_url": rejected}
+
+    @app.put("/api/series/{series_id}/hispashare_search")
+    def toggle_hispashare_search(series_id: int, body: SearchToggle):
+        db = DatabaseManager()
+        if not db.get_series_by_id(series_id):
+            raise HTTPException(404, "No existe")
+        if body.enabled:
+            db.enable_series_search(series_id)
+        else:
+            db.disable_series_search(series_id, manual=True)
+        DecisionLogRepository(db).append(
+            series_id, "search_toggled",
+            "Búsqueda en Hispashare activada a mano" if body.enabled else "Búsqueda en Hispashare desactivada a mano",
+            {"enabled": body.enabled, "origin": "web"},
+        )
+        library_cache.invalidate()
+        return {"id": series_id, "search_disabled": not body.enabled}
+
+    # --- corregir la identificación de TMDB ------------------------------
+    def _tmdb_client():
+        if not Settings.TMDB_API_KEY:
+            raise HTTPException(409, "Falta la API key de TMDB (Sistema → Ajustes)")
+        from core.tmdb.api_client import TMDBClient
+
+        return TMDBClient(Settings.TMDB_API_KEY)
+
+    @app.get("/api/series/{series_id}/tmdb_search")
+    def tmdb_search(series_id: int, q: str):
+        item = DatabaseManager().get_series_by_id(series_id)
+        if not item:
+            raise HTTPException(404, "No existe")
+        item = dict(item)
+        media = media_type_for_category(item.get("content_category"))
+        client = _tmdb_client()
+        q = q.strip()
+        link = TMDB_LINK.search(q)
+        if link and link.group(1) != media:
+            kind = "una película" if link.group(1) == "movie" else "una serie"
+            label = Settings.get_category_label(item.get("content_category"))
+            raise HTTPException(422, f"Ese enlace es de {kind}, pero «{label}» no es una biblioteca de ese tipo")
+        direct = link.group(2) if link else (q if q.isdigit() else None)
+        if direct:
+            # Un número o un enlace de themoviedb.org: esa ficha exacta.
+            data = client._make_request(f"{media}/{direct}")
+            results = [data] if data and "id" in data else []
+        elif q:
+            results = client.search_series(q) if media == "tv" else client.search_movies(q)
+        else:
+            results = []
+        return {"media_type": media,
+                "results": [_tmdb_result(r, item.get("tmdb_id")) for r in results[:20] if "id" in r]}
+
+    @app.post("/api/series/{series_id}/tmdb_confirm")
+    def confirm_tmdb(series_id: int):
+        """"Revisar match" → "es correcto": la identificación actual se da
+        por buena (como si se hubiera elegido a mano)."""
+        db = DatabaseManager()
+        item = db.get_series_by_id(series_id)
+        if not item:
+            raise HTTPException(404, "No existe")
+        item = dict(item)
+        if not item.get("tmdb_id"):
+            raise HTTPException(409, "No tiene TMDB que confirmar: vincúlalo primero")
+        services = build_domain_services(db)
+        services["series_repository"].save_manual_changes(
+            series_id, {"needs_review": False, "confidence_score": 1.0}, recalculate_missing=False)
+        services["decision_log_repository"].append(
+            series_id, "tmdb_confirmed", "Identificación TMDB confirmada a mano",
+            {"tmdb_id": item["tmdb_id"], "previous_confidence": item.get("confidence_score"), "origin": "web"},
+        )
+        missing_count = None
+        if Settings.get_category_content_mode(item.get("content_category")) == "episodic" and Settings.TMDB_API_KEY:
+            # Mientras estaba en revisión no se calculaban sus faltantes.
+            try:
+                missing_count = services["missing_episodes_service"].rebuild_for_series(series_id)["missing_count"]
+            except Exception:
+                logger.exception(f"No se pudieron recalcular los faltantes de {series_id}")
+        library_cache.invalidate()
+        return {"id": series_id, "tmdb_id": item["tmdb_id"], "missing_count": missing_count}
+
+    @app.put("/api/series/{series_id}/tmdb")
+    def set_tmdb(series_id: int, body: TmdbUpdate):
+        db = DatabaseManager()
+        item = db.get_series_by_id(series_id)
+        if not item:
+            raise HTTPException(404, "No existe")
+        item = dict(item)
+        media = media_type_for_category(item.get("content_category"))
+        # Nombre y año se leen de TMDB, no del navegador.
+        data = _tmdb_client()._make_request(f"{media}/{body.tmdb_id}")
+        if not data or "id" not in data:
+            raise HTTPException(422, f"TMDB no tiene ninguna {'serie' if media == 'tv' else 'película'} con ese ID")
+        found = _tmdb_result(data, None)
+        changes = {
+            "tmdb_id": found["id"], "tmdb_name": found["title"], "year": found["year"],
+            "confidence_score": 1.0, "needs_review": False,
+        }
+        # Mismo camino que la edición manual del escritorio (ManualUpdateTask).
+        services = build_domain_services(db)
+        saved = services["series_repository"].save_manual_changes(series_id, changes, recalculate_missing=False)
+        result = services["reconciliation_service"].on_manual_update(
+            series_id, saved.get("previous_item") or {}, saved.get("updated_item") or {}, changes,
+            is_library=Settings.get_category_content_mode(item.get("content_category")) == "single_file",
+        )
+        renamed = None
+        if Settings.AUTO_RENAME_FOLDER_ON_TMDB_ASSIGN:
+            rename = db.rename_series_folder(series_id, found["title"])
+            if rename.get("renamed"):
+                renamed = rename.get("new_name")
+            elif not rename.get("success"):
+                logger.warning(f"No se pudo renombrar la carpeta de {series_id}: {rename.get('error')}")
+        try:
+            TmdbMetadataService(db).get(found["id"], media, refresh=True)
+        except Exception:
+            logger.exception("No se pudieron refrescar los datos de TMDB")
+        library_cache.invalidate()
+        return {"id": series_id, "tmdb_id": found["id"], "tmdb_name": found["title"], "year": found["year"],
+                "missing_count": result.get("missing_count", 0), "renamed_to": renamed}
 
     # --- calendario -------------------------------------------------------
     @app.get("/api/calendar")

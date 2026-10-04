@@ -39,10 +39,20 @@ class SourceArbitrationService:
                 provider="hispashare", source_url=legacy_url, quality=Quality()
             )
 
+        from core.repositories.source_repository import SourceRepository
+
+        try:
+            sources = SourceRepository(self.db)
+        except Exception:
+            sources = None
         refreshed: list[SourceOffer] = []
         for provider_name, known_offer in known.items():
             provider = self.providers.get(provider_name)
             if provider is None or not known_offer.source_url:
+                continue
+            if sources is not None and sources.is_rejected(series_id, known_offer.source_url, provider_name):
+                # El usuario dijo que esa ficha no es: nunca se revive.
+                self.source_offer_repository.delete(series_id, provider_name)
                 continue
             try:
                 fresh = provider.refresh_offer(item, known_offer.source_url)

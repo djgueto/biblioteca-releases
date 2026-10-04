@@ -129,6 +129,13 @@ class SourceOfferRepository:
             return None
         return max(offers, key=lambda o: o.quality.rank_tuple())
 
+    def delete(self, series_id: int, provider: str) -> None:
+        """Olvida la oferta: marcarla no disponible no basta, porque
+        refresh_all_offers vuelve a comprobar su URL y la revive."""
+        conn = self.db.get_connection()
+        conn.execute("DELETE FROM source_offers WHERE series_id = ? AND provider = ?", (series_id, provider))
+        conn.commit()
+
     def mark_unavailable(self, series_id: int, provider: str) -> None:
         conn = self.db.get_connection()
         cursor = conn.cursor()

@@ -46,7 +46,12 @@ class DatabaseManager:
     CLEANUP_MAX_DELETION_RATIO = 0.25
 
     # Versión del esquema que deja initialize_database (PRAGMA user_version).
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
+
+    # Búsqueda en Hispashare desactivada sola (no se encontró): se reintenta
+    # pasado este tiempo, por si la han subido. Nunca si la apagó el usuario.
+    SEARCH_RETRY_DAYS = 30
+    SEARCH_RETRY_PER_CYCLE = 20
 
     def __init__(self, db_path=None):
         self.db_path = db_path or Settings.DB_PATH
@@ -273,6 +278,27 @@ class DatabaseManager:
         except Exception:
             pass
 
+        # Cuándo y cómo se desactivó la búsqueda automática: las desactivadas
+        # solas se reintentan cada SEARCH_RETRY_DAYS; las del usuario, nunca.
+        for column_sql, column_name in (
+            ("ALTER TABLE series ADD COLUMN search_disabled_at TIMESTAMP", "search_disabled_at"),
+            ("ALTER TABLE series ADD COLUMN search_disabled_manual INTEGER DEFAULT 0", "search_disabled_manual"),
+        ):
+            try:
+                cursor.execute(column_sql)
+                conn.commit()
+                self.logger.info(f"Campo {column_name} agregado a la tabla series")
+            except Exception:
+                pass
+        try:
+            cursor.execute(
+                "UPDATE series SET search_disabled_at = COALESCE(updated_at, CURRENT_TIMESTAMP) "
+                "WHERE COALESCE(search_disabled, 0) = 1 AND search_disabled_at IS NULL"
+            )
+            conn.commit()
+        except Exception:
+            pass
+
         try:
             cursor.execute(
                 '''
@@ -401,7 +427,7 @@ class DatabaseManager:
         # migrada si las columnas están de verdad (si no, se reintenta).
         expected = {
             "series": {"search_disabled", "monitored", "search_failures", "hispashare_cover_url",
-                       "content_category", "placeholder"},
+                       "content_category", "placeholder", "search_disabled_at", "search_disabled_manual"},
             "local_episodes": {"resolution_height", "codec", "source", "size_mb", "quality_rank", "hdr",
                                "quality_source", "measured_at"},
             "ed2k_history": {"last_sent_at", "retry_count"},
@@ -762,6 +788,8 @@ class DatabaseManager:
             if tmdb_id_changed:
                 set_clauses.append("search_disabled = 0")
                 set_clauses.append("search_failures = 0")
+                set_clauses.append("search_disabled_at = NULL")
+                set_clauses.append("search_disabled_manual = 0")
                 if not hispashare_url_changed:
                     current_item = self.get_series_by_id(series_id)
                     previous_hispashare_url = (current_item or {}).get("hispashare_url")
@@ -1101,17 +1129,19 @@ class DatabaseManager:
             conn.rollback()
             raise
 
-    def disable_series_search(self, series_id):
-        """Marcar una serie para que no se busque más automáticamente"""
+    def disable_series_search(self, series_id, manual=False):
+        """Marcar una serie para que no se busque más automáticamente.
+        manual=True: lo pidió el usuario y nunca se reintenta solo."""
         conn = self.get_connection()
         cursor = conn.cursor()
-        
+
         try:
             cursor.execute('''
-                UPDATE series 
-                SET search_disabled = 1, updated_at = CURRENT_TIMESTAMP
+                UPDATE series
+                SET search_disabled = 1, search_disabled_at = CURRENT_TIMESTAMP,
+                    search_disabled_manual = ?, updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
-            ''', (series_id,))
+            ''', (1 if manual else 0, series_id))
             conn.commit()
             self.logger.info(f"Búsqueda deshabilitada para serie ID: {series_id}")
             
@@ -1134,10 +1164,15 @@ class DatabaseManager:
                         WHEN COALESCE(search_failures, 0) + 1 >= ? THEN 1
                         ELSE 0
                     END,
+                    search_disabled_at = CASE
+                        WHEN COALESCE(search_failures, 0) + 1 >= ? THEN CURRENT_TIMESTAMP
+                        ELSE search_disabled_at
+                    END,
+                    search_disabled_manual = 0,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
                 ''',
-                (disable_after, series_id),
+                (disable_after, disable_after, series_id),
             )
             conn.commit()
 
@@ -1164,19 +1199,50 @@ class DatabaseManager:
         
         try:
             cursor.execute('''
-                UPDATE series 
+                UPDATE series
                 SET search_disabled = 0,
                     search_failures = 0,
+                    search_disabled_at = NULL,
+                    search_disabled_manual = 0,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
             ''', (series_id,))
             conn.commit()
             self.logger.info(f"Búsqueda reactivada para serie ID: {series_id}")
-            
+
         except Exception as e:
             self.logger.error(f"Error al reactivar búsqueda: {e}")
             conn.rollback()
             raise
+
+    def retry_expired_searches(self, days=None, limit=None) -> list[dict]:
+        """Reactiva la búsqueda de las fichas que se desactivaron solas hace
+        más de `days` días (las más antiguas primero, como mucho `limit`).
+        Quedan con un fallo de margen: si tampoco se encuentran, se vuelven
+        a desactivar en ese mismo intento y esperan otro periodo."""
+        days = self.SEARCH_RETRY_DAYS if days is None else days
+        limit = self.SEARCH_RETRY_PER_CYCLE if limit is None else limit
+        conn = self.get_connection()
+        rows = conn.execute(
+            '''
+            SELECT id, COALESCE(NULLIF(tmdb_name, ''), name) AS name FROM series
+            WHERE COALESCE(search_disabled, 0) = 1
+              AND COALESCE(search_disabled_manual, 0) = 0
+              AND COALESCE(monitored, 1) = 1
+              AND (hispashare_url IS NULL OR hispashare_url = '')
+              AND COALESCE(search_disabled_at, updated_at) <= datetime('now', ?)
+            ORDER BY COALESCE(search_disabled_at, updated_at)
+            LIMIT ?
+            ''',
+            (f"-{int(days)} days", int(limit)),
+        ).fetchall()
+        if rows:
+            conn.executemany(
+                "UPDATE series SET search_disabled = 0, search_failures = 2, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                [(row[0],) for row in rows],
+            )
+            conn.commit()
+        return [dict(row) for row in rows]
 
     def cleanup_deleted_series(self):
         """Limpiar series cuyas carpetas ya no existen en el disco o no están en rutas configuradas"""
