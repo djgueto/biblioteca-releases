@@ -7,6 +7,7 @@ Lo usan el ciclo automático (Scheduler) y el job "Escanear biblioteca"
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Callable
 
 from config.settings import Settings
@@ -58,7 +59,9 @@ class LibrarySync:
         skip_paths = self.db.get_unmonitored_folder_paths()
         for category in Settings.get_single_file_categories():
             scanner = CategoryLibraryScanner(category, Settings.get_paths_for_category(category), skip_paths=skip_paths)
-            for item in scanner.scan():
+            items = scanner.scan()
+            self._report_loose_episodes(category, scanner.loose_episodes)
+            for item in items:
                 if not self.should_continue():
                     return discovered
                 item_data = {
@@ -69,6 +72,20 @@ class LibrarySync:
                 self.db.insert_or_update_series(item_data)
                 discovered.append(item_data)
         return discovered
+
+    def _report_loose_episodes(self, category: str, paths: list[str]):
+        """Episodios dejados en una biblioteca de películas: se avisa para que
+        se muevan a su serie, y se quitan las fichas de "película" que
+        hubieran creado escaneos anteriores."""
+        if not paths:
+            return
+        label = Settings.get_category_label(category)
+        names = ", ".join(Path(p).name for p in paths[:5]) + ("…" if len(paths) > 5 else "")
+        self.log(f"   ⚠️ {len(paths)} episodio(s) suelto(s) en {label}: no son películas, muévelos a su "
+                 f"serie para que se reconozcan ({names})")
+        removed = self.db.delete_series_by_paths(paths)
+        if removed:
+            self.log(f"   🧹 {removed} ficha(s) de película creadas por error con esos episodios eliminadas")
 
     # --- TMDB -------------------------------------------------------------
     def match_unmatched(self, items: list[dict] | None = None) -> int:

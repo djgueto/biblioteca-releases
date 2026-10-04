@@ -947,6 +947,30 @@ class DatabaseManager:
         row = cursor.fetchone()
         return dict(row) if row else None
 
+    def delete_series_by_paths(self, paths):
+        """Borra las fichas de archivo único (películas, documentales...) de
+        estas rutas, con sus datos asociados. Devuelve cuántas. Nunca toca
+        series episódicas."""
+        wanted = {self.normalize_path(p).lower() for p in paths if p}
+        if not wanted:
+            return 0
+        single_file = Settings.get_single_file_categories()
+        conn = self.get_connection()
+        rows = conn.execute(
+            f"SELECT id, folder_path FROM series WHERE content_category IN ({','.join('?' * len(single_file))})",
+            single_file,
+        ).fetchall()
+        ids = [r[0] for r in rows if (r[1] or "").lower() in wanted or self.normalize_path(r[1] or "").lower() in wanted]
+        for series_id in ids:
+            for table in ("local_episodes", "missing_episodes", "source_matches", "source_offers"):
+                try:
+                    conn.execute(f"DELETE FROM {table} WHERE series_id = ?", (series_id,))
+                except sqlite3.OperationalError:
+                    pass  # tabla aún no creada en esta BD
+            conn.execute("DELETE FROM series WHERE id = ?", (series_id,))
+        conn.commit()
+        return len(ids)
+
     def rename_series_folder(self, series_id, new_name):
         """Renombra la carpeta de una serie en disco y actualiza la BD.
 

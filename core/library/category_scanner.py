@@ -1,7 +1,14 @@
 import logging
+import re
 from pathlib import Path
 
 from config.settings import Settings
+
+
+# Un episodio suelto (Serie S02E01.mp4, Serie 2x01.mkv). Más estricto que el
+# parser de series: en una biblioteca de películas solo se aparta lo que es
+# claramente un episodio.
+LOOSE_EPISODE = re.compile(r"\b[Ss]\d{1,2}[Ee]\d{1,3}\b|\b\d{1,2}x\d{2,3}\b")
 
 
 class CategoryLibraryScanner:
@@ -24,6 +31,9 @@ class CategoryLibraryScanner:
         self.paths = [Path(path) for path in self.library_paths if str(path).strip()]
         self.content_mode = Settings.get_category_content_mode(category)
         self.logger = logging.getLogger(__name__)
+        # Episodios sueltos encontrados en una biblioteca de archivo único: no
+        # son películas (buscarlos en TMDB como tales nunca da resultado).
+        self.loose_episodes: list[str] = []
 
     def scan(self):
         items = []
@@ -106,6 +116,10 @@ class CategoryLibraryScanner:
                 continue
 
             if entry.is_file() and self.is_video_file(entry):
+                if LOOSE_EPISODE.search(entry.stem):
+                    self.loose_episodes.append(str(entry))
+                    self.logger.warning(f"Episodio suelto en {self.category}, no se trata como película: {entry}")
+                    continue
                 discovered.append({
                     'name': entry.stem,
                     'path': str(entry),
