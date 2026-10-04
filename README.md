@@ -32,6 +32,15 @@ services:
 docker compose up -d
 ```
 
+Mientras el repositorio sea privado, la imagen también lo es: antes del
+primer `docker compose up`, inicia sesión una vez en el equipo con un token
+de GitHub (Settings → Developer settings → Personal access tokens, permiso
+`read:packages`):
+
+```sh
+docker login ghcr.io -u djgueto
+```
+
 Abre `http://IP-DEL-EQUIPO:9797` y sigue el asistente. Si las bibliotecas
 están en otro NAS por SMB, mira
 [packaging/docker/docker-compose.nas-smb.yml](packaging/docker/docker-compose.nas-smb.yml).
