@@ -841,12 +841,192 @@ function System() {
     </div>`;
 }
 
-// ---------------------------------------------------------------- settings
-function Settings({ toast }) {
-  return html`<${GeneralSettings} toast=${toast} /><${QualitySettings} toast=${toast} /><${DiscoverySettingsPanel} toast=${toast} /><${ImportSettingsPanel} toast=${toast} /><${TaskSettings} toast=${toast} />`;
+// ---------------------------------------------------------------- setup: carpetas, bibliotecas, fuentes
+function FolderPicker({ start, onPick, onClose }) {
+  const [path, setPath] = useState(start || '');
+  const { data, error, loading } = useFetch(`/api/fs?path=${encodeURIComponent(path)}`);
+  return html`
+    <div class="panel folder-picker">
+      <div class="folder-head">
+        <button class="btn small" disabled=${!data || data.parent === null} onClick=${() => setPath(data.parent)} title="Subir"><${Icon} d=${ICONS.back} size=${14} /></button>
+        <span class="mono dim">${path || 'Unidades / raíz'}</span>
+      </div>
+      <div class="folder-list">
+        ${loading && !data && html`<div class="loading" style="padding:20px"><div class="spinner"></div></div>`}
+        ${error && html`<div class="empty" style="padding:16px">${error.message}</div>`}
+        ${data && data.dirs.length === 0 && html`<div class="faint" style="padding:12px">Sin subcarpetas</div>`}
+        ${data && data.dirs.map((d) => html`<button class="folder" onClick=${() => setPath(d.path)}>📁 ${d.name}</button>`)}
+      </div>
+      <div class="actions" style="margin-top:10px">
+        <button class="btn primary" disabled=${!path} onClick=${() => onPick(path)}>Usar esta carpeta</button>
+        <button class="btn" onClick=${onClose}>Cancelar</button>
+      </div>
+    </div>`;
 }
 
-function GeneralSettings({ toast }) {
+function PathInput({ value, onChange, placeholder }) {
+  const [picking, setPicking] = useState(false);
+  return html`
+    <div class="inline-edit" style="margin-top:0;max-width:none">
+      <input class="input mono" value=${value} onInput=${(e) => onChange(e.target.value)} placeholder=${placeholder || ''} />
+      <button class="btn" onClick=${() => setPicking(!picking)}>Elegir…</button>
+    </div>
+    ${picking && html`<${FolderPicker} start=${value} onClose=${() => setPicking(false)} onPick=${(p) => { onChange(p); setPicking(false); }} />`}`;
+}
+
+function LibrariesSettings({ toast, onSaved }) {
+  const { data, reload } = useFetch('/api/settings/libraries');
+  const [draft, setDraft] = useState(null);
+  const [adding, setAdding] = useState(null); // biblioteca con el selector abierto
+  const [saving, setSaving] = useState(false);
+  useEffect(() => { if (data) setDraft(Object.fromEntries(data.libraries.map((l) => [l.id, l.paths.map((p) => p.path)]))); }, [data]);
+  if (!draft) return html`<div class="loading"><div class="spinner"></div></div>`;
+  const original = Object.fromEntries(data.libraries.map((l) => [l.id, l.paths.map((p) => p.path)]));
+  const dirty = JSON.stringify(draft) !== JSON.stringify(original);
+  const accessible = Object.fromEntries(data.libraries.flatMap((l) => l.paths.map((p) => [p.path, p.accessible])));
+  const setPaths = (id, paths) => setDraft({ ...draft, [id]: paths });
+  const save = async () => {
+    setSaving(true);
+    try {
+      const res = await api.put('/api/settings/libraries', { libraries: draft });
+      const moved = res.relocation?.status === 'relocated' && res.relocation.changes;
+      toast(moved ? `Bibliotecas guardadas · ${res.relocation.changes} rutas reubicadas` : 'Bibliotecas guardadas');
+      reload();
+      onSaved && onSaved();
+    } catch (e) { toast('Error: ' + e.message); }
+    setSaving(false);
+  };
+  const scan = () => api.post('/api/jobs/library_scan/start').then(() => go('activity'), (e) => toast(e.message));
+  return html`
+    <div class="section" style="margin-top:0">
+      <h3>Bibliotecas</h3>
+      <p class="dim" style="margin:-4px 0 14px; max-width:760px">
+        Las carpetas donde están tus series y películas: cada subcarpeta es una serie o una película.
+        Una misma carpeta solo puede estar en una biblioteca.
+      </p>
+      <div class="panel form">
+        ${data.libraries.map((lib) => html`
+          <div class="field library-row">
+            <span>${lib.label} <span class="faint" style="font-weight:400">· ${lib.content_mode === 'episodic' ? 'por episodios' : 'un archivo por título'}</span></span>
+            ${draft[lib.id].map((path, i) => html`
+              <div class="path-row">
+                <span class="mono">${path}</span>
+                ${accessible[path] === false && html`<span class="pill bad">No accesible</span>`}
+                <button class="btn small danger" onClick=${() => setPaths(lib.id, draft[lib.id].filter((_, j) => j !== i))}>Quitar</button>
+              </div>`)}
+            ${adding === lib.id
+              ? html`<${FolderPicker} onClose=${() => setAdding(null)} onPick=${(p) => { setPaths(lib.id, [...draft[lib.id], p]); setAdding(null); }} />`
+              : html`<div><button class="btn small" onClick=${() => setAdding(lib.id)}>+ Añadir carpeta</button></div>`}
+          </div>`)}
+      </div>
+      <div class="actions" style="margin-top:14px">
+        <button class="btn primary" disabled=${!dirty || saving} onClick=${save}>Guardar</button>
+        <button class="btn" disabled=${dirty} onClick=${scan} title="Lee las carpetas y vincula con TMDB lo nuevo">Escanear biblioteca</button>
+      </div>
+    </div>`;
+}
+
+function SourcesSettings({ toast, onSaved }) {
+  const { data, reload } = useFetch('/api/settings/sources');
+  const [form, setForm] = useState(null);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => { if (data) setForm({ ...data }); }, [data]);
+  if (!form) return html`<div class="loading"><div class="spinner"></div></div>`;
+  const set = (k) => (e) => setForm({ ...form, [k]: e.target.type === 'checkbox' ? e.target.checked : e.target.value });
+  const dirty = Object.keys(form).some((k) => form[k] !== data[k]);
+  const save = async () => {
+    setSaving(true);
+    try {
+      await api.put('/api/settings/sources', Object.fromEntries(Object.entries(form).filter(([k, v]) => v !== data[k])));
+      toast('Ajustes guardados');
+      reload();
+      onSaved && onSaved();
+    } catch (e) { toast('Error: ' + e.message); }
+    setSaving(false);
+  };
+  return html`
+    <div class="section">
+      <h3>Hispashare</h3>
+      <div class="panel form">
+        <div class="form-row">
+          <label class="field"><span>Usuario</span><input class="input" value=${form.hispashare_user} onInput=${set('hispashare_user')} autocomplete="off" /></label>
+          <label class="field"><span>Contraseña</span><input class="input" type="password" value=${form.hispashare_pass} onInput=${set('hispashare_pass')} autocomplete="new-password" /></label>
+        </div>
+        <label class="check"><input type="checkbox" checked=${form.selenium_headless} onChange=${set('selenium_headless')} /> Navegador oculto (desmárcalo solo para ver qué hace)</label>
+      </div>
+    </div>
+    <div class="section">
+      <h3>eMule / aMule</h3>
+      <p class="dim" style="margin:-4px 0 14px; max-width:760px">La interfaz web de eMule, o de aMule (amuleweb) en Linux y NAS. Desde Docker usa la IP del equipo, no «localhost».</p>
+      <div class="panel form">
+        <div class="form-row">
+          <label class="field"><span>Dirección</span><input class="input mono" value=${form.emule_url} onInput=${set('emule_url')} placeholder="http://192.168.1.10:4711" /></label>
+          <label class="field"><span>Usuario</span><input class="input" value=${form.emule_username} onInput=${set('emule_username')} /></label>
+          <label class="field"><span>Contraseña</span><input class="input" type="password" value=${form.emule_password} onInput=${set('emule_password')} autocomplete="new-password" /></label>
+        </div>
+        <label class="check"><input type="checkbox" checked=${form.emule_auto_send} onChange=${set('emule_auto_send')} /> Enviar automáticamente lo que encuentre en Hispashare</label>
+      </div>
+    </div>
+    <div class="section">
+      <h3>Mejoras de calidad y límites</h3>
+      <div class="panel form">
+        <label class="check"><input type="checkbox" checked=${form.upgrade_enabled} onChange=${set('upgrade_enabled')} /> Buscar mejoras de calidad de lo que ya tienes</label>
+        <div class="form-row">
+          <label class="field"><span>Series a mejorar por ciclo</span><input class="input" type="number" min="0" value=${form.upgrade_max_series_per_cycle} onInput=${set('upgrade_max_series_per_cycle')} /></label>
+          <label class="field"><span>Enlaces de mejora por ciclo</span><input class="input" type="number" min="0" value=${form.upgrade_max_links_per_cycle} onInput=${set('upgrade_max_links_per_cycle')} /></label>
+          <label class="field"><span>Descargas de Wolfmax por ciclo</span><input class="input" type="number" min="0" value=${form.wolfmax_max_downloads_per_cycle} onInput=${set('wolfmax_max_downloads_per_cycle')} /></label>
+          <label class="field"><span>Tamaño mínimo de película (GB)</span><input class="input" type="number" min="0" step="0.5" value=${form.minimum_movie_size_gb} onInput=${set('minimum_movie_size_gb')} /></label>
+        </div>
+        <label class="field"><span>Carpeta temporal de Wolfmax</span>
+          <${PathInput} value=${form.wolfmax_staging_dir} onChange=${(v) => setForm({ ...form, wolfmax_staging_dir: v })} placeholder="Opcional" />
+        </label>
+        <label class="check"><input type="checkbox" checked=${form.auto_rename_folder} onChange=${set('auto_rename_folder')} /> Renombrar la carpeta al nombre de TMDB al corregir la identificación</label>
+      </div>
+      <div class="actions" style="margin-top:14px">
+        <button class="btn primary" disabled=${!dirty || saving} onClick=${save}>Guardar</button>
+      </div>
+    </div>`;
+}
+
+function Setup({ toast }) {
+  const { data, reload } = useFetch('/api/setup');
+  const [step, setStep] = useState(null);
+  if (!data) return html`<div class="loading"><div class="spinner"></div></div>`;
+  const current = step || (data.steps.find((s) => !s.done) || data.steps[0]).id;
+  const panels = {
+    tmdb: html`<${GeneralSettings} toast=${toast} onSaved=${reload} />`,
+    libraries: html`<${LibrariesSettings} toast=${toast} onSaved=${reload} />`,
+    sources: html`<${SourcesSettings} toast=${toast} onSaved=${reload} />`,
+    downloads: html`<${GeneralSettings} toast=${toast} onSaved=${reload} /><${SourcesSettings} toast=${toast} onSaved=${reload} />`,
+  };
+  const scanNow = () => { api.post('/api/jobs/library_scan/start').catch(() => {}); go('activity'); };
+  return html`
+    <p class="dim" style="margin:0 0 16px; max-width:760px">
+      ${data.complete
+        ? 'Lo imprescindible está listo. Puedes seguir ajustando el resto o empezar a usar la biblioteca.'
+        : 'Para empezar hacen falta una clave de TMDB (gratuita, en themoviedb.org) y las carpetas de tu biblioteca.'}
+    </p>
+    <div class="setup-steps">
+      ${data.steps.map((s, i) => html`
+        <button class=${'setup-step' + (s.id === current ? ' active' : '') + (s.done ? ' done' : '')} onClick=${() => setStep(s.id)}>
+          <span class="n">${s.done ? '✓' : i + 1}</span>
+          <span>${s.label}${!s.required && html`<span class="faint"> · opcional</span>`}</span>
+        </button>`)}
+    </div>
+    ${data.complete && html`<div class="actions" style="margin:0 0 18px">
+      <button class="btn primary" onClick=${scanNow}>Escanear la biblioteca ahora</button>
+      <button class="btn" onClick=${() => go('library')}>Ir a la biblioteca</button>
+    </div>`}
+    ${panels[current]}`;
+}
+
+
+// ---------------------------------------------------------------- settings
+function Settings({ toast }) {
+  return html`<${LibrariesSettings} toast=${toast} /><${GeneralSettings} toast=${toast} /><${SourcesSettings} toast=${toast} /><${QualitySettings} toast=${toast} /><${DiscoverySettingsPanel} toast=${toast} /><${ImportSettingsPanel} toast=${toast} /><${TaskSettings} toast=${toast} />`;
+}
+
+function GeneralSettings({ toast, onSaved }) {
   const { data, reload } = useFetch('/api/settings/general');
   const [form, setForm] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -861,11 +1041,12 @@ function GeneralSettings({ toast }) {
       await api.put('/api/settings/general', changed);
       toast('Ajustes guardados');
       reload();
+      onSaved && onSaved();
     } catch (e) { toast('Error: ' + e.message); }
     setSaving(false);
   };
   return html`
-    <div class="section" style="margin-top:0">
+    <div class="section">
       <h3>Claves de API</h3>
       <div class="panel form">
         <label class="field"><span>TMDB API key</span>
@@ -889,7 +1070,8 @@ function GeneralSettings({ toast }) {
           <small class="faint">Cambia de dominio a menudo: actualízala aquí cuando ocurra.</small>
         </label>
         <label class="field"><span>Carpeta vigilada por el cliente torrent</span>
-          <input class="input mono" value=${form.torrent_watch_dir} onInput=${set('torrent_watch_dir')} />
+          <${PathInput} value=${form.torrent_watch_dir} onChange=${(v) => setForm({ ...form, torrent_watch_dir: v })} placeholder="La carpeta «watch» de qBittorrent / Transmission" />
+          <small class="faint">Los .torrent se dejan aquí y tu cliente torrent los recoge solo.</small>
         </label>
       </div>
       <div class="actions" style="margin-top:14px">
@@ -1059,6 +1241,7 @@ const NAV = [
   { id: 'wanted', label: 'Buscados', icon: ICONS.wanted },
   { id: 'activity', label: 'Actividad', icon: ICONS.activity },
   { id: 'settings', label: 'Ajustes', icon: ICONS.sliders },
+  { id: 'setup', label: 'Asistente', icon: ICONS.sparkle },
   { id: 'system', label: 'Sistema', icon: ICONS.system },
 ];
 
@@ -1068,11 +1251,13 @@ function App() {
   const [query, setQuery] = useState('');
   const [msg, setMsg] = useState(null);
   const { data: categories } = useFetch('/api/categories', [live.tick]);
+  const { data: setup } = useFetch('/api/setup');
+  useEffect(() => { if (setup && !setup.complete && route[0] !== 'setup') go('setup'); }, [setup]);
   const toast = useCallback((m) => { setMsg(m); setTimeout(() => setMsg(null), 2600); }, []);
 
   const [page, arg] = route;
   const running = live.jobs.find((j) => j.running);
-  const titles = { library: 'Biblioteca', calendar: 'Calendario', discovery: 'Novedades', wanted: 'Buscados', activity: 'Actividad', settings: 'Ajustes', system: 'Sistema', series: '' };
+  const titles = { setup: 'Configuración inicial', library: 'Biblioteca', calendar: 'Calendario', discovery: 'Novedades', wanted: 'Buscados', activity: 'Actividad', settings: 'Ajustes', system: 'Sistema', series: '' };
   const searchable = page === 'library' || page === 'wanted';
 
   let body;
@@ -1083,6 +1268,7 @@ function App() {
   else if (page === 'calendar') body = html`<${Calendar} live=${live} toast=${toast} />`;
   else if (page === 'discovery') body = html`<${Discovery} live=${live} toast=${toast} />`;
   else if (page === 'settings') body = html`<${Settings} toast=${toast} />`;
+  else if (page === 'setup') body = html`<${Setup} toast=${toast} />`;
   else body = html`<${Library} category=${arg || 'all'} query=${query} tick=${live.tick} categories=${categories || []} />`;
 
   return html`

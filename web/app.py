@@ -50,6 +50,8 @@ from core.services.quality_profile import TIERS, QualityProfile
 from core.tmdb.metadata import TmdbMetadataService, image_url, media_type_for_category
 from web.jobs import JobAlreadyRunning, JobManager
 from web.periodic import PeriodicRunner
+from web.routes import setup as setup_routes
+from web.routes.setup import mask
 
 logger = logging.getLogger(__name__)
 
@@ -116,12 +118,6 @@ def autostart_enabled() -> bool:
     from core.repositories.app_settings_repository import AppSettingsRepository
 
     return bool(AppSettingsRepository(DatabaseManager()).get("autostart_scheduler", True))
-
-
-def _mask(secret: str) -> str:
-    """Las claves nunca salen enteras hacia el navegador."""
-    secret = secret or ""
-    return f"••••••{secret[-4:]}" if len(secret) > 4 else ("••••" if secret else "")
 
 
 def _tmdb_key_works(key: str) -> bool:
@@ -194,7 +190,9 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
         # Ya con el servidor respondiendo (la BD suele estar en el NAS).
         try:
             if autostart_enabled():
-                if LibraryRepository(DatabaseManager()).path_health()["ok"]:
+                if not setup_routes.setup_status()["complete"]:
+                    logger.info("Arranque automático del ciclo omitido: falta completar la configuración inicial")
+                elif LibraryRepository(DatabaseManager()).path_health()["ok"]:
                     jobs.start("scheduler", wait_for_interval=True)
                 else:
                     logger.error("Arranque automático del ciclo omitido: las rutas de la BD no coinciden con las configuradas")
@@ -219,6 +217,8 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
     app = FastAPI(title="Biblioteca", lifespan=lifespan)
     app.add_middleware(GZipMiddleware, minimum_size=2048)
     app.state.jobs = jobs
+    app.state.library_cache = library_cache
+    app.include_router(setup_routes.router)
 
     # --- biblioteca -----------------------------------------------------
     @app.get("/api/categories")
@@ -374,8 +374,8 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
     @app.get("/api/settings/general")
     def get_general_settings():
         return {
-            "tmdb_api_key": _mask(Settings.TMDB_API_KEY),
-            "omdb_api_key": _mask(Settings.OMDB_API_KEY),
+            "tmdb_api_key": mask(Settings.TMDB_API_KEY),
+            "omdb_api_key": mask(Settings.OMDB_API_KEY),
             "wolfmax_enabled": bool(getattr(Settings, "WOLFMAX_UPGRADE_ENABLED", False)),
             "dontorrent_enabled": Settings.DONTORRENT_ENABLED,
             "dontorrent_url": Settings.DONTORRENT_URL,
@@ -386,12 +386,12 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
     @app.put("/api/settings/general")
     def put_general_settings(body: GeneralSettingsUpdate):
         values = {}
-        if body.tmdb_api_key is not None and body.tmdb_api_key.strip() != _mask(Settings.TMDB_API_KEY):
+        if body.tmdb_api_key is not None and body.tmdb_api_key.strip() != mask(Settings.TMDB_API_KEY):
             key = body.tmdb_api_key.strip()
             if key and not _tmdb_key_works(key):
                 raise HTTPException(422, "TMDB rechaza esa API key")
             values["TMDB_API_KEY"] = key
-        if body.omdb_api_key is not None and body.omdb_api_key.strip() != _mask(Settings.OMDB_API_KEY):
+        if body.omdb_api_key is not None and body.omdb_api_key.strip() != mask(Settings.OMDB_API_KEY):
             key = body.omdb_api_key.strip()
             if key and not _omdb_key_works(key):
                 raise HTTPException(422, "OMDb (IMDb) rechaza esa API key")

@@ -302,3 +302,21 @@ textarea.input { resize: vertical; }
   .hero { grid-template-columns: 1fr; padding: 18px; }
   .hero .poster { width: 150px; }
 }
+
+/* configuración: selector de carpetas, bibliotecas y asistente */
+.folder-picker { margin-top: 8px; padding: 12px; max-width: 640px; }
+.folder-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; min-width: 0; }
+.folder-head .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.folder-list { max-height: 260px; overflow: auto; display: grid; gap: 2px; }
+.folder { text-align: left; background: none; border: 0; color: inherit; padding: 6px 8px; border-radius: 6px; cursor: pointer; font: inherit; }
+.folder:hover { background: var(--hover, rgba(127, 127, 127, .12)); }
+.library-row { padding-bottom: 12px; border-bottom: 1px solid var(--line, rgba(127, 127, 127, .15)); }
+.library-row:last-child { border-bottom: 0; padding-bottom: 0; }
+.path-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; }
+.path-row .mono { overflow-wrap: anywhere; }
+.setup-steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; margin-bottom: 18px; }
+.setup-step { display: flex; align-items: center; gap: 10px; text-align: left; padding: 12px; border-radius: 10px; cursor: pointer;
+  border: 1px solid var(--line, rgba(127, 127, 127, .2)); background: transparent; color: inherit; font: inherit; }
+.setup-step.active { border-color: var(--accent); }
+.setup-step .n { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: rgba(127, 127, 127, .15); flex: none; }
+.setup-step.done .n { background: rgba(52, 211, 153, .18); color: var(--ok, #34d399); }

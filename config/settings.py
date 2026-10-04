@@ -56,7 +56,7 @@ class Settings:
     HISPASHARE_BASE_URL = "https://www.hispashare.org"
     
     # eMule
-    EMULE_URL = os.getenv("EMULE_URL", "http://localhost:4711")
+    EMULE_URL = os.getenv("EMULE_URL", "")  # p. ej. http://192.168.1.10:4711 (vacío = sin eMule)
     EMULE_USERNAME = os.getenv("EMULE_USERNAME", "admin")
     EMULE_PASSWORD = os.getenv("EMULE_PASSWORD", "")
     EMULE_AUTO_SEND = os.getenv("EMULE_AUTO_SEND", "False").lower() == "true"
