@@ -1,6 +1,6 @@
-"""Construcción de los servicios de dominio, compartida por la app de
-escritorio (ui/workers) y la web: así ambas aplican los cambios manuales
-(TMDB, URL de Hispashare...) con exactamente la misma lógica."""
+"""Construcción de los servicios de dominio, compartida por la web, los jobs
+y las acciones manuales: todos aplican los cambios (TMDB, URL de
+Hispashare...) con exactamente la misma lógica."""
 
 from __future__ import annotations
 

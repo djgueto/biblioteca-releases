@@ -1,4 +1,4 @@
-"""Caché de carátulas en disco, compartida por la app de escritorio y la web.
+"""Caché de carátulas en disco, que sirve la web.
 
 El nombre de archivo es el mismo que usa ui/cover_manager.py
 (`<series_id>_<sha1(url)[:12]>.jpg`), así que ambas reutilizan lo ya descargado.

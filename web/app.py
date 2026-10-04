@@ -45,6 +45,7 @@ from core.repositories import (
 )
 from core.repositories.grab_history_repository import GrabHistoryRepository
 from core.services.factory import build_domain_services
+from core.services.item_actions import ItemActions, ItemNotFound
 from core.services.quality_profile import TIERS, QualityProfile
 from core.tmdb.metadata import TmdbMetadataService, image_url, media_type_for_category
 from web.jobs import JobAlreadyRunning, JobManager
@@ -199,7 +200,8 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
                     logger.error("Arranque automático del ciclo omitido: las rutas de la BD no coinciden con las configuradas")
         except Exception:
             logger.exception("Error en el arranque automático del ciclo")
-        periodic.start()
+        if os.getenv("WEB_PERIODIC_TASKS", "true").lower() != "false":
+            periodic.start()
         try:
             library_cache.get()  # la primera visita no espera a la consulta
         except Exception:
@@ -418,20 +420,24 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
         url = (body.url or "").strip()
         if url and not url.startswith(("http://", "https://")):
             raise HTTPException(422, "El enlace debe empezar por https://")
-        db = DatabaseManager()
-        if not db.get_series_by_id(series_id):
+        try:
+            ItemActions(DatabaseManager()).apply_manual_changes(series_id, {"hispashare_url": url or None})
+        except ItemNotFound:
             raise HTTPException(404, "No existe")
-        # Mismo camino que la edición manual del escritorio (ManualUpdateTask).
-        services = build_domain_services(db)
-        changes = {"hispashare_url": url or None}
-        saved = services["series_repository"].save_manual_changes(series_id, changes, recalculate_missing=False)
-        services["reconciliation_service"].on_manual_update(
-            series_id, saved.get("previous_item") or {}, saved.get("updated_item") or {}, changes,
-            is_library=Settings.get_category_content_mode(
-                (saved.get("updated_item") or {}).get("content_category")) == "single_file",
-        )
         library_cache.invalidate()
         return {"id": series_id, "hispashare_url": url or None}
+
+    @app.post("/api/series/{series_id}/hispashare_search_now")
+    def hispashare_search_now(series_id: int):
+        if not DatabaseManager().get_series_by_id(series_id):
+            raise HTTPException(404, "No existe")
+        if not (Settings.HISPASHARE_USER and Settings.HISPASHARE_PASS):
+            raise HTTPException(409, "Falta el usuario de Hispashare (Ajustes → Fuentes)")
+        try:
+            jobs.start("source_search", series_id=series_id)
+        except JobAlreadyRunning:
+            raise HTTPException(409, "Ya hay una búsqueda en Hispashare en marcha")
+        return jobs.state()
 
     @app.post("/api/series/{series_id}/hispashare_reject")
     def reject_hispashare(series_id: int):
@@ -540,20 +546,8 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
             "tmdb_id": found["id"], "tmdb_name": found["title"], "year": found["year"],
             "confidence_score": 1.0, "needs_review": False,
         }
-        # Mismo camino que la edición manual del escritorio (ManualUpdateTask).
-        services = build_domain_services(db)
-        saved = services["series_repository"].save_manual_changes(series_id, changes, recalculate_missing=False)
-        result = services["reconciliation_service"].on_manual_update(
-            series_id, saved.get("previous_item") or {}, saved.get("updated_item") or {}, changes,
-            is_library=Settings.get_category_content_mode(item.get("content_category")) == "single_file",
-        )
-        renamed = None
-        if Settings.AUTO_RENAME_FOLDER_ON_TMDB_ASSIGN:
-            rename = db.rename_series_folder(series_id, found["title"])
-            if rename.get("renamed"):
-                renamed = rename.get("new_name")
-            elif not rename.get("success"):
-                logger.warning(f"No se pudo renombrar la carpeta de {series_id}: {rename.get('error')}")
+        result = ItemActions(db, log=logger.warning).apply_manual_changes(series_id, changes)
+        renamed = result.get("renamed_to")
         try:
             TmdbMetadataService(db).get(found["id"], media, refresh=True)
         except Exception:
@@ -561,6 +555,19 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
         library_cache.invalidate()
         return {"id": series_id, "tmdb_id": found["id"], "tmdb_name": found["title"], "year": found["year"],
                 "missing_count": result.get("missing_count", 0), "renamed_to": renamed}
+
+    @app.post("/api/series/{series_id}/tmdb_rematch")
+    def rematch_tmdb(series_id: int):
+        _tmdb_client()  # 409 si falta la API key
+        try:
+            result = ItemActions(DatabaseManager()).rematch_tmdb(series_id)
+        except ItemNotFound:
+            raise HTTPException(404, "No existe")
+        library_cache.invalidate()
+        match = result.get("match") or {}
+        return {"id": series_id, "matched": result["matched"], "tmdb_id": match.get("tmdb_id"),
+                "tmdb_name": match.get("name"), "year": match.get("year"),
+                "confidence_score": match.get("confidence_score")}
 
     # --- calendario -------------------------------------------------------
     @app.get("/api/calendar")
@@ -700,7 +707,9 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
 
     @app.post("/api/jobs/{name}/start")
     def start_job(name: str):
-        if name == "scheduler":
+        if name == "source_search":
+            raise HTTPException(422, "Se lanza desde la ficha del elemento")
+        if name in ("scheduler", "library_scan"):
             health = LibraryRepository(DatabaseManager()).path_health()
             if not health["ok"]:
                 raise HTTPException(

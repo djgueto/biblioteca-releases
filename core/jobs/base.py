@@ -14,7 +14,7 @@ class BackgroundJob:
     """Tarea larga sin dependencias de UI.
 
     Comunica progreso, logs y resultados publicando en `event_bus`; quien la
-    ejecute (QThread en la app de escritorio, un hilo del backend web) se
+    ejecute (un hilo del servidor web, ver web/jobs.py) se
     suscribe al bus y lo traduce a su propio mecanismo. Todos los payloads
     llevan `source=self.name`, para distinguir de qué job vienen cuando varios
     comparten bus, y de los eventos que publican los servicios internos.

@@ -33,11 +33,10 @@ def _keep_measured_quality(episode: dict, previous: dict | None) -> dict:
 
 
 class DatabaseManager:
-    # DB_PATH suele ser una ruta de red (UNC). Cada QRunnable de
-    # ui/workers/background_tasks.py crea su propio DatabaseManager y lo
-    # cierra al terminar; sin esto, cada tarea pagaría una apertura de
-    # conexión por red. Se comparte una única conexión sqlite3 por hilo del
-    # QThreadPool (identificada por hilo + ruta), nunca entre hilos distintos.
+    # Cada petición o job crea su propio DatabaseManager y lo cierra al
+    # terminar; sin esto, cada uno pagaría una apertura de conexión. Se
+    # comparte una única conexión sqlite3 por hilo (identificada por hilo +
+    # ruta), nunca entre hilos distintos.
     _thread_local = threading.local()
 
     # cleanup_deleted_series no borra más de esto en un ciclo (protege contra
@@ -106,7 +105,7 @@ class DatabaseManager:
         """Cerrar la conexión (o soltar la referencia si es compartida por hilo).
 
         Para una ruta de archivo real, la conexión se comparte entre las
-        instancias de DatabaseManager de un mismo hilo del QThreadPool (ver
+        instancias de DatabaseManager de un mismo hilo (ver
         get_connection), así que aquí solo se libera la referencia local para
         que otras tareas en ese hilo puedan seguir usándola. Para ":memory:"
         (nunca compartida) sí se cierra de verdad, como antes.

@@ -328,6 +328,22 @@ function SeriesDetail({ id, tick, toast }) {
     } catch (e) { toast('Error: ' + e.message); }
     setBusy(false);
   };
+  const searchNow = async () => {
+    try {
+      await api.post(`/api/series/${it.id}/hispashare_search_now`);
+      toast('Buscando en Hispashare… (el progreso está en Actividad)');
+    } catch (e) { toast('Error: ' + e.message); }
+  };
+  const rematchTmdb = async () => {
+    setBusy(true);
+    try {
+      const res = await api.post(`/api/series/${it.id}/tmdb_rematch`);
+      toast(res.matched ? `Identificada: ${res.tmdb_name} (${res.year ?? '?'}) · ${Math.round(res.confidence_score * 100)}%`
+        : 'No se encontró una ficha fiable: corrígela a mano');
+      reload();
+    } catch (e) { toast('Error: ' + e.message); }
+    setBusy(false);
+  };
   const tmdb = it.tmdb || {};
   const heroBg = tmdb.backdrop_url || cover;
 
@@ -396,7 +412,10 @@ function SeriesDetail({ id, tick, toast }) {
           ${it.hispashare_url && editUrl === null && html`<button class="btn danger" disabled=${busy} onClick=${rejectHispashare}>Enlace incorrecto</button>`}
           ${!it.hispashare_url && html`<button class="btn" disabled=${busy} onClick=${toggleSearch}>
             ${it.search_disabled ? 'Volver a buscar en Hispashare' : 'No buscar en Hispashare'}</button>`}
+          ${!it.search_disabled_manual && html`<button class="btn" disabled=${busy} onClick=${searchNow}
+            title="Abre Hispashare y busca la ficha ahora, sin esperar al ciclo">Buscar ahora en Hispashare</button>`}
           ${!editTmdb && !it.needs_review && html`<button class="btn" onClick=${() => setEditTmdb(true)}>${it.tmdb_id ? 'Corregir TMDB' : 'Vincular con TMDB'}</button>`}
+          <button class="btn" disabled=${busy} onClick=${rematchTmdb} title="Vuelve a identificarla automáticamente con TMDB">Reidentificar</button>
         </div>
         ${it.rejected_sources?.length > 0 && html`
           <div class="faint" style="font-size:12px;margin-top:8px">
@@ -716,7 +735,8 @@ function JobCard({ job, toast, schedule }) {
         <span class=${'dot' + (job.running ? ' on' : '')}></span>
         <h4>${job.label}</h4>
         <span style="flex:1"></span>
-        ${job.running
+        ${job.name === 'source_search' && !job.running ? html`<span class="faint" style="font-size:12px">Se lanza desde la ficha</span>`
+          : job.running
           ? html`<button class="btn small danger" disabled=${busy || job.stopping} onClick=${() => act('stop')}><${Icon} d=${ICONS.stop} size=${14} /> ${job.stopping ? 'Deteniendo…' : 'Detener'}</button>`
           : html`<button class="btn small primary" disabled=${busy} onClick=${() => act('start')}><${Icon} d=${ICONS.play} size=${14} /> Iniciar</button>`}
       </div>

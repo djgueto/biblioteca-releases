@@ -343,130 +343,56 @@ class TestSettingDefault(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Tests para ManualUpdateTask (sin UI, usando mocks)
+# Tests para ItemActions.apply_manual_changes (sin BD real, usando mocks)
 # ---------------------------------------------------------------------------
 
-class TestManualUpdateTaskRename(unittest.TestCase):
-    """Verifica que ManualUpdateTask invoca rename_series_folder correctamente."""
+class TestManualChangesRename(unittest.TestCase):
+    """Verifica que guardar cambios manuales renombra la carpeta cuando toca."""
 
-    def _make_task(self, changes):
-        from ui.workers.background_tasks import ManualUpdateTask
-        task = ManualUpdateTask.__new__(ManualUpdateTask)
-        task.series_id = 1
-        task.changes = changes
-        task.is_library = False
-        task.signals = MagicMock()
-        return task
+    def _run(self, changes, rename_result, *, enabled=True):
+        from core.services.item_actions import ItemActions
 
-    def _mock_db(self, rename_result):
         db = MagicMock()
+        db.get_series_by_id.return_value = {"id": 1, "name": "old", "content_category": "series"}
         db.rename_series_folder.return_value = rename_result
-        return db
-
-    def _build_services_mock(self, db):
         series_repo = MagicMock()
         series_repo.save_manual_changes.return_value = {
             "previous_item": {"id": 1, "name": "old"},
             "updated_item": {"id": 1, "name": "Nuevo"},
         }
-        series_repo.get_by_id.return_value = {"id": 1, "name": "Nuevo"}
         reconciliation = MagicMock()
-        reconciliation.on_manual_update.return_value = {
-            "recalculated_missing": False,
-            "reset_hispashare_url": False,
-            "recheck_hispashare_url": False,
-            "previous_hispashare_url": None,
-        }
-        return {
-            "series_repository": series_repo,
-            "reconciliation_service": reconciliation,
-        }
+        reconciliation.on_manual_update.return_value = {"recalculated_missing": False}
+        services = {"series_repository": series_repo, "reconciliation_service": reconciliation}
+        logs = []
+        with patch("core.services.item_actions.build_domain_services", return_value=services),                 patch("core.services.item_actions.Settings.AUTO_RENAME_FOLDER_ON_TMDB_ASSIGN", enabled):
+            result = ItemActions(db, log=logs.append).apply_manual_changes(1, changes)
+        return db, logs, result
 
-    @patch("ui.workers.background_tasks.Settings")
-    @patch("ui.workers.background_tasks._build_domain_services")
-    @patch("ui.workers.background_tasks.DatabaseManager")
-    def test_rename_called_when_setting_enabled_and_tmdb_name_in_changes(
-        self, MockDB, mock_build_services, MockSettings
-    ):
-        MockSettings.AUTO_RENAME_FOLDER_ON_TMDB_ASSIGN = True
-        db_instance = self._mock_db({"success": True, "renamed": True, "old_name": "vieja", "new_name": "Nueva"})
-        MockDB.return_value = db_instance
-        mock_build_services.return_value = self._build_services_mock(db_instance)
+    def test_rename_called_when_setting_enabled_and_tmdb_name_in_changes(self):
+        db, _, result = self._run({"tmdb_id": 123, "tmdb_name": "Nueva Serie"},
+                                  {"success": True, "renamed": True, "old_name": "vieja", "new_name": "Nueva"})
+        db.rename_series_folder.assert_called_once_with(1, "Nueva Serie")
+        self.assertEqual(result["renamed_to"], "Nueva")
 
-        task = self._make_task({"tmdb_id": 123, "tmdb_name": "Nueva Serie"})
-        task.execute()
+    def test_rename_not_called_when_setting_disabled(self):
+        db, _, _ = self._run({"tmdb_id": 123, "tmdb_name": "Nueva Serie"},
+                             {"success": True, "renamed": True, "old_name": "v", "new_name": "N"}, enabled=False)
+        db.rename_series_folder.assert_not_called()
 
-        db_instance.rename_series_folder.assert_called_once_with(1, "Nueva Serie")
+    def test_rename_not_called_when_no_tmdb_name_in_changes(self):
+        db, _, _ = self._run({"hispashare_url": "http://example.com"}, {"success": True, "renamed": False})
+        db.rename_series_folder.assert_not_called()
 
-    @patch("ui.workers.background_tasks.Settings")
-    @patch("ui.workers.background_tasks._build_domain_services")
-    @patch("ui.workers.background_tasks.DatabaseManager")
-    def test_rename_not_called_when_setting_disabled(
-        self, MockDB, mock_build_services, MockSettings
-    ):
-        MockSettings.AUTO_RENAME_FOLDER_ON_TMDB_ASSIGN = False
-        db_instance = self._mock_db({"success": True, "renamed": True, "old_name": "v", "new_name": "N"})
-        MockDB.return_value = db_instance
-        mock_build_services.return_value = self._build_services_mock(db_instance)
+    def test_log_emitted_on_successful_rename(self):
+        _, logs, _ = self._run({"tmdb_id": 1, "tmdb_name": "Nueva Serie"},
+                               {"success": True, "renamed": True, "old_name": "vieja serie", "new_name": "Nueva Serie"})
+        self.assertTrue(any("Carpeta renombrada" in m for m in logs))
 
-        task = self._make_task({"tmdb_id": 123, "tmdb_name": "Nueva Serie"})
-        task.execute()
-
-        db_instance.rename_series_folder.assert_not_called()
-
-    @patch("ui.workers.background_tasks.Settings")
-    @patch("ui.workers.background_tasks._build_domain_services")
-    @patch("ui.workers.background_tasks.DatabaseManager")
-    def test_rename_not_called_when_no_tmdb_name_in_changes(
-        self, MockDB, mock_build_services, MockSettings
-    ):
-        MockSettings.AUTO_RENAME_FOLDER_ON_TMDB_ASSIGN = True
-        db_instance = self._mock_db({"success": True, "renamed": False})
-        MockDB.return_value = db_instance
-        mock_build_services.return_value = self._build_services_mock(db_instance)
-
-        task = self._make_task({"hispashare_url": "http://example.com"})
-        task.execute()
-
-        db_instance.rename_series_folder.assert_not_called()
-
-    @patch("ui.workers.background_tasks.Settings")
-    @patch("ui.workers.background_tasks._build_domain_services")
-    @patch("ui.workers.background_tasks.DatabaseManager")
-    def test_log_emitted_on_successful_rename(
-        self, MockDB, mock_build_services, MockSettings
-    ):
-        MockSettings.AUTO_RENAME_FOLDER_ON_TMDB_ASSIGN = True
-        db_instance = self._mock_db({
-            "success": True, "renamed": True, "old_name": "vieja serie", "new_name": "Nueva Serie"
-        })
-        MockDB.return_value = db_instance
-        mock_build_services.return_value = self._build_services_mock(db_instance)
-
-        task = self._make_task({"tmdb_id": 1, "tmdb_name": "Nueva Serie"})
-        task.execute()
-
-        logged_messages = [call.args[0] for call in task.signals.log_signal.emit.call_args_list]
-        self.assertTrue(any("Carpeta renombrada" in m for m in logged_messages))
-
-    @patch("ui.workers.background_tasks.Settings")
-    @patch("ui.workers.background_tasks._build_domain_services")
-    @patch("ui.workers.background_tasks.DatabaseManager")
-    def test_log_emitted_on_failed_rename(
-        self, MockDB, mock_build_services, MockSettings
-    ):
-        MockSettings.AUTO_RENAME_FOLDER_ON_TMDB_ASSIGN = True
-        db_instance = self._mock_db({
-            "success": False, "renamed": False, "error": "Permiso denegado"
-        })
-        MockDB.return_value = db_instance
-        mock_build_services.return_value = self._build_services_mock(db_instance)
-
-        task = self._make_task({"tmdb_id": 1, "tmdb_name": "Nueva Serie"})
-        task.execute()
-
-        logged_messages = [call.args[0] for call in task.signals.log_signal.emit.call_args_list]
-        self.assertTrue(any("No se pudo renombrar" in m for m in logged_messages))
+    def test_log_emitted_on_failed_rename(self):
+        _, logs, result = self._run({"tmdb_id": 1, "tmdb_name": "Nueva Serie"},
+                                    {"success": False, "renamed": False, "error": "Permiso denegado"})
+        self.assertTrue(any("No se pudo renombrar" in m for m in logs))
+        self.assertIsNone(result["renamed_to"])
 
 
 if __name__ == "__main__":

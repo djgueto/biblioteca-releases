@@ -355,6 +355,36 @@ class TestWebApi(unittest.TestCase):
         self.assertFalse(self.client.get("/api/series/2").json()["hispashare_url"])
         self.assertEqual(self.client.put("/api/series/2/hispashare_url", json={"url": "ftp://x"}).status_code, 422)
 
+    def test_tmdb_rematch(self):
+        self.assertEqual(self.client.post("/api/series/2/tmdb_rematch").status_code, 409)  # sin API key
+        match = {"tmdb_id": 603, "name": "Peli B", "year": 2021, "confidence_score": 0.97, "needs_review": False}
+        with patch.object(Settings, "TMDB_API_KEY", "clave"), \
+                patch("core.tmdb.auto_matcher.TMDBAutoMatcher.match_content", return_value=match):
+            r = self.client.post("/api/series/2/tmdb_rematch")
+            self.assertEqual(self.client.post("/api/series/99/tmdb_rematch").status_code, 404)
+        self.assertEqual((r.status_code, r.json()["matched"], r.json()["tmdb_id"]), (200, True, 603))
+        detail = self.client.get("/api/series/2").json()
+        self.assertEqual(detail["tmdb_id"], 603)
+        self.assertIn("tmdb_rescan_matched", [h["decision_type"] for h in detail["history"]])
+
+    def test_hispashare_search_now_starts_job_for_that_item(self):
+        started = []
+        jobs = JobManager({"source_search": lambda bus, **opts: started.append(opts) or _GatedJob(bus, self.gate)})
+        client = TestClient(create_app(jobs, init_db=False))
+        try:
+            with patch.object(Settings, "HISPASHARE_USER", ""):
+                self.assertEqual(client.post("/api/series/1/hispashare_search_now").status_code, 409)
+            with patch.object(Settings, "HISPASHARE_USER", "u"), patch.object(Settings, "HISPASHARE_PASS", "p"):
+                self.assertEqual(client.post("/api/series/1/hispashare_search_now").status_code, 200)
+                self.assertEqual(client.post("/api/series/1/hispashare_search_now").status_code, 409)  # ya en marcha
+                self.assertEqual(client.post("/api/series/99/hispashare_search_now").status_code, 404)
+            self.assertEqual(started, [{"series_id": 1}])
+            # Sin elemento no tiene sentido lanzarla desde la lista de tareas.
+            self.assertEqual(client.post("/api/jobs/source_search/start").status_code, 422)
+        finally:
+            self.gate.set()
+            client.close()
+
     def test_cover_prefers_tmdb_poster(self):
         from core.tmdb.metadata import TmdbMetaRepository
 

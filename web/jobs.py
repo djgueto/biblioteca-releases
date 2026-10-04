@@ -1,6 +1,6 @@
 """Ejecución de los jobs de core/jobs en el servidor web.
 
-Equivalente web de ui/workers/job_threads.py: cada job corre en un hilo
+Cada job corre en un hilo
 propio y sus eventos se convierten en mensajes JSON que se reenvían a los
 navegadores conectados (WebSocket). También guarda el estado actual y los
 últimos logs para quien abra la página a mitad de un ciclo.
@@ -35,6 +35,8 @@ JOB_LABELS = {
     "agenda": "Actualizar calendario",
     "importer": "Importar descargas",
     "tmdb_recalc": "Recalcular TMDB",
+    "library_scan": "Escanear biblioteca",
+    "source_search": "Buscar en Hispashare",
 }
 
 
@@ -42,6 +44,8 @@ def _default_factories() -> dict[str, Callable[[EventBus], BackgroundJob]]:
     from core.agenda.job import AgendaJob
     from core.importer.job import ImportJob
     from core.discovery.job import DiscoveryJob
+    from core.hispashare.search_job import SourceSearchJob
+    from core.library.scan_job import LibraryScanJob
     from core.library.quality_scan_job import QualityScanJob
     from core.scheduler import Scheduler
     from core.tmdb.recalc_job import TMDBRecalcJob
@@ -53,6 +57,8 @@ def _default_factories() -> dict[str, Callable[[EventBus], BackgroundJob]]:
         "agenda": lambda bus: AgendaJob(event_bus=bus),
         "importer": lambda bus: ImportJob(event_bus=bus),
         "tmdb_recalc": lambda bus: TMDBRecalcJob(event_bus=bus),
+        "library_scan": lambda bus: LibraryScanJob(event_bus=bus),
+        "source_search": lambda bus, **options: SourceSearchJob(event_bus=bus, **options),
     }
 
 

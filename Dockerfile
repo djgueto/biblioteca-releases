@@ -21,8 +21,8 @@ ENV PYTHONUNBUFFERED=1 \
     WEB_PORT=9797
 
 WORKDIR /app
-COPY requirements-server.txt .
-RUN pip install --no-cache-dir -r requirements-server.txt
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY config ./config
 COPY core ./core
