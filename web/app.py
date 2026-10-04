@@ -3,140 +3,39 @@
 Arranque: `python -m web` (ver web/__main__.py). Usa un único proceso: los
 jobs corren en hilos del propio servidor, así que no debe lanzarse con varios
 workers de uvicorn.
+
+Las rutas están en web/routes/, una por área; aquí solo se monta la app, el
+arranque en segundo plano y la caché de la biblioteca.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
-import re
 import threading
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from dataclasses import dataclass
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
 
-from config.settings import Settings
-from core.agenda.service import AgendaService
-from core.covers import get_cover_bytes
 from core.database.db_manager import DatabaseManager
-from core.discovery.repository import WantedRepository
-from core.discovery.rules import APPROVED, DISMISSED, EXPIRED, IN_LIBRARY, REJECTED, WAITING, DiscoverySettings
-from core.discovery.service import DiscoveryService
-from core.download_clients import ED2K, TORRENT, build_download_dispatcher
-from core.importer.service import ImportSettings
-from core.library.parser import mediainfo_available
-from core.library.quality_scan import coverage as quality_coverage
-from core.library.roots import LibraryRoots, sync_library_roots
-from core.repositories import (
-    DecisionLogRepository,
-    LibraryRepository,
-    SeriesRepository,
-    SourceOfferRepository,
-    SourceRepository,
-)
-from core.repositories.grab_history_repository import GrabHistoryRepository
-from core.services.factory import build_domain_services
-from core.services.item_actions import ItemActions, ItemNotFound
-from core.services.quality_profile import TIERS, QualityProfile
-from core.tmdb.metadata import TmdbMetadataService, image_url, media_type_for_category
-from web.jobs import JobAlreadyRunning, JobManager
+from core.library.roots import sync_library_roots
+from core.repositories import LibraryRepository
+from web.jobs import JobManager
 from web.periodic import PeriodicRunner
-from web.routes import setup as setup_routes
-from web.routes.setup import mask
+from web.routes import calendar, discovery, items, library, settings, setup, system
+from web.routes.settings import autostart_enabled
 
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
 LIBRARY_CACHE_SECONDS = 30
-
-
-class MonitoredUpdate(BaseModel):
-    monitored: bool
-
-
-class QualityProfileUpdate(BaseModel):
-    order: list[str]
-    minimum: str
-
-
-class GeneralSettingsUpdate(BaseModel):
-    tmdb_api_key: str | None = None
-    omdb_api_key: str | None = None
-    wolfmax_enabled: bool | None = None
-    dontorrent_enabled: bool | None = None
-    dontorrent_url: str | None = None
-    torrent_watch_dir: str | None = None
-    autostart_scheduler: bool | None = None
-
-
-class HispashareUrlUpdate(BaseModel):
-    url: str | None = None
-
-
-class TmdbUpdate(BaseModel):
-    tmdb_id: int
-
-
-class SearchToggle(BaseModel):
-    enabled: bool
-
-
-TMDB_LINK = re.compile(r"themoviedb\.org/(tv|movie)/(\d+)")
-
-
-def _tmdb_result(data: dict, current_id) -> dict:
-    date = data.get("first_air_date") or data.get("release_date") or ""
-    overview = data.get("overview") or ""
-    return {
-        "id": data["id"],
-        "title": data.get("name") or data.get("title") or "Sin nombre",
-        "original_title": data.get("original_name") or data.get("original_title") or "",
-        "year": int(date[:4]) if date[:4].isdigit() else None,
-        "overview": overview if len(overview) <= 320 else overview[:320].rsplit(" ", 1)[0] + "…",
-        "poster_url": image_url(data.get("poster_path"), "w185"),
-        "vote_average": data.get("vote_average"),
-        "current": data["id"] == current_id,
-    }
-
-
-def autostart_enabled() -> bool:
-    """¿Arrancar el ciclo automático al iniciar la web? Ajuste de la web
-    (activado por defecto); WEB_SCHEDULER_AUTOSTART en el entorno manda si
-    está definido (Docker)."""
-    env = os.getenv("WEB_SCHEDULER_AUTOSTART")
-    if env is not None:
-        return env.lower() == "true"
-    from core.repositories.app_settings_repository import AppSettingsRepository
-
-    return bool(AppSettingsRepository(DatabaseManager()).get("autostart_scheduler", True))
-
-
-def _tmdb_key_works(key: str) -> bool:
-    import requests
-
-    try:
-        return requests.get("https://api.themoviedb.org/3/configuration", params={"api_key": key}, timeout=10).status_code == 200
-    except requests.RequestException:
-        return False
-
-
-def _omdb_key_works(key: str) -> bool:
-    import requests
-
-    try:
-        r = requests.get("https://www.omdbapi.com/", params={"apikey": key, "i": "tt0133093"}, timeout=10)
-        return r.status_code == 200 and r.json().get("Response") == "True"
-    except (requests.RequestException, ValueError):
-        return False
 
 
 class _LibraryCache:
@@ -162,23 +61,20 @@ class _LibraryCache:
             self._items = None
 
 
-def _serialize_offer(offer) -> dict:
-    return {
-        "provider": offer.provider,
-        "source_url": offer.source_url,
-        "resolution": offer.quality.resolution_height,
-        "codec": offer.quality.codec,
-        "hdr": offer.quality.hdr.name.lower(),
-        "match_score": offer.match_score,
-        "available": offer.available,
-    }
+@dataclass
+class AppContext:
+    """Lo que comparten las rutas: jobs en marcha, tareas programadas y caché."""
+
+    jobs: JobManager
+    periodic: PeriodicRunner
+    library_cache: _LibraryCache
 
 
 def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -> FastAPI:
     jobs = job_manager or JobManager()
-    periodic = PeriodicRunner(jobs)
-    library_cache = _LibraryCache()
-    jobs.add_listener(lambda msg: library_cache.invalidate() if msg.get("type") in ("series_updated", "job_finished") else None)
+    ctx = AppContext(jobs=jobs, periodic=PeriodicRunner(jobs), library_cache=_LibraryCache())
+    jobs.add_listener(
+        lambda msg: ctx.library_cache.invalidate() if msg.get("type") in ("series_updated", "job_finished") else None)
 
     def prepare_database():
         # Antes de servir: la reubicación de bibliotecas cambia rutas de la BD.
@@ -187,10 +83,10 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
         sync_library_roots(db)
 
     def start_background():
-        # Ya con el servidor respondiendo (la BD suele estar en el NAS).
+        # Ya con el servidor respondiendo (la BD puede estar en un NAS).
         try:
             if autostart_enabled():
-                if not setup_routes.setup_status()["complete"]:
+                if not setup.setup_status()["complete"]:
                     logger.info("Arranque automático del ciclo omitido: falta completar la configuración inicial")
                 elif LibraryRepository(DatabaseManager()).path_health()["ok"]:
                     jobs.start("scheduler", wait_for_interval=True)
@@ -199,9 +95,9 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
         except Exception:
             logger.exception("Error en el arranque automático del ciclo")
         if os.getenv("WEB_PERIODIC_TASKS", "true").lower() != "false":
-            periodic.start()
+            ctx.periodic.start()
         try:
-            library_cache.get()  # la primera visita no espera a la consulta
+            ctx.library_cache.get()  # la primera visita no espera a la consulta
         except Exception:
             logger.exception("No se pudo precargar la biblioteca")
 
@@ -211,551 +107,17 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
             await asyncio.to_thread(prepare_database)
             threading.Thread(target=start_background, name="arranque", daemon=True).start()
         yield
-        periodic.stop()
+        ctx.periodic.stop()
         await asyncio.to_thread(jobs.stop_all)
 
     app = FastAPI(title="Biblioteca", lifespan=lifespan)
     app.add_middleware(GZipMiddleware, minimum_size=2048)
     app.state.jobs = jobs
-    app.state.library_cache = library_cache
-    app.include_router(setup_routes.router)
+    app.state.library_cache = ctx.library_cache
 
-    # --- biblioteca -----------------------------------------------------
-    @app.get("/api/categories")
-    def categories():
-        items = library_cache.get()
-        counts: dict[str, int] = {}
-        for item in items:
-            counts[item["content_category"]] = counts.get(item["content_category"], 0) + 1
-        return [
-            {"id": key, "label": cfg["label"], "content_mode": cfg["content_mode"], "count": counts.get(key, 0)}
-            for key, cfg in Settings.get_library_categories().items()
-        ]
-
-    @app.get("/api/library")
-    def library():
-        return library_cache.get()
-
-    @app.get("/api/series/{series_id}")
-    def series_detail(series_id: int):
-        db = DatabaseManager()
-        repo = LibraryRepository(db)
-        item = repo.get_item(series_id)
-        if item is None:
-            raise HTTPException(404, "No existe")
-
-        seasons: dict[int, dict] = {}
-        for ep in db.get_local_episodes(series_id):
-            season = seasons.setdefault(ep["season"], {"season": ep["season"], "local": [], "missing": []})
-            measured = ep.get("quality_source") == "mediainfo"
-            season["local"].append({
-                "episode": ep.get("episode"), "filename": ep.get("filename"), "size_mb": ep.get("size_mb"),
-                "measured": measured,
-                # Sin analizar con MediaInfo no se muestra calidad: el nombre no es fiable.
-                **{k: (ep.get(k) if measured else None) for k in ("resolution_height", "codec", "hdr")},
-            })
-        for ep in db.get_missing_episodes_for_series(series_id):
-            season = seasons.setdefault(ep["season"], {"season": ep["season"], "local": [], "missing": []})
-            season["missing"].append({k: ep.get(k) for k in ("episode", "name", "air_date")})
-
-        item["seasons"] = [seasons[k] for k in sorted(seasons)]
-        item["offers"] = [_serialize_offer(o) for o in SourceOfferRepository(db).get_all_for_series(series_id)]
-        item["history"] = DecisionLogRepository(db).list_for_series(series_id, limit=30)
-        item["grabs"] = GrabHistoryRepository(db).list_for_series(series_id)
-        item["rejected_sources"] = SourceRepository(db).list_rejected(series_id)
-        # Otro elemento con la misma ficha de TMDB: es uno de los motivos de
-        # "Revisar match" (dos carpetas que dicen ser la misma obra).
-        item["same_tmdb"] = [
-            {"id": r[0], "name": r[1], "category_label": Settings.get_category_label(r[2])}
-            for r in db.get_connection().execute(
-                "SELECT id, COALESCE(NULLIF(tmdb_name, ''), name), content_category FROM series "
-                "WHERE tmdb_id = ? AND id != ?", (item.get("tmdb_id"), series_id)).fetchall()
-            if item.get("tmdb_id")
-            and media_type_for_category(r[2]) == media_type_for_category(item.get("content_category"))
-        ]
-        item["search_disabled_manual"] = bool(item.get("search_disabled_manual"))
-        disabled_at = item.get("search_disabled_at")
-        item["search_retry_at"] = (
-            (datetime.fromisoformat(str(disabled_at)) + timedelta(days=db.SEARCH_RETRY_DAYS)).strftime("%Y-%m-%d")
-            if item.get("search_disabled") and not item["search_disabled_manual"] and disabled_at else None
-        )
-        episodic = item.get("content_mode") == "episodic"
-        tmdb_service = TmdbMetadataService(db)
-        meta = tmdb_service.for_item(item, need_seasons=episodic) if item.get("tmdb_id") else None
-        if meta and episodic and meta.get("seasons") is not None \
-                and set(seasons) - {s["season"] for s in meta["seasons"]}:
-            # Hay una temporada que la caché aún no conocía (recién anunciada).
-            meta = tmdb_service.get(item["tmdb_id"], "tv", refresh=True) or meta
-        season_info = {s["season"]: s for s in (meta or {}).get("seasons") or []}
-        for season in item["seasons"]:
-            info = season_info.get(season["season"]) or {}
-            season["air_date"] = info.get("air_date")
-            season["episode_count"] = info.get("episode_count")
-        item["tmdb"] = {
-            "overview": meta.get("overview"),
-            "vote_average": meta.get("vote_average"),
-            "vote_count": meta.get("vote_count"),
-            "imdb_id": meta.get("imdb_id"),
-            "backdrop_url": image_url(meta.get("backdrop_path"), "w1280"),
-            "release_date": meta.get("release_date"),
-        } if meta else None
-        return item
-
-    @app.get("/api/series/{series_id}/cover")
-    def series_cover(series_id: int):
-        db = DatabaseManager()
-        item = db.get_series_by_id(series_id)
-        if not item:
-            raise HTTPException(404, "No existe")
-        item = dict(item)
-        # Orden: cartel de TMDB en español/inglés/sin texto, la carátula de
-        # Hispashare, y solo si no hay otra cosa el de TMDB en otro idioma.
-        meta = (TmdbMetadataService(db).for_item(item) if item.get("tmdb_id") else None) or {}
-        candidates = [
-            image_url(meta.get("poster_path"), "w342"),
-            LibraryRepository(db).cover_url(item),
-            image_url(meta.get("poster_other_language"), "w342"),
-        ]
-        for cover_url in filter(None, candidates):
-            data = get_cover_bytes(series_id, cover_url)
-            if data:
-                return Response(data, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=86400"})
-        raise HTTPException(404, "Sin carátula")
-
-    @app.put("/api/series/{series_id}/monitored")
-    def set_monitored(series_id: int, body: MonitoredUpdate):
-        db = DatabaseManager()
-        SeriesRepository(db).set_monitored(series_id, body.monitored)
-        DecisionLogRepository(db).append(
-            series_id,
-            "monitored_changed",
-            "Serie monitorizada" if body.monitored else "Serie marcada como no monitorizada",
-            {"monitored": body.monitored, "origin": "web"},
-        )
-        library_cache.invalidate()
-        return {"id": series_id, "monitored": body.monitored}
-
-    @app.get("/api/wanted")
-    def wanted():
-        return LibraryRepository(DatabaseManager()).list_missing()
-
-    # --- sistema --------------------------------------------------------
-    @app.get("/api/status")
-    def status():
-        dispatcher = build_download_dispatcher()
-        return {
-            "jobs": jobs.state(),
-            "download_clients": [
-                {"protocol": TORRENT, "label": "Torrent (carpeta vigilada)",
-                 "configured": dispatcher.can_handle(TORRENT), "target": Settings.get_torrent_watch_dir()},
-                {"protocol": ED2K, "label": "eMule / aMule",
-                 "configured": dispatcher.can_handle(ED2K), "target": Settings.EMULE_URL},
-            ],
-            "providers": [
-                {"name": "hispashare", "label": "Hispashare", "protocol": ED2K,
-                 "enabled": bool(Settings.HISPASHARE_USER)},
-                {"name": "wolfmax", "label": "Wolfmax4k", "protocol": TORRENT,
-                 "enabled": bool(getattr(Settings, "WOLFMAX_UPGRADE_ENABLED", False))},
-                {"name": "dontorrent", "label": f"DonTorrent ({Settings.DONTORRENT_URL})", "protocol": TORRENT,
-                 "enabled": Settings.DONTORRENT_ENABLED},
-            ],
-            "tmdb_configured": bool(Settings.TMDB_API_KEY),
-            "library_paths": LibraryRepository(DatabaseManager()).path_health(),
-            "quality_coverage": quality_coverage(DatabaseManager()),
-            "mediainfo_available": mediainfo_available(),
-            "library_roots": [
-                {"category": r.category, "label": Settings.get_category_label(r.category),
-                 "path": r.path, "accessible": Path(r.path).exists()}
-                for r in LibraryRoots(DatabaseManager()).configured()
-            ],
-            "check_interval_hours": Settings.CHECK_INTERVAL_HOURS,
-        }
-
-    @app.get("/api/settings/general")
-    def get_general_settings():
-        return {
-            "tmdb_api_key": mask(Settings.TMDB_API_KEY),
-            "omdb_api_key": mask(Settings.OMDB_API_KEY),
-            "wolfmax_enabled": bool(getattr(Settings, "WOLFMAX_UPGRADE_ENABLED", False)),
-            "dontorrent_enabled": Settings.DONTORRENT_ENABLED,
-            "dontorrent_url": Settings.DONTORRENT_URL,
-            "torrent_watch_dir": Settings.get_torrent_watch_dir(),
-            "autostart_scheduler": autostart_enabled(),
-        }
-
-    @app.put("/api/settings/general")
-    def put_general_settings(body: GeneralSettingsUpdate):
-        values = {}
-        if body.tmdb_api_key is not None and body.tmdb_api_key.strip() != mask(Settings.TMDB_API_KEY):
-            key = body.tmdb_api_key.strip()
-            if key and not _tmdb_key_works(key):
-                raise HTTPException(422, "TMDB rechaza esa API key")
-            values["TMDB_API_KEY"] = key
-        if body.omdb_api_key is not None and body.omdb_api_key.strip() != mask(Settings.OMDB_API_KEY):
-            key = body.omdb_api_key.strip()
-            if key and not _omdb_key_works(key):
-                raise HTTPException(422, "OMDb (IMDb) rechaza esa API key")
-            values["OMDB_API_KEY"] = key
-        if body.wolfmax_enabled is not None:
-            values["WOLFMAX_UPGRADE_ENABLED"] = body.wolfmax_enabled
-        if body.dontorrent_enabled is not None:
-            values["DONTORRENT_ENABLED"] = body.dontorrent_enabled
-        if body.dontorrent_url is not None:
-            url = body.dontorrent_url.strip().rstrip("/")
-            if not url.startswith(("http://", "https://")):
-                raise HTTPException(422, "La dirección de DonTorrent debe empezar por https://")
-            values["DONTORRENT_URL"] = url
-        if body.torrent_watch_dir is not None:
-            values["TORRENT_WATCH_DIR"] = body.torrent_watch_dir.strip()
-        if body.autostart_scheduler is not None:
-            from core.repositories.app_settings_repository import AppSettingsRepository
-
-            AppSettingsRepository(DatabaseManager()).set("autostart_scheduler", body.autostart_scheduler)
-        if values:
-            Settings.update_env(values)
-        return get_general_settings()
-
-    @app.put("/api/series/{series_id}/hispashare_url")
-    def set_hispashare_url(series_id: int, body: HispashareUrlUpdate):
-        url = (body.url or "").strip()
-        if url and not url.startswith(("http://", "https://")):
-            raise HTTPException(422, "El enlace debe empezar por https://")
-        try:
-            ItemActions(DatabaseManager()).apply_manual_changes(series_id, {"hispashare_url": url or None})
-        except ItemNotFound:
-            raise HTTPException(404, "No existe")
-        library_cache.invalidate()
-        return {"id": series_id, "hispashare_url": url or None}
-
-    @app.post("/api/series/{series_id}/hispashare_search_now")
-    def hispashare_search_now(series_id: int):
-        if not DatabaseManager().get_series_by_id(series_id):
-            raise HTTPException(404, "No existe")
-        if not (Settings.HISPASHARE_USER and Settings.HISPASHARE_PASS):
-            raise HTTPException(409, "Falta el usuario de Hispashare (Ajustes → Fuentes)")
-        try:
-            jobs.start("source_search", series_id=series_id)
-        except JobAlreadyRunning:
-            raise HTTPException(409, "Ya hay una búsqueda en Hispashare en marcha")
-        return jobs.state()
-
-    @app.post("/api/series/{series_id}/hispashare_reject")
-    def reject_hispashare(series_id: int):
-        db = DatabaseManager()
-        if not db.get_series_by_id(series_id):
-            raise HTTPException(404, "No existe")
-        rejected = build_domain_services(db)["reconciliation_service"].reject_source(series_id, "hispashare")
-        if not rejected:
-            raise HTTPException(409, "No tiene ficha de Hispashare asignada")
-        library_cache.invalidate()
-        return {"id": series_id, "rejected_url": rejected}
-
-    @app.put("/api/series/{series_id}/hispashare_search")
-    def toggle_hispashare_search(series_id: int, body: SearchToggle):
-        db = DatabaseManager()
-        if not db.get_series_by_id(series_id):
-            raise HTTPException(404, "No existe")
-        if body.enabled:
-            db.enable_series_search(series_id)
-        else:
-            db.disable_series_search(series_id, manual=True)
-        DecisionLogRepository(db).append(
-            series_id, "search_toggled",
-            "Búsqueda en Hispashare activada a mano" if body.enabled else "Búsqueda en Hispashare desactivada a mano",
-            {"enabled": body.enabled, "origin": "web"},
-        )
-        library_cache.invalidate()
-        return {"id": series_id, "search_disabled": not body.enabled}
-
-    # --- corregir la identificación de TMDB ------------------------------
-    def _tmdb_client():
-        if not Settings.TMDB_API_KEY:
-            raise HTTPException(409, "Falta la API key de TMDB (Sistema → Ajustes)")
-        from core.tmdb.api_client import TMDBClient
-
-        return TMDBClient(Settings.TMDB_API_KEY)
-
-    @app.get("/api/series/{series_id}/tmdb_search")
-    def tmdb_search(series_id: int, q: str):
-        item = DatabaseManager().get_series_by_id(series_id)
-        if not item:
-            raise HTTPException(404, "No existe")
-        item = dict(item)
-        media = media_type_for_category(item.get("content_category"))
-        client = _tmdb_client()
-        q = q.strip()
-        link = TMDB_LINK.search(q)
-        if link and link.group(1) != media:
-            kind = "una película" if link.group(1) == "movie" else "una serie"
-            label = Settings.get_category_label(item.get("content_category"))
-            raise HTTPException(422, f"Ese enlace es de {kind}, pero «{label}» no es una biblioteca de ese tipo")
-        direct = link.group(2) if link else (q if q.isdigit() else None)
-        if direct:
-            # Un número o un enlace de themoviedb.org: esa ficha exacta.
-            data = client._make_request(f"{media}/{direct}")
-            results = [data] if data and "id" in data else []
-        elif q:
-            results = client.search_series(q) if media == "tv" else client.search_movies(q)
-        else:
-            results = []
-        return {"media_type": media,
-                "results": [_tmdb_result(r, item.get("tmdb_id")) for r in results[:20] if "id" in r]}
-
-    @app.post("/api/series/{series_id}/tmdb_confirm")
-    def confirm_tmdb(series_id: int):
-        """"Revisar match" → "es correcto": la identificación actual se da
-        por buena (como si se hubiera elegido a mano)."""
-        db = DatabaseManager()
-        item = db.get_series_by_id(series_id)
-        if not item:
-            raise HTTPException(404, "No existe")
-        item = dict(item)
-        if not item.get("tmdb_id"):
-            raise HTTPException(409, "No tiene TMDB que confirmar: vincúlalo primero")
-        services = build_domain_services(db)
-        services["series_repository"].save_manual_changes(
-            series_id, {"needs_review": False, "confidence_score": 1.0}, recalculate_missing=False)
-        services["decision_log_repository"].append(
-            series_id, "tmdb_confirmed", "Identificación TMDB confirmada a mano",
-            {"tmdb_id": item["tmdb_id"], "previous_confidence": item.get("confidence_score"), "origin": "web"},
-        )
-        missing_count = None
-        if Settings.get_category_content_mode(item.get("content_category")) == "episodic" and Settings.TMDB_API_KEY:
-            # Mientras estaba en revisión no se calculaban sus faltantes.
-            try:
-                missing_count = services["missing_episodes_service"].rebuild_for_series(series_id)["missing_count"]
-            except Exception:
-                logger.exception(f"No se pudieron recalcular los faltantes de {series_id}")
-        library_cache.invalidate()
-        return {"id": series_id, "tmdb_id": item["tmdb_id"], "missing_count": missing_count}
-
-    @app.put("/api/series/{series_id}/tmdb")
-    def set_tmdb(series_id: int, body: TmdbUpdate):
-        db = DatabaseManager()
-        item = db.get_series_by_id(series_id)
-        if not item:
-            raise HTTPException(404, "No existe")
-        item = dict(item)
-        media = media_type_for_category(item.get("content_category"))
-        # Nombre y año se leen de TMDB, no del navegador.
-        data = _tmdb_client()._make_request(f"{media}/{body.tmdb_id}")
-        if not data or "id" not in data:
-            raise HTTPException(422, f"TMDB no tiene ninguna {'serie' if media == 'tv' else 'película'} con ese ID")
-        found = _tmdb_result(data, None)
-        changes = {
-            "tmdb_id": found["id"], "tmdb_name": found["title"], "year": found["year"],
-            "confidence_score": 1.0, "needs_review": False,
-        }
-        result = ItemActions(db, log=logger.warning).apply_manual_changes(series_id, changes)
-        renamed = result.get("renamed_to")
-        try:
-            TmdbMetadataService(db).get(found["id"], media, refresh=True)
-        except Exception:
-            logger.exception("No se pudieron refrescar los datos de TMDB")
-        library_cache.invalidate()
-        return {"id": series_id, "tmdb_id": found["id"], "tmdb_name": found["title"], "year": found["year"],
-                "missing_count": result.get("missing_count", 0), "renamed_to": renamed}
-
-    @app.post("/api/series/{series_id}/tmdb_rematch")
-    def rematch_tmdb(series_id: int):
-        _tmdb_client()  # 409 si falta la API key
-        try:
-            result = ItemActions(DatabaseManager()).rematch_tmdb(series_id)
-        except ItemNotFound:
-            raise HTTPException(404, "No existe")
-        library_cache.invalidate()
-        match = result.get("match") or {}
-        return {"id": series_id, "matched": result["matched"], "tmdb_id": match.get("tmdb_id"),
-                "tmdb_name": match.get("name"), "year": match.get("year"),
-                "confidence_score": match.get("confidence_score")}
-
-    # --- calendario -------------------------------------------------------
-    @app.get("/api/calendar")
-    def calendar(start: str | None = None, end: str | None = None):
-        from datetime import date, timedelta
-
-        today = date.today()
-        start = start or (today - timedelta(days=7)).isoformat()
-        end = end or (today + timedelta(days=30)).isoformat()
-        entries = AgendaService(DatabaseManager()).entries(start, end)
-        for entry in entries:
-            if entry.get("poster_path"):
-                entry["poster_url"] = image_url(entry.pop("poster_path"), "w185")
-        return {"today": today.isoformat(), "start": start, "end": end, "entries": entries}
-
-    # --- novedades --------------------------------------------------------
-    @app.get("/api/discovery")
-    def discovery_list(status: str = "approved"):
-        db = DatabaseManager()
-        repo = WantedRepository(db)
-        statuses = {"approved": [APPROVED], "waiting": [WAITING], "rejected": [REJECTED, EXPIRED, DISMISSED],
-                    "in_library": [IN_LIBRARY]}.get(status, [status])
-        items = repo.list(statuses)
-        for item in items:
-            item["poster_url"] = image_url(item.get("poster_path"), "w342")
-            item["category_label"] = Settings.get_category_label(item.get("category"))
-        return {"items": items, "counts": repo.counts()}
-
-    @app.post("/api/discovery/{wanted_id}/approve")
-    def discovery_approve(wanted_id: int):
-        db = DatabaseManager()
-        if WantedRepository(db).get(wanted_id) is None:
-            raise HTTPException(404, "No existe")
-        series_id = DiscoveryService(db).approve(wanted_id, reason="Añadida a mano")
-        library_cache.invalidate()
-        return {"id": wanted_id, "series_id": series_id}
-
-    @app.post("/api/discovery/{wanted_id}/dismiss")
-    def discovery_dismiss(wanted_id: int):
-        db = DatabaseManager()
-        if WantedRepository(db).get(wanted_id) is None:
-            raise HTTPException(404, "No existe")
-        DiscoveryService(db).dismiss(wanted_id)
-        library_cache.invalidate()
-        return {"id": wanted_id}
-
-    @app.get("/api/settings/discovery")
-    def get_discovery_settings():
-        return {**DiscoverySettings.load(DatabaseManager()).to_dict(),
-                "all_categories": [{"id": k, "label": v["label"]} for k, v in Settings.get_library_categories().items()]}
-
-    @app.put("/api/settings/discovery")
-    def put_discovery_settings(body: dict):
-        current = DiscoverySettings.load(DatabaseManager()).to_dict()
-        unknown = set(body) - set(current) - {"all_categories"}
-        if unknown:
-            raise HTTPException(422, f"Ajustes desconocidos: {', '.join(sorted(unknown))}")
-        merged = {**current, **{k: v for k, v in body.items() if k in current}}
-        try:
-            settings = DiscoverySettings(**merged)
-            for key in ("min_tmdb", "min_imdb"):
-                if not 0 <= float(getattr(settings, key)) <= 10:
-                    raise ValueError(key)
-        except (TypeError, ValueError):
-            raise HTTPException(422, "Ajustes de novedades no válidos")
-        settings.save(DatabaseManager())
-        return get_discovery_settings()
-
-    @app.get("/api/settings/import")
-    def get_import_settings():
-        return ImportSettings.load(DatabaseManager()).to_dict()
-
-    @app.put("/api/settings/import")
-    def put_import_settings(body: dict):
-        current = ImportSettings.load(DatabaseManager()).to_dict()
-        unknown = set(body) - set(current)
-        if unknown:
-            raise HTTPException(422, f"Ajustes desconocidos: {', '.join(sorted(unknown))}")
-        merged = {**current, **body}
-        if merged["mode"] not in ("copy", "move"):
-            raise HTTPException(422, "El modo debe ser copiar o mover")
-        merged["source_dirs"] = [d.strip() for d in merged.get("source_dirs") or [] if d and d.strip()]
-        if merged["enabled"] and not merged["source_dirs"]:
-            raise HTTPException(422, "Indica al menos una carpeta de descargas")
-        missing = [d for d in merged["source_dirs"] if not Path(d).is_dir()]
-        if missing:
-            raise HTTPException(422, f"No existe la carpeta: {missing[0]}")
-        try:
-            merged["min_age_minutes"] = max(1, int(merged["min_age_minutes"]))
-        except (TypeError, ValueError):
-            raise HTTPException(422, "Minutos sin cambios no válidos")
-        ImportSettings(**merged).save(DatabaseManager())
-        return get_import_settings()
-
-    @app.get("/api/settings/quality")
-    def get_quality_profile():
-        profile = QualityProfile.load(DatabaseManager())
-        return {**profile.to_dict(), "tiers": [{"id": t, "label": TIERS[t]} for t in profile.order]}
-
-    @app.put("/api/settings/quality")
-    def put_quality_profile(body: QualityProfileUpdate):
-        if set(body.order) != set(TIERS) or len(body.order) != len(TIERS) or body.minimum not in TIERS:
-            raise HTTPException(422, "Perfil de calidad no válido")
-        QualityProfile(order=body.order, minimum=body.minimum).save(DatabaseManager())
-        return get_quality_profile()
-
-    @app.get("/api/tasks")
-    def scheduled_tasks():
-        return {"tasks": periodic.status(), "cycle_interval_hours": Settings.CHECK_INTERVAL_HOURS}
-
-    @app.put("/api/settings/tasks")
-    def put_task_settings(body: dict):
-        intervals = body.get("intervals") or {}
-        try:
-            periodic.set_intervals({k: int(v) for k, v in intervals.items()})
-        except KeyError as e:
-            raise HTTPException(422, f"Tarea desconocida: {e}")
-        except (TypeError, ValueError):
-            raise HTTPException(422, "Intervalo no válido")
-        if body.get("cycle_interval_hours") is not None:
-            try:
-                hours = int(body["cycle_interval_hours"])
-            except (TypeError, ValueError):
-                raise HTTPException(422, "Intervalo del ciclo no válido")
-            if not 1 <= hours <= 168:
-                raise HTTPException(422, "El ciclo debe ser de 1 a 168 horas")
-            Settings.update_env({"CHECK_INTERVAL_HOURS": hours})
-        return scheduled_tasks()
-
-    @app.get("/api/health", include_in_schema=False)
-    def health():
-        return {"ok": True}
-
-    @app.get("/api/logs")
-    def logs(limit: int = 300):
-        return jobs.recent_logs(limit)
-
-    @app.post("/api/jobs/{name}/start")
-    def start_job(name: str):
-        if name == "source_search":
-            raise HTTPException(422, "Se lanza desde la ficha del elemento")
-        if name in ("scheduler", "library_scan"):
-            health = LibraryRepository(DatabaseManager()).path_health()
-            if not health["ok"]:
-                raise HTTPException(
-                    409,
-                    f"Solo {health['in_configured_roots']} de {health['total']} elementos de la base de datos "
-                    "están dentro de las rutas de biblioteca configuradas. Un ciclo crearía duplicados: "
-                    "revisa las rutas (o migra las de la BD) antes de iniciarlo.",
-                )
-        try:
-            jobs.start(name)
-        except KeyError:
-            raise HTTPException(404, "Tarea desconocida")
-        except JobAlreadyRunning:
-            raise HTTPException(409, "La tarea ya está en marcha")
-        return jobs.state()
-
-    @app.post("/api/jobs/{name}/stop")
-    def stop_job(name: str):
-        try:
-            jobs.stop(name)
-        except KeyError:
-            raise HTTPException(404, "Tarea desconocida")
-        return jobs.state()
-
-    @app.websocket("/api/ws")
-    async def events(ws: WebSocket):
-        await ws.accept()
-        loop = asyncio.get_running_loop()
-        queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=1000)
-
-        def enqueue(message: dict):
-            # Llamado desde los hilos de los jobs.
-            def put():
-                if not queue.full():
-                    queue.put_nowait(message)
-            loop.call_soon_threadsafe(put)
-
-        remove = jobs.add_listener(enqueue)
-        try:
-            await ws.send_text(json.dumps({"type": "hello", "jobs": jobs.state()}))
-            while True:
-                await ws.send_text(json.dumps(await queue.get(), ensure_ascii=False))
-        except (WebSocketDisconnect, RuntimeError):
-            pass
-        finally:
-            remove()
+    app.include_router(setup.router)
+    for module in (library, items, calendar, discovery, settings, system):
+        app.include_router(module.build(ctx))
 
     # --- interfaz -------------------------------------------------------
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

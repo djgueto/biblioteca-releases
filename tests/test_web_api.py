@@ -340,7 +340,7 @@ class TestWebApi(unittest.TestCase):
             self.assertIn("DONTORRENT_ENABLED=True", text)
             self.assertIn("DONTORRENT_URL=https://dontorrent.nuevo", text)
             self.assertTrue(Settings.DONTORRENT_ENABLED)
-            with patch("web.app._tmdb_key_works", return_value=False):
+            with patch("web.routes.settings._tmdb_key_works", return_value=False):
                 self.assertEqual(self.client.put("/api/settings/general", json={"tmdb_api_key": "mala"}).status_code, 422)
             self.assertEqual(self.client.put("/api/settings/general", json={"dontorrent_url": "dontorrent.x"}).status_code, 422)
 
@@ -389,11 +389,11 @@ class TestWebApi(unittest.TestCase):
         from core.tmdb.metadata import TmdbMetaRepository
 
         TmdbMetaRepository(DatabaseManager()).save({"tmdb_id": 10, "media_type": "tv", "poster_path": "/p.jpg"})
-        with patch("web.app.get_cover_bytes", side_effect=lambda sid, url: b"tmdb" if "image.tmdb.org" in url else b"h") as get:
+        with patch("web.routes.library.get_cover_bytes", side_effect=lambda sid, url: b"tmdb" if "image.tmdb.org" in url else b"h") as get:
             r = self.client.get("/api/series/1/cover")
         self.assertEqual(r.content, b"tmdb")
         self.assertEqual(get.call_args.args[1], "https://image.tmdb.org/t/p/w342/p.jpg")
-        with patch("web.app.get_cover_bytes", side_effect=lambda sid, url: None if "tmdb" in url else b"h"):
+        with patch("web.routes.library.get_cover_bytes", side_effect=lambda sid, url: None if "tmdb" in url else b"h"):
             self.assertEqual(self.client.get("/api/series/1/cover").content, b"h")  # respaldo Hispashare
 
     def test_import_settings(self):
