@@ -1125,8 +1125,8 @@ class HispashareDownloader:
                     return
 
             # Crear directorio de descargas si no existe
-            downloads_dir = Path("downloads")
-            downloads_dir.mkdir(exist_ok=True)
+            downloads_dir = Path(Settings.DOWNLOADS_DIR)
+            downloads_dir.mkdir(parents=True, exist_ok=True)
             
             # Obtener nombre de la serie
             series = self.db_manager.get_series_by_id(series_id)
@@ -1212,7 +1212,7 @@ class HispashareDownloader:
             safe_name = re.sub(r'[<>:"/\\|?*]', '_', series_name)
             
             # Buscar archivo de enlaces
-            downloads_dir = Path("downloads")
+            downloads_dir = Path(Settings.DOWNLOADS_DIR)
             links_file = downloads_dir / f"{safe_name}_ed2k_links.txt"
             
             if not links_file.exists():

@@ -5,7 +5,10 @@ from pathlib import Path
 
 
 def backup_sqlite_db(db_path: str, backups_dir: str | None = None, keep_last: int = 20) -> str | None:
-    backups_dir = backups_dir or os.getenv("BACKUPS_DIR", "backups")
+    if backups_dir is None:
+        from config.settings import Settings
+
+        backups_dir = Settings.BACKUPS_DIR
     src = Path(db_path)
     if not src.exists():
         return None

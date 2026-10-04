@@ -822,6 +822,8 @@ function System() {
       <div class="panel">
         <table class="list"><tbody>
           <tr><td>TMDB</td><td>${data.tmdb_configured ? html`<span class="pill ok">API key configurada</span>` : html`<span class="pill bad">Falta API key</span>`}</td></tr>
+          <tr><td>Versión</td><td class="mono">${data.version}</td></tr>
+          <tr><td>Carpeta de datos</td><td class="mono dim">${data.data_dir}</td></tr>
           <tr><td>Intervalo del ciclo automático</td><td>${data.check_interval_hours} h</td></tr>
           <tr><td>Calidad analizada con MediaInfo</td><td>
             ${!data.mediainfo_available ? html`<span class="pill bad">MediaInfo no disponible</span>` : html`

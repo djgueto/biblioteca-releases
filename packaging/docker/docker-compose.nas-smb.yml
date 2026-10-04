@@ -1,0 +1,41 @@
+# Variante para cuando las bibliotecas están en OTRO equipo o NAS y se
+# acceden por carpeta compartida (SMB/CIFS).
+#
+#   1. Copia este archivo como docker-compose.yml en una carpeta vacía.
+#   2. Cambia //192.168.1.100/Multimedia por la carpeta compartida de tu NAS
+#      (añade más volúmenes si tienes varios NAS).
+#   3. Crea un archivo "nas.env" junto a él con el usuario del NAS:
+#         NAS_USER=usuario
+#         NAS_PASS=contraseña
+#   4. docker compose --env-file nas.env up -d
+#   5. Abre http://IP-DEL-EQUIPO:9797 y elige las carpetas dentro de /media.
+#
+# Si vienes de la versión de Windows: copia antes series_manager.db y .env a
+# ./config. Las bibliotecas se reubican solas (Z:/SERIES -> /media/nas1/SERIES)
+# en cuanto las cambies en Ajustes → Bibliotecas, con copia de seguridad
+# previa en ./config/backups.
+#
+# El equipo necesita soporte SMB (Debian/Ubuntu: `sudo apt install cifs-utils`;
+# Synology, QNAP y Unraid ya lo traen).
+
+services:
+  biblioteca:
+    image: ghcr.io/djgueto/biblioteca:latest
+    container_name: biblioteca
+    restart: unless-stopped
+    ports:
+      - "9797:9797"
+    shm_size: "1gb"
+    environment:
+      TZ: Europe/Madrid
+    volumes:
+      - ./config:/config
+      - nas1:/media/nas1
+
+volumes:
+  nas1:
+    driver: local
+    driver_opts:
+      type: cifs
+      device: //192.168.1.100/Multimedia
+      o: "username=${NAS_USER},password=${NAS_PASS},vers=3.0,uid=0,gid=0,file_mode=0664,dir_mode=0775"

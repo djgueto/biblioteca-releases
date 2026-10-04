@@ -1,0 +1,4 @@
+# Solo para compilar la app de escritorio (además de ../../requirements.txt).
+pyinstaller==6.11.1
+pystray==0.19.5
+Pillow==11.0.0
