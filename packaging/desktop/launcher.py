@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import sys
 import threading
+import time
 import webbrowser
 from pathlib import Path
 
@@ -80,8 +81,36 @@ def run_tray(server: threading.Thread) -> bool:
     items += [pystray.MenuItem(f"Desde el móvil: {u}", None, enabled=False) for u in lan[:2]]
     if not lan:
         items.append(pystray.MenuItem("Solo desde este PC (Ajustes → Acceso)", None, enabled=False))
+
+    def install_update(_icon=None, _item=None):
+        from web import updates
+        try:
+            updates.install()
+        except RuntimeError:
+            webbrowser.open(URL + "/#/system")
+
+    def update_label(_item):
+        from web import updates
+        return f"⬆ Actualizar a {updates.state.latest}"
+
+    def update_available(_item):
+        from web import updates
+        return updates.state.available and not updates.state.installing
+
+    items.append(pystray.MenuItem(update_label, install_update, visible=update_available))
     items += [pystray.MenuItem("Reiniciar", restart_app), pystray.MenuItem("Salir", quit_app)]
     icon = pystray.Icon("biblioteca", _icon_image(), "Biblioteca", menu=pystray.Menu(*items))
+
+    def refresh_menu():
+        # El aviso de actualización aparece cuando la comprobación termina.
+        while True:
+            time.sleep(60)
+            try:
+                icon.update_menu()
+            except Exception:
+                pass
+
+    threading.Thread(target=refresh_menu, daemon=True).start()
     threading.Thread(target=open_when_ready, daemon=True).start()
     try:
         icon.run()

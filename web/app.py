@@ -30,7 +30,7 @@ from core.repositories import LibraryRepository
 from web.jobs import JobManager
 from web.periodic import PeriodicRunner
 from web.auth import AuthMiddleware
-from web.routes import access, calendar, discovery, items, library, settings, setup, system
+from web.routes import access, calendar, discovery, items, library, settings, setup, system, updates
 from web.routes.settings import autostart_enabled
 
 logger = logging.getLogger(__name__)
@@ -97,6 +97,9 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
             logger.exception("Error en el arranque automático del ciclo")
         if os.getenv("WEB_PERIODIC_TASKS", "true").lower() != "false":
             ctx.periodic.start()
+            from web import updates as update_checker
+
+            update_checker.start_background_checks()
         try:
             ctx.library_cache.get()  # la primera visita no espera a la consulta
         except Exception:
@@ -119,6 +122,7 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
 
     app.include_router(access.router)
     app.include_router(setup.router)
+    app.include_router(updates.router)
     for module in (library, items, calendar, discovery, settings, system):
         app.include_router(module.build(ctx))
 

@@ -64,3 +64,6 @@ geckodriver
 # OS
 .DS_Store
 Thumbs.db
+
+# Lo escribe la CI al compilar
+/VERSION

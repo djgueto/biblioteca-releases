@@ -33,9 +33,10 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libayatana-appindicator3-1 gir1.2-ayatanaappindicator3-0.1
       - run: pip install -r requirements.txt -r packaging/desktop/requirements.txt
+      - name: Grabar la versión en el paquete
+        shell: bash
+        run: echo "${{ github.ref_name }}" > VERSION
       - run: pyinstaller --noconfirm packaging/desktop/biblioteca.spec
-        env:
-          APP_VERSION: ${{ github.ref_name }}
       - name: Empaquetar
         shell: bash
         run: |
@@ -55,3 +56,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ matrix.artifact }}.*
+          generate_release_notes: true  # las "novedades" que muestra el aviso de actualización

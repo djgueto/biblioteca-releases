@@ -69,8 +69,17 @@ def write_env_values(path: Path, values: dict[str, str]) -> None:
 
 
 class Settings:
-    APP_VERSION = os.getenv("APP_VERSION", "dev")
+    # La versión la graba la CI en el fichero VERSION del paquete (app de
+    # escritorio) o en APP_VERSION (imagen Docker).
+    APP_VERSION = os.getenv("APP_VERSION") or (
+        (BASE_DIR / "VERSION").read_text(encoding="utf-8").strip() if (BASE_DIR / "VERSION").exists() else "dev")
     DATA_DIR = str(DATA_DIR)
+
+    # Actualizaciones (web/updates.py). Repositorio privado: hace falta una
+    # clave de GitHub con permiso de lectura.
+    UPDATE_REPO = os.getenv("UPDATE_REPO", "djgueto/biblioteca")
+    UPDATE_GITHUB_TOKEN = os.getenv("UPDATE_GITHUB_TOKEN", "")
+    UPDATE_CHECK_ENABLED = os.getenv("UPDATE_CHECK_ENABLED", "True").lower() == "true"
 
     # Acceso a la web (ver web/auth.py). La contraseña se guarda como hash.
     WEB_ALLOW_LAN = os.getenv("WEB_ALLOW_LAN", "False").lower() == "true"  # app de escritorio

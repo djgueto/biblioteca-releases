@@ -325,3 +325,7 @@ textarea.input { resize: vertical; }
 .login-wrap { min-height: 100vh; display: grid; place-items: center; padding: 16px; }
 .login { width: 100%; max-width: 360px; }
 .lan-url { font-size: 18px; font-weight: 600; overflow-wrap: anywhere; }
+
+/* aviso de actualización */
+.update-banner { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; padding: 10px 14px;
+  border-radius: 10px; border: 1px solid var(--accent); background: rgba(245, 185, 66, .08); }

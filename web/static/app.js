@@ -774,8 +774,102 @@ function Activity({ live, toast }) {
     </div>`;
 }
 
+// ---------------------------------------------------------------- actualizaciones
+async function installUpdate(toast, onProgress) {
+  try { await api.post('/api/updates/install'); } catch (e) { toast('Error: ' + e.message); return; }
+  // Mientras descarga, el servidor responde con el progreso; luego se cierra
+  // para sustituir sus archivos y vuelve con la versión nueva.
+  let down = false;
+  for (let i = 0; i < 600; i++) {
+    await new Promise((r) => setTimeout(r, 1000));
+    try {
+      const st = await api.get('/api/updates');
+      if (down) { location.reload(); return; }
+      if (st.error && !st.installing) { toast(st.error); onProgress(''); return; }
+      onProgress(st.progress || 'Actualizando…');
+    } catch (_) {
+      down = true;
+      onProgress('Instalando y reiniciando…');
+    }
+  }
+}
+
+function UpdateHowTo({ st }) {
+  if (st.mode === 'docker') return html`<span class="mono">docker compose pull && docker compose up -d</span>`;
+  if (st.mode === 'source') return html`<span class="mono">git pull</span> y reiniciar`;
+  return null;
+}
+
+function UpdateBanner({ toast }) {
+  const [st, setSt] = useState(null);
+  const [progress, setProgress] = useState('');
+  useEffect(() => {
+    const load = () => api.get('/api/updates').then(setSt).catch(() => {});
+    load();
+    const t = setInterval(load, 10 * 60 * 1000);
+    return () => clearInterval(t);
+  }, []);
+  if (!st || !st.available) return null;
+  return html`
+    <div class="update-banner">
+      <span>⬆ Hay una versión nueva: <b>${st.latest}</b> <span class="faint">(tienes ${st.current})</span></span>
+      ${st.url && html`<a href=${st.url} target="_blank" rel="noopener">Novedades</a>`}
+      <span style="flex:1"></span>
+      ${progress ? html`<span class="faint">${progress}</span>`
+        : st.can_install ? html`<button class="btn small primary" onClick=${() => { setProgress('Empezando…'); installUpdate(toast, setProgress); }}>Actualizar ahora</button>`
+        : html`<span class="faint">Para actualizar: <${UpdateHowTo} st=${st} /></span>`}
+    </div>`;
+}
+
+function UpdatesPanel({ toast }) {
+  const { data: st, reload } = useFetch('/api/updates');
+  const [token, setToken] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState('');
+  useEffect(() => { if (st && token === null) setToken(st.token); }, [st]);
+  if (!st) return null;
+  const run = async (fn, ok) => {
+    setBusy(true);
+    try { await fn(); ok && toast(ok); reload(); } catch (e) { toast('Error: ' + e.message); }
+    setBusy(false);
+  };
+  return html`
+    <div class="section">
+      <h3>Actualizaciones</h3>
+      <div class="panel form">
+        <table class="list"><tbody>
+          <tr><td style="width:220px">Versión instalada</td><td class="mono">${st.current}</td></tr>
+          <tr><td>Última publicada</td><td>
+            ${st.latest ? html`<span class="mono">${st.latest}</span>` : '—'}
+            ${st.available ? html` <span class="pill accent">Nueva</span>` : st.latest ? html` <span class="pill ok">Al día</span>` : null}
+            ${st.url && html` <a href=${st.url} target="_blank" rel="noopener" style="margin-left:8px">Novedades</a>`}
+          </td></tr>
+          <tr><td>Última comprobación</td><td>${st.checked_at ? fmtDate(st.checked_at) : 'Nunca'}</td></tr>
+          ${st.error && html`<tr><td>Problema</td><td><span class="pill bad">${st.error}</span></td></tr>`}
+        </tbody></table>
+        ${st.mode === 'dev' || !/^v?\d/.test(st.current) ? html`<small class="faint">Versión de desarrollo: no se buscan actualizaciones automáticamente.</small>` : null}
+        <label class="check"><input type="checkbox" checked=${st.enabled} disabled=${busy}
+          onChange=${(e) => run(() => api.put('/api/settings/updates', { enabled: e.target.checked }))} /> Buscar actualizaciones automáticamente (una vez al día)</label>
+        <label class="field"><span>Clave de GitHub (repositorio privado)</span>
+          <div class="inline-edit" style="margin-top:0;max-width:none">
+            <input class="input mono" value=${token || ''} onInput=${(e) => setToken(e.target.value)} placeholder="github_pat_…" />
+            <button class="btn" disabled=${busy || token === st.token} onClick=${() => run(() => api.put('/api/settings/updates', { token }), 'Clave guardada')}>Guardar</button>
+          </div>
+          <small class="faint">Mientras ${st.repo} sea privado, hace falta un token de GitHub con permiso de solo lectura del repositorio
+            (Settings → Developer settings → Fine-grained tokens → «Contents: Read-only»).</small>
+        </label>
+      </div>
+      <div class="actions" style="margin-top:14px">
+        <button class="btn" disabled=${busy} onClick=${() => run(() => api.post('/api/updates/check'))}>Buscar ahora</button>
+        ${st.available && (progress ? html`<span class="faint">${progress}</span>`
+          : st.can_install ? html`<button class="btn primary" onClick=${() => { setProgress('Empezando…'); installUpdate(toast, setProgress); }}>Actualizar a ${st.latest}</button>`
+          : html`<span class="faint">Para actualizar: <${UpdateHowTo} st=${st} /></span>`)}
+      </div>
+    </div>`;
+}
+
 // ---------------------------------------------------------------- system
-function System() {
+function System({ toast }) {
   const { data } = useFetch('/api/status');
   if (!data) return html`<div class="loading"><div class="spinner"></div></div>`;
   return html`
@@ -841,7 +935,8 @@ function System() {
           </td></tr>
         </tbody></table>
       </div>
-    </div>`;
+    </div>
+    <${UpdatesPanel} toast=${toast} />`;
 }
 
 // ---------------------------------------------------------------- setup: carpetas, bibliotecas, fuentes
@@ -1385,7 +1480,7 @@ function Shell() {
   if (page === 'series') body = html`<${SeriesDetail} id=${arg} tick=${live.tick} toast=${toast} />`;
   else if (page === 'wanted') body = html`<${Wanted} query=${query} tick=${live.tick} />`;
   else if (page === 'activity') body = html`<${Activity} live=${live} toast=${toast} />`;
-  else if (page === 'system') body = html`<${System} />`;
+  else if (page === 'system') body = html`<${System} toast=${toast} />`;
   else if (page === 'calendar') body = html`<${Calendar} live=${live} toast=${toast} />`;
   else if (page === 'discovery') body = html`<${Discovery} live=${live} toast=${toast} />`;
   else if (page === 'settings') body = html`<${Settings} toast=${toast} />`;
@@ -1421,7 +1516,7 @@ function Shell() {
               <input placeholder="Buscar…" value=${query} onInput=${(e) => setQuery(e.target.value)} />
             </label>`}
         </header>
-        <div class="content">${body}</div>
+        <div class="content"><${UpdateBanner} toast=${toast} />${body}</div>
       </main>
       ${msg && html`<div class="toast">${msg}</div>`}
     </div>`;

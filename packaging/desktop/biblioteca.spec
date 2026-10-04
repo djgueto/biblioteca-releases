@@ -16,6 +16,9 @@ datas = [
     (str(ROOT / "web" / "static"), "web/static"),
     (str(ROOT / "core" / "wolfmax" / "gibberish-aes.js"), "core/wolfmax"),
 ]
+# La CI escribe aquí la versión (tag): la app la usa para saber si hay otra más nueva.
+if (ROOT / "VERSION").exists():
+    datas.append((str(ROOT / "VERSION"), "."))
 
 hidden = [
     # uvicorn carga estos módulos por nombre.
