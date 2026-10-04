@@ -71,7 +71,8 @@ OWNED = {"id": 301, "title": "Ya la tengo", "release_date": "2026-09-10", "genre
 class TestService(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
-        self.roots = {"movies": [str(Path(self.tmp.name) / "PELICULAS")], "series": [str(Path(self.tmp.name) / "SERIES")]}
+        base = Path(self.tmp.name).resolve()
+        self.roots = {"movies": [str(base / "PELICULAS")], "series": [str(base / "SERIES")]}
         self.patches = [
             patch.object(Settings, "TMDB_API_KEY", "k"),
             patch.object(Settings, "get_paths_for_category", lambda c: self.roots.get(c, [])),

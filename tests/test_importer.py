@@ -30,7 +30,7 @@ def _video(path: Path, size=1000, mtime=OLD) -> Path:
 class TestImporter(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
-        base = Path(self.tmp.name)
+        base = Path(self.tmp.name).resolve()
         self.downloads = base / "descargas"
         self.series_root = base / "SERIES"
         self.movies_root = base / "PELICULAS"

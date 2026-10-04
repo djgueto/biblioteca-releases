@@ -462,6 +462,13 @@ class DatabaseManager:
         """
         Normaliza rutas para evitar duplicados entre rutas de red y unidades mapeadas
         """
+        if os.name != 'nt':
+            # Linux/macOS (Docker, NAS): rutas absolutas normales, sin
+            # resolver enlaces simbólicos (los volúmenes montados se ven tal
+            # cual los configuró el usuario) y nunca con '\'.
+            if not path:
+                return path
+            return os.path.normpath(os.path.abspath(path))
         try:
             # Convertir a Path para normalización básica
             normalized = Path(path).resolve()
@@ -972,9 +979,9 @@ class DatabaseManager:
 
         new_folder_path = old_folder_path.parent / safe_name
 
-        # En Windows los paths son case-insensitive; sólo permitir rename si el destino
-        # no existe o es el mismo directorio con distinto case.
-        if new_folder_path.exists() and new_folder_path.resolve() != old_folder_path.resolve():
+        # En Windows y macOS los nombres no distinguen mayúsculas: el destino
+        # "existe" si solo cambian mayúsculas, pero es la misma carpeta.
+        if new_folder_path.exists() and not os.path.samefile(new_folder_path, old_folder_path):
             return {"success": False, "renamed": False, "error": f"Ya existe una carpeta con ese nombre: {new_folder_path}"}
 
         try:
@@ -1260,9 +1267,17 @@ class DatabaseManager:
             skipped_unreachable = 0
             root_exists_cache = {}
 
+            def _exists(path):
+                # Con el NAS inaccesible, exists() sobre una ruta de red puede
+                # lanzar OSError (WinError 64...) en vez de devolver False.
+                try:
+                    return path.exists()
+                except OSError:
+                    return None
+
             def _root_exists(path):
                 if path not in root_exists_cache:
-                    root_exists_cache[path] = path.exists()
+                    root_exists_cache[path] = bool(_exists(path))
                 return root_exists_cache[path]
 
             for series in all_series:
@@ -1274,8 +1289,13 @@ class DatabaseManager:
                 should_delete = False
                 delete_reason = ""
 
+                exists = _exists(series_path)
+                if exists is None:
+                    # No se puede comprobar: nunca se borra por ello.
+                    skipped_unreachable += 1
+                    continue
                 # Verificar si la carpeta existe
-                if not series_path.exists():
+                if not exists:
                     # Solo es una baja real si su raíz configurada es accesible:
                     # con el NAS caído, o con rutas de otro sistema (BD creada
                     # en Windows usada desde Docker), "no existe" no significa
