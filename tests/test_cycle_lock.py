@@ -3,6 +3,8 @@ Tests del bloqueo de ciclo entre procesos (core/jobs/cycle_lock.py).
 """
 
 import os
+import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -50,6 +52,24 @@ class TestCycleLock(unittest.TestCase):
         self.web.conn.commit()
         self.assertIsNone(b.holder())
         self.assertTrue(b.acquire())
+
+    def test_lock_of_dead_local_process_is_taken_at_once(self):
+        a, b = CycleLock(self.web), CycleLock(self.desktop)
+        child = subprocess.Popen([sys.executable, "-c", "pass"])
+        child.wait()
+        a.owner = f"{socket.gethostname()}:{child.pid}:abcd1234"  # se cerró sin soltarlo
+        a.acquire()
+        self.assertIsNone(b.holder())
+        self.assertTrue(b.acquire())
+
+    def test_lock_of_live_or_remote_process_is_kept(self):
+        for owner in (f"{socket.gethostname()}:{os.getpid()}:abcd1234", "otro-pc:999999:abcd1234"):
+            a, b = CycleLock(self.web), CycleLock(self.desktop)
+            a.owner = owner
+            a.acquire()
+            self.assertEqual(b.holder(), owner)
+            self.assertFalse(b.acquire())
+            a.release()
 
     def test_heartbeat_keeps_it_alive(self):
         a, b = CycleLock(self.web), CycleLock(self.desktop)
