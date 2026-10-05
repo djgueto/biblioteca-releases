@@ -2,6 +2,7 @@ import os
 import logging
 from pathlib import Path
 from .parser import EpisodeParser
+from .unreadable_names import is_unreadable_name
 from config.settings import Settings
 
 
@@ -88,7 +89,10 @@ class LibraryScanner:
             # interrumpido o en curso por otro escaneo concurrente (ver scan_series).
             if series_folder.name.endswith('__casefix_tmp'):
                 continue
-            
+
+            if is_unreadable_name(series_folder):
+                continue
+
             if self._skip_paths and str(series_folder.resolve()).lower() in self._skip_paths:
                 self.logger.debug(f"Omitida (no monitorizada): {series_folder.name}")
                 continue

@@ -3,6 +3,7 @@ import re
 from pathlib import Path
 
 from config.settings import Settings
+from core.library.unreadable_names import is_unreadable_name
 
 
 # Un episodio suelto (Serie S02E01.mp4, Serie 2x01.mkv). Más estricto que el
@@ -70,7 +71,7 @@ class CategoryLibraryScanner:
             return discovered
 
         for entry in entries:
-            if entry.name.startswith('.'):
+            if entry.name.startswith('.') or is_unreadable_name(entry):
                 continue
 
             if self._is_skipped(entry):
@@ -103,7 +104,7 @@ class CategoryLibraryScanner:
             return discovered
 
         for entry in entries:
-            if entry.name.startswith('.'):
+            if entry.name.startswith('.') or is_unreadable_name(entry):
                 continue
 
             if self._is_skipped(entry):
