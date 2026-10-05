@@ -39,6 +39,16 @@ STATIC_DIR = Path(__file__).parent / "static"
 LIBRARY_CACHE_SECONDS = 30
 
 
+class _RevalidatedStatic(StaticFiles):
+    """Que el navegador pregunte siempre (304 si no cambió): sin esto, tras
+    actualizar la app seguía usando el app.js viejo de su caché."""
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 class _LibraryCache:
     """La consulta de biblioteca tarda ~2 s con la BD en el NAS: se cachea y
     se invalida cuando un job avisa de cambios."""
@@ -127,12 +137,12 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
         app.include_router(module.build(ctx))
 
     # --- interfaz -------------------------------------------------------
-    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    app.mount("/static", _RevalidatedStatic(directory=STATIC_DIR), name="static")
 
     @app.get("/{path:path}", include_in_schema=False)
     def spa(path: str):
         if path.startswith("api/"):
             raise HTTPException(404)
-        return FileResponse(STATIC_DIR / "index.html")
+        return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
 
     return app

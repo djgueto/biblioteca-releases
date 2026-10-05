@@ -178,6 +178,12 @@ class TestWebApi(unittest.TestCase):
         self.assertEqual((r.status_code, r.content), (200, b"\xff\xd8jpeg"))
         self.assertEqual(self.client.get("/api/series/2/cover").status_code, 404)
 
+    def test_interface_revalidated_after_updates(self):
+        for url in ("/", "/static/app.js", "/static/styles.css"):
+            self.assertEqual(self.client.get(url).headers.get("cache-control"), "no-cache", url)
+        etag = self.client.get("/static/app.js").headers["etag"]
+        self.assertEqual(self.client.get("/static/app.js", headers={"If-None-Match": etag}).status_code, 304)
+
     def _fake_tmdb(self):
         thrones = {"id": 1399, "name": "Juego de tronos", "original_name": "Game of Thrones",
                    "first_air_date": "2011-04-17", "overview": "Siete reinos.", "poster_path": "/got.jpg"}
