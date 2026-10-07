@@ -471,8 +471,13 @@ class DatabaseManager:
             return os.path.normpath(os.path.abspath(path))
         try:
             # Convertir a Path para normalización básica
-            normalized = Path(path).resolve()
-            
+            try:
+                normalized = Path(path).resolve()
+            except OSError:
+                # Unidad caída o sin credenciales (WinError 1326): resolve()
+                # falla, pero la equivalencia letra -> UNC sigue sirviendo.
+                normalized = Path(os.path.abspath(path))
+
             # Si es una ruta de red, mantenerla como tal
             if str(normalized).startswith('\\\\'):
                 return str(normalized).replace('/', '\\')
