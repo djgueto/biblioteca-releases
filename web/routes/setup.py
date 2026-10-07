@@ -31,7 +31,7 @@ def _libraries() -> list[dict]:
         paths = [p for p, _ in Settings._configured_paths(category)]
         out.append({
             "id": category, "label": cfg["label"], "content_mode": cfg["content_mode"],
-            "paths": [{"path": p, "accessible": Path(p).is_dir()} for p in paths],
+            "paths": [{"path": p, "accessible": os.path.isdir(p)} for p in paths],
         })
     return out
 
@@ -58,8 +58,8 @@ def put_libraries(body: dict, request: Request):
             path = str(raw or "").strip()
             if not path or path in clean:
                 continue
-            if not Path(path).is_dir():
-                raise HTTPException(422, f"No existe la carpeta: {path}")
+            if not os.path.isdir(path):
+                raise HTTPException(422, f"No existe la carpeta (o no hay acceso): {path}")
             key = Settings._path_key(path)
             if key in seen and seen[key] != category:
                 raise HTTPException(422, f"La carpeta {path} ya está en «{categories[seen[key]]['label']}»: "
@@ -194,8 +194,8 @@ def browse(path: str = ""):
     if not path:
         return {"path": "", "parent": None, "dirs": [{"name": r, "path": r} for r in _roots()]}
     current = Path(path)
-    if not current.is_dir():
-        raise HTTPException(404, "No existe la carpeta")
+    if not os.path.isdir(current):
+        raise HTTPException(404, "No existe la carpeta o no hay acceso")
     try:
         entries = sorted((p for p in current.iterdir() if p.is_dir() and not p.name.startswith(".")),
                          key=lambda p: p.name.lower())

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -125,7 +124,7 @@ def build(ctx) -> APIRouter:
         merged["source_dirs"] = [d.strip() for d in merged.get("source_dirs") or [] if d and d.strip()]
         if merged["enabled"] and not merged["source_dirs"]:
             raise HTTPException(422, "Indica al menos una carpeta de descargas")
-        missing = [d for d in merged["source_dirs"] if not Path(d).is_dir()]
+        missing = [d for d in merged["source_dirs"] if not os.path.isdir(d)]
         if missing:
             raise HTTPException(422, f"No existe la carpeta: {missing[0]}")
         try:

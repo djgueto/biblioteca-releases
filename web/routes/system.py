@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
+import os
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
@@ -47,7 +47,7 @@ def build(ctx) -> APIRouter:
             "mediainfo_available": mediainfo_available(),
             "library_roots": [
                 {"category": r.category, "label": Settings.get_category_label(r.category),
-                 "path": r.path, "accessible": Path(r.path).exists()}
+                 "path": r.path, "accessible": os.path.exists(r.path)}
                 for r in LibraryRoots(DatabaseManager()).configured()
             ],
             "check_interval_hours": Settings.CHECK_INTERVAL_HOURS,

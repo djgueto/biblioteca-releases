@@ -51,12 +51,18 @@ class LibraryScanner:
         all_series = []
         
         for series_path in self.series_paths:
-            if not series_path.exists():
-                self.logger.warning(f"Ruta no encontrada: {series_path}")
+            # os.path.exists y no Path.exists: en Python 3.10 este último lanza
+            # OSError si el NAS rechaza las credenciales (WinError 1326).
+            if not os.path.exists(series_path):
+                self.logger.warning(f"Ruta no encontrada o sin acceso: {series_path}")
                 continue
-            
+
             self.logger.info(f"Escaneando ruta: {series_path}")
-            series_list = self.scan_path(series_path)
+            try:
+                series_list = self.scan_path(series_path)
+            except OSError as e:
+                self.logger.warning(f"No se pudo leer {series_path}: {e}")
+                continue
             all_series.extend(series_list)
         
         # Eliminar duplicados basándose en la ruta normalizada de la serie

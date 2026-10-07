@@ -1,4 +1,5 @@
 import logging
+import os
 import re
 from pathlib import Path
 
@@ -41,8 +42,10 @@ class CategoryLibraryScanner:
         seen_paths = set()
 
         for base_path in self.paths:
-            if not base_path.exists():
-                self.logger.warning(f"Ruta no encontrada para {self.category}: {base_path}")
+            # os.path.exists y no Path.exists: en Python 3.10 este último lanza
+            # OSError si el NAS rechaza las credenciales (WinError 1326).
+            if not os.path.exists(base_path):
+                self.logger.warning(f"Ruta no encontrada o sin acceso para {self.category}: {base_path}")
                 continue
 
             for item in self._scan_base_path(base_path):

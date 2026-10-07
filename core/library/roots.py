@@ -21,7 +21,6 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from config.settings import Settings
 
@@ -140,7 +139,7 @@ class LibraryRoots:
             old = previous.get(root.key)
             if old is None or canon(old.path) == canon(root.path) or set(old.aliases) & set(root.aliases):
                 continue
-            if not Path(root.path).exists():
+            if not os.path.exists(root.path):
                 pending.append({"category": root.category, "position": root.position,
                                 "old": old.path, "new": root.path})
                 continue
