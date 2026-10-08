@@ -157,11 +157,18 @@ class Scheduler(BackgroundJob):
         self._log("=" * 60)
         
         driver = None
+        # Cada paso va aislado (_step): si uno falla (NAS sin acceso, TMDB
+        # caído...) se avisa y el ciclo sigue con los demás en vez de
+        # abortar entero y no descargar nada.
+        self._cycle_warnings = []
         try:
-            # 1. Login Hispashare
+            # 1. Login Hispashare. Si falla, el ciclo sigue sin Hispashare
+            # (Wolfmax, DonTorrent y la biblioteca no lo necesitan).
             self._progress(5, "🔐 Login Hispashare...")
             self._log("🔐 Iniciando sesión en Hispashare...")
-            driver = self.login_hispashare()
+            driver = self._step("Login en Hispashare", self.login_hispashare)
+            if driver is None:
+                self._log("   ⏭️ Se sigue sin Hispashare en este ciclo")
             self.current_driver = driver  # Mantener referencia
             # Reconstruir el registro de proveedores con el driver de este
             # ciclo: HispashareSourceProvider no puede sobrevivir a un ciclo
@@ -174,19 +181,21 @@ class Scheduler(BackgroundJob):
             ))
             if not self.running:
                 return
-            
+
             # 2. Limpiar series eliminadas
             self._progress(15, "🧹 Limpiando series eliminadas...")
             self._log("🧹 Limpiando series eliminadas del disco...")
-            cleaned_count = self.db.cleanup_deleted_series()
-            self._log(f"   ✅ {cleaned_count} series eliminadas")
+            cleaned_count = self._step("Limpieza de series eliminadas", self.db.cleanup_deleted_series)
+            if cleaned_count is not None:
+                self._log(f"   ✅ {cleaned_count} series eliminadas")
             if not self.running:
                 return
-            
+
             # 2.1. Limpiar episodios faltantes huérfanos
             self._log("🧹 Limpiando episodios faltantes huérfanos...")
-            orphan_count = self.db.cleanup_orphaned_missing_episodes()
-            self._log(f"   ✅ {orphan_count} episodios huérfanos eliminados")
+            orphan_count = self._step("Limpieza de faltantes huérfanos", self.db.cleanup_orphaned_missing_episodes)
+            if orphan_count is not None:
+                self._log(f"   ✅ {orphan_count} episodios huérfanos eliminados")
 
             # 2.2. Importar lo descargado (si está activado): justo antes de
             # escanear, para que lo importado se vea en este mismo ciclo.
@@ -195,30 +204,32 @@ class Scheduler(BackgroundJob):
             # 3. Escanear biblioteca
             self._progress(25, "📁 Escaneando biblioteca...")
             self._log("📁 Escaneando biblioteca local...")
-            series_list = self.scan_library()
-            self._log(f"   ✅ {len(series_list)} series encontradas")
+            series_list = self._step("Escaneo de series", self.scan_library)
+            if series_list is not None:
+                self._log(f"   ✅ {len(series_list)} series encontradas")
             if not self.running:
                 return
 
             self._log("🎞️ Escaneando bibliotecas de archivo unico...")
-            single_file_items = self.scan_single_file_library()
-            self._log(f"   ✅ {len(single_file_items)} elementos de archivo unico encontrados")
+            single_file_items = self._step("Escaneo de bibliotecas de archivo único", self.scan_single_file_library)
+            if single_file_items is not None:
+                self._log(f"   ✅ {len(single_file_items)} elementos de archivo unico encontrados")
             if not self.running:
                 return
-            
+
             # 4. Limpiar duplicados de series tras la sincronización de escaneos
             self._progress(35, "🔧 Consolidando duplicados...")
             self._log("🔧 Limpiando series duplicadas...")
-            cleaned_series = self.db.cleanup_duplicate_series()
-            self._log(f"   ✅ {cleaned_series} series duplicadas eliminadas")
-            
+            cleaned_series = self._step("Limpieza de duplicados", self.db.cleanup_duplicate_series)
+            if cleaned_series is not None:
+                self._log(f"   ✅ {cleaned_series} series duplicadas eliminadas")
+
             # 5. Vincular con TMDB
             self._progress(45, "💾 Sincronización completada...")
             self._log("💾 Base de datos sincronizada durante el escaneo")
             self._progress(55, "🎬 Vinculando con TMDB...")
             self._log("🎬 Vinculando bibliotecas con TMDB...")
-            db_series_list = self.db.get_all_series()
-            self.match_tmdb(db_series_list)
+            self._step("Vinculación con TMDB", lambda: self.match_tmdb(self.db.get_all_series()))
             if not self.running:
                 return
 
@@ -234,43 +245,47 @@ class Scheduler(BackgroundJob):
             # 6. Detectar episodios faltantes
             self._progress(65, "🔍 Detectando episodios faltantes...")
             self._log("🔍 Detectando episodios faltantes...")
-            missing_count = self.detect_missing()
-            self._log(f"   ✅ {missing_count} episodios faltantes detectados")
+            missing_count = self._step("Detección de faltantes", self.detect_missing)
+            if missing_count is not None:
+                self._log(f"   ✅ {missing_count} episodios faltantes detectados")
 
             # 6.0. Lo que no se encontró hace tiempo vuelve a buscarse (por si
             # lo han subido); lo que el usuario apagó, no.
             self.retry_disabled_searches()
 
-            # 6.1. Buscar URLs para series nuevas sin episodios faltantes
-            self._progress(70, "🔎 Buscando URLs para series nuevas...")
-            self._log("🔎 Buscando URLs en Hispashare para series nuevas sin episodios faltantes...")
-            self.search_hispashare_for_new_series(driver)
+            if driver is not None:
+                # 6.1. Buscar URLs para series nuevas sin episodios faltantes
+                self._progress(70, "🔎 Buscando URLs para series nuevas...")
+                self._log("🔎 Buscando URLs en Hispashare para series nuevas sin episodios faltantes...")
+                self._step("Búsqueda en Hispashare (series nuevas)", self.search_hispashare_for_new_series, driver)
 
-            self._progress(73, "🔎 Buscando URLs de bibliotecas...")
-            self._log("🔎 Buscando URLs en Hispashare para bibliotecas de archivo unico...")
-            self.search_hispashare_for_single_file_items(driver)
+                self._progress(73, "🔎 Buscando URLs de bibliotecas...")
+                self._log("🔎 Buscando URLs en Hispashare para bibliotecas de archivo unico...")
+                self._step("Búsqueda en Hispashare (archivo único)",
+                           self.search_hispashare_for_single_file_items, driver)
 
-            # 8. Buscar en Hispashare
-            self._progress(75, "🔎 Buscando en Hispashare...")
-            self._log("🔎 Buscando URLs en Hispashare...")
-            self.search_hispashare(driver)
-            
+                # 8. Buscar en Hispashare
+                self._progress(75, "🔎 Buscando en Hispashare...")
+                self._log("🔎 Buscando URLs en Hispashare...")
+                self._step("Búsqueda en Hispashare", self.search_hispashare, driver)
+
             # 8.1. Proveedores sin catálogo propio (DonTorrent): buscar ficha
             # para las series con faltantes que aún no tienen oferta suya.
             self._progress(80, "🔎 Buscando en otras fuentes...")
-            self.discover_search_offers()
+            self._step("Búsqueda en otras fuentes", self.discover_search_offers)
             # DonTorrent: películas y series por debajo de 4K (mejoras), por turnos.
-            self.rotate_provider_searches("dontorrent", limit=20)
+            self._step("Búsqueda por turnos en DonTorrent",
+                       lambda: self.rotate_provider_searches("dontorrent", limit=20))
             if not self.running:
                 return
 
             # 9. Descargar episodios faltantes
             self._progress(85, "⬇️ Procesando descargas...")
             self._log("⬇️ Procesando descargas de episodios faltantes...")
-            self.process_downloads(driver)
+            self._step("Descargas de episodios faltantes", self.process_downloads, driver)
             if not self.running:
                 return
-            self.process_wanted_movies()
+            self._step("Descargas de películas en camino", self.process_wanted_movies)
             if not self.running:
                 return
 
@@ -283,12 +298,13 @@ class Scheduler(BackgroundJob):
             if getattr(Settings, 'UPGRADE_ENABLED', False):
                 self._progress(90, "🔼 Mejorando calidad...")
                 self._log("🔼 Buscando upgrades de calidad (ej. 2160p)...")
-                self.process_upgrades(driver)
-            
+                self._step("Mejoras de calidad", self.process_upgrades, driver)
+
             # 10. Barrido de nuevo contenido en Hispashare
-            self._progress(93, "🔍 Buscando nuevo contenido...")
-            self._log("🔍 Iniciando barrido de nuevo contenido en Hispashare...")
-            self.scan_new_content(driver)
+            if driver is not None:
+                self._progress(93, "🔍 Buscando nuevo contenido...")
+                self._log("🔍 Iniciando barrido de nuevo contenido en Hispashare...")
+                self.scan_new_content(driver)
 
             # 11. Descubrimiento de contenido en Wolfmax4k
             if getattr(Settings, 'WOLFMAX_UPGRADE_ENABLED', False):
@@ -296,10 +312,17 @@ class Scheduler(BackgroundJob):
                 self._log("🐺 Escaneando categorías Wolfmax4k...")
                 self.scan_wolfmax_categories()
                 self._log("🐺 Buscando en Wolfmax4k lo que no sale en su catálogo reciente...")
-                self.relink_wolfmax()
-            
-            self._progress(100, "✅ Ciclo completado")
-            self._log("✅ CICLO COMPLETADO CON ÉXITO")
+                self._step("Búsqueda en Wolfmax4k", self.relink_wolfmax)
+
+            warnings = self._cycle_warnings
+            if warnings:
+                self._progress(100, f"⚠️ Ciclo completado con {len(warnings)} aviso(s)")
+                self._log(f"⚠️ CICLO COMPLETADO CON {len(warnings)} AVISO(S):")
+                for warning in warnings:
+                    self._log(f"   • {warning}")
+            else:
+                self._progress(100, "✅ Ciclo completado")
+                self._log("✅ CICLO COMPLETADO CON ÉXITO")
             self._log("=" * 60)
             self._record_task(self.name, cycle_started)
 
@@ -318,23 +341,45 @@ class Scheduler(BackgroundJob):
                     self.logger.error(f"Error cerrando driver: {e}")
             self.current_driver = None
     
+    def _step(self, label, fn, *args):
+        """Ejecuta un paso del ciclo; si falla, lo apunta como aviso y
+        devuelve None para que el ciclo siga con el resto."""
+        try:
+            return fn(*args)
+        except Exception as e:
+            self.logger.error(f"Error en {label}: {e}", exc_info=True)
+            self._log(f"   ⚠️ {label}: {e}")
+            self._cycle_warnings.append(f"{label}: {e}")
+            return None
+
     def login_hispashare(self):
         """Iniciar sesión en Hispashare"""
+        if not Settings.HISPASHARE_USER:
+            self._log("   ℹ️ Hispashare sin configurar")
+            return None
+        auth = None
         try:
             auth = HispashareAuth(
                 Settings.HISPASHARE_USER,
                 Settings.HISPASHARE_PASS,
                 headless=Settings.SELENIUM_HEADLESS
             )
-            
+
             if auth.login():
                 self._log("   ✅ Login exitoso")
                 return auth.driver
             else:
                 raise Exception("Login fallido en Hispashare")
-                
+
         except Exception as e:
             self.logger.error(f"Error en login: {e}")
+            # El ciclo sigue sin Hispashare: que no quede un navegador abierto.
+            driver = getattr(auth, "driver", None)
+            if driver is not None:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
             raise
     
     def _library_sync(self):
