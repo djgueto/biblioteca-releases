@@ -77,7 +77,7 @@ class Settings:
 
     # Actualizaciones (web/updates.py). Repositorio privado: hace falta una
     # clave de GitHub con permiso de lectura.
-    UPDATE_REPO = os.getenv("UPDATE_REPO", "djgueto/biblioteca")
+    UPDATE_REPO = os.getenv("UPDATE_REPO", "djgueto/biblioteca-releases")
     UPDATE_GITHUB_TOKEN = os.getenv("UPDATE_GITHUB_TOKEN", "")
     UPDATE_CHECK_ENABLED = os.getenv("UPDATE_CHECK_ENABLED", "True").lower() == "true"
 

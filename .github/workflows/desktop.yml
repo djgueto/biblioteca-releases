@@ -59,6 +59,8 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    env:
+      RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -78,3 +80,14 @@ jobs:
         with:
           files: paquetes/*
           body_path: NOVEDADES.md  # las "novedades" que muestra el aviso de actualización
+      # El código es privado: la app se actualiza desde un repositorio
+      # público que solo tiene los instaladores (sin clave de GitHub en
+      # cada equipo). RELEASES_TOKEN: clave con permiso de escritura allí.
+      - uses: softprops/action-gh-release@v2
+        if: env.RELEASES_TOKEN != ''
+        with:
+          repository: djgueto/biblioteca-releases
+          token: ${{ secrets.RELEASES_TOKEN }}
+          tag_name: ${{ github.ref_name }}
+          files: paquetes/*
+          body_path: NOVEDADES.md
