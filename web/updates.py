@@ -14,6 +14,8 @@ app de escritorio, descargarla e instalarla.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import logging
 import os
 import re
@@ -145,19 +147,70 @@ def install_dir() -> Path:
     return exe.parent
 
 
-def _download(asset: dict, dest: Path):
+def _asset_url(asset: dict) -> str:
     # Con clave, los recursos de un repositorio privado se piden por la API.
-    url = asset["url"] if Settings.UPDATE_GITHUB_TOKEN else asset["browser_download_url"]
-    with requests.get(url, headers=_headers("application/octet-stream"), stream=True, timeout=60) as r:
+    return asset["url"] if Settings.UPDATE_GITHUB_TOKEN else asset["browser_download_url"]
+
+
+def _download(asset: dict, dest: Path) -> str:
+    """Descarga el paquete y devuelve su SHA-256."""
+    digest = hashlib.sha256()
+    with requests.get(_asset_url(asset), headers=_headers("application/octet-stream"), stream=True, timeout=60) as r:
         r.raise_for_status()
         total = int(r.headers.get("content-length") or asset.get("size") or 0)
         done = 0
         with open(dest, "wb") as f:
             for chunk in r.iter_content(1 << 20):
                 f.write(chunk)
+                digest.update(chunk)
                 done += len(chunk)
                 if total:
                     state.progress = f"Descargando… {done * 100 // total}%"
+    return digest.hexdigest()
+
+
+# --- firma de las versiones ---------------------------------------------------
+# Cada versión trae SHA256SUMS (huella de cada paquete) y SHA256SUMS.sig, su
+# firma Ed25519 hecha en la CI (packaging/desktop/sign_release.py) con una
+# clave privada que solo está en los secretos de GitHub. Solo se instala un
+# paquete cuya huella aparezca en un SHA256SUMS firmado con esta clave: los
+# instaladores son públicos y así nadie puede colar uno modificado.
+SIGNING_PUBLIC_KEY = "kP5pUBNUlV2GNTGU0ndmpobXib37x7IjwnjtY7Ak5Xw="
+SUMS_ASSET, SIG_ASSET = "SHA256SUMS", "SHA256SUMS.sig"
+
+
+def verified_sums(sums: bytes, signature: bytes, public_key: str | None = None) -> dict[str, str]:
+    """{nombre de paquete: sha256} si la firma es válida; si no, RuntimeError."""
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    key = Ed25519PublicKey.from_public_bytes(base64.b64decode(public_key or SIGNING_PUBLIC_KEY))
+    try:
+        key.verify(base64.b64decode(signature.strip()), sums)
+    except (InvalidSignature, ValueError) as e:
+        raise RuntimeError("La firma de la versión no es válida: no se instala") from e
+    out = {}
+    for line in sums.decode().splitlines():
+        digest, _, name = line.partition("  ")
+        if digest and name:
+            out[name.strip()] = digest.strip().lower()
+    return out
+
+
+def _fetch_small(asset: dict) -> bytes:
+    r = requests.get(_asset_url(asset), headers=_headers("application/octet-stream"), timeout=30)
+    r.raise_for_status()
+    return r.content
+
+
+def _expected_sha256(release: dict, package: str) -> str:
+    assets = {a.get("name"): a for a in release.get("assets") or []}
+    if SUMS_ASSET not in assets or SIG_ASSET not in assets:
+        raise RuntimeError(f"La versión {release.get('tag_name')} no está firmada: no se instala")
+    sums = verified_sums(_fetch_small(assets[SUMS_ASSET]), _fetch_small(assets[SIG_ASSET]))
+    if package not in sums:
+        raise RuntimeError(f"{package} no aparece en la lista firmada de la versión: no se instala")
+    return sums[package]
 
 
 def _extract(archive: Path, target: Path) -> Path:
@@ -227,9 +280,12 @@ def install() -> None:
     def _run():
         state.installing, state.error = True, None
         try:
+            state.progress = "Comprobando la firma…"
+            expected = _expected_sha256(_release, asset["name"])
             work = Path(tempfile.mkdtemp(prefix="biblioteca-update-"))
             archive = work / asset["name"]
-            _download(asset, archive)
+            if _download(asset, archive) != expected:
+                raise RuntimeError("El paquete descargado no coincide con la huella firmada: no se instala")
             state.progress = "Preparando…"
             new_app = _extract(archive, work / "nueva")
             archive.unlink(missing_ok=True)

@@ -61,6 +61,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+      UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -69,6 +70,15 @@ jobs:
         with:
           path: paquetes
           merge-multiple: true
+      # La app solo instala paquetes cuya huella esté en SHA256SUMS firmado
+      # con esta clave (la pública va dentro de web/updates.py).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Firmar paquetes
+        run: |
+          pip install cryptography==44.0.0
+          python packaging/desktop/sign_release.py paquetes
       - name: Novedades (commits desde la versión anterior)
         shell: bash
         run: |
