@@ -868,6 +868,60 @@ function UpdatesPanel({ toast }) {
     </div>`;
 }
 
+// Pasar la biblioteca entre instalaciones (escritorio <-> NAS): la BD entera.
+function DatabasePanel({ toast }) {
+  const [busy, setBusy] = useState('');
+  const fileRef = useRef(null);
+  const importFile = async (file) => {
+    if (!file) return;
+    if (!confirm(`¿Sustituir la base de datos de esta instalación por «${file.name}»?\n\n`
+      + 'Se guarda antes una copia de la actual y la app se reinicia. '
+      + 'La configuración (rutas, claves, contraseña) no cambia.')) return;
+    setBusy('Subiendo…');
+    try {
+      const res = await fetch('/api/system/database/import', {
+        method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: file,
+      });
+      if (!res.ok) {
+        let detail = res.statusText;
+        try { detail = (await res.json()).detail || detail; } catch (_) {}
+        throw new Error(detail);
+      }
+      const info = await res.json();
+      setBusy(`Importadas ${info.series} fichas y ${info.episodes} episodios. Reiniciando…`);
+      // Se espera a que el servidor se vaya y vuelva con la BD nueva.
+      let down = false;
+      for (let i = 0; i < 180; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        try { await fetch('/api/health', { cache: 'no-store' }).then((r) => { if (!r.ok) throw 0; }); if (down) { location.reload(); return; } }
+        catch (_) { down = true; }
+      }
+      setBusy('La app no ha vuelto a arrancar: ábrela de nuevo.');
+    } catch (e) {
+      toast('Error: ' + e.message);
+      setBusy('');
+    } finally {
+      if (fileRef.current) fileRef.current.value = '';
+    }
+  };
+  return html`
+    <div class="section">
+      <h3>Base de datos</h3>
+      <div class="panel form">
+        <p class="dim" style="margin-top:0">Para tener la misma biblioteca en otra instalación (por ejemplo, la del NAS):
+          exporta aquí e importa allí el archivo. Las rutas de las bibliotecas se ajustan solas a las que tenga
+          configuradas la otra instalación; la configuración (rutas, claves, contraseña) no se copia.</p>
+        <div class="actions">
+          <a class="btn" href="/api/system/database/export" download>Exportar base de datos</a>
+          <button class="btn" disabled=${!!busy} onClick=${() => fileRef.current.click()}>Importar…</button>
+          <input type="file" accept=".db,.sqlite,.sqlite3" ref=${fileRef} style="display:none"
+            onChange=${(e) => importFile(e.target.files[0])} />
+          ${busy && html`<span class="faint">${busy}</span>`}
+        </div>
+      </div>
+    </div>`;
+}
+
 // ---------------------------------------------------------------- system
 function System({ toast }) {
   const { data } = useFetch('/api/status');
@@ -936,6 +990,7 @@ function System({ toast }) {
         </tbody></table>
       </div>
     </div>
+    <${DatabasePanel} toast=${toast} />
     <${UpdatesPanel} toast=${toast} />`;
 }
 

@@ -45,6 +45,13 @@ def serve(host: str, port: int, open_browser: bool = False):
     if os.getenv("BIBLIOTECA_RESTARTED"):
         runtime.wait_port_free(port)  # el proceso anterior aún lo está soltando
 
+    # Una base de datos importada desde la web se aplica aquí, antes de
+    # que nada la abra (ver core/database/transfer.py).
+    from config.settings import Settings
+    from core.database.transfer import apply_pending_import
+
+    apply_pending_import(Settings.DB_PATH)
+
     from web.app import create_app
 
     if open_browser:

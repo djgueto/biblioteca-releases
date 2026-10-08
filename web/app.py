@@ -30,7 +30,7 @@ from core.repositories import LibraryRepository
 from web.jobs import JobManager
 from web.periodic import PeriodicRunner
 from web.auth import AuthMiddleware
-from web.routes import access, calendar, discovery, items, library, settings, setup, system, updates
+from web.routes import access, calendar, database, discovery, items, library, settings, setup, system, updates
 from web.routes.settings import autostart_enabled
 
 logger = logging.getLogger(__name__)
@@ -133,6 +133,7 @@ def create_app(job_manager: JobManager | None = None, *, init_db: bool = True) -
     app.include_router(access.router)
     app.include_router(setup.router)
     app.include_router(updates.router)
+    app.include_router(database.router)
     for module in (library, items, calendar, discovery, settings, system):
         app.include_router(module.build(ctx))
 
