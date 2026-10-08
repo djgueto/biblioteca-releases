@@ -179,11 +179,20 @@ def _updater_script(work: Path, new_app: Path, dest: Path) -> list[str]:
         # Saltos "\n": write_text ya los convierte en CRLF en Windows (con
         # "\r\n" quedaba "\r\r\n" y cmd no encontraba la etiqueta :esperar).
         # ping en vez de timeout: timeout falla en un proceso sin consola.
+        # Sin tubería "tasklist | find": una vez se quedó colgado el find
+        # con la app ya cerrada. Además la espera tiene tope (~2 min) y
+        # robocopy reintenta si algún archivo sigue bloqueado.
+        procs = work / "procesos.txt"
         script.write_text(
             "@echo off\n"
+            "set intentos=0\n"
             ":esperar\n"
-            f'tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul && (ping -n 2 127.0.0.1 >nul & goto esperar)\n'
-            f'robocopy "{new_app}" "{dest}" /MIR /R:5 /W:1 /NFL /NDL /NJH /NJS /NP >nul\n'
+            "set /a intentos+=1\n"
+            "if %intentos% gtr 60 goto copiar\n"
+            f'tasklist /FI "PID eq {pid}" /FI "IMAGENAME eq {Path(sys.executable).name}" /NH >"{procs}" 2>nul\n'
+            f'find "{pid}" "{procs}" >nul 2>nul && (ping -n 2 127.0.0.1 >nul & goto esperar)\n'
+            ":copiar\n"
+            f'robocopy "{new_app}" "{dest}" /MIR /R:30 /W:1 /NFL /NDL /NJH /NJS /NP >nul\n'
             f'start "" "{exe}"\n'
             f'rmdir /s /q "{work}"\n', encoding="utf-8")
         return ["cmd", "/c", str(script)]
