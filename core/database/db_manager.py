@@ -32,6 +32,19 @@ def _keep_measured_quality(episode: dict, previous: dict | None) -> dict:
     return merged
 
 
+_LOCAL_EPISODE_COLUMNS = ('season, episode, filename, file_path, resolution_height, codec, source, size_mb, '
+                          'quality_rank, hdr, quality_source, measured_at')
+
+
+def _same_rows(current, new) -> bool:
+    """¿Las filas de local_episodes de la BD son exactamente las que se
+    escribirían? (mismo contenido, sin importar el orden)."""
+    if len(current) != len(new):
+        return False
+    key = lambda row: tuple("" if v is None else str(v) for v in row)  # noqa: E731 (None y números comparables)
+    return sorted(map(key, current)) == sorted(map(key, new))
+
+
 class DatabaseManager:
     # Cada petición o job crea su propio DatabaseManager y lo cierra al
     # terminar; sin esto, cada uno pagaría una apertura de conexión. Se
@@ -553,13 +566,13 @@ class DatabaseManager:
             # Coincidencia exacta primero (usa el índice); el lower() solo como
             # respaldo porque impide usar índice y recorre toda la tabla.
             cursor.execute(
-                'SELECT id, folder_path, content_category FROM series WHERE folder_path = ?',
+                'SELECT id, folder_path, content_category, name FROM series WHERE folder_path = ?',
                 (normalized_path,)
             )
             existing = cursor.fetchone()
             if not existing:
                 cursor.execute(
-                    'SELECT id, folder_path, content_category FROM series WHERE lower(folder_path) = lower(?)',
+                    'SELECT id, folder_path, content_category, name FROM series WHERE lower(folder_path) = lower(?)',
                     (normalized_path,)
                 )
                 existing = cursor.fetchone()
@@ -567,14 +580,14 @@ class DatabaseManager:
             # Si no existe con la ruta normalizada, buscar por nombre y verificar si es la misma ubicación física
             if not existing:
                 cursor.execute(
-                    'SELECT id, folder_path, content_category FROM series WHERE lower(name) = lower(?) AND content_category = ?',
+                    'SELECT id, folder_path, content_category, name FROM series WHERE lower(name) = lower(?) AND content_category = ?',
                     (series_data['name'], content_category)
                 )
                 name_matches = cursor.fetchall()
-                
-                for match_id, match_path, _match_category in name_matches:
+
+                for match_id, match_path, _match_category, match_name in name_matches:
                     if self.normalize_path(match_path).lower() == normalized_path.lower():
-                        existing = (match_id, match_path, content_category)
+                        existing = (match_id, match_path, content_category, match_name)
                         break
             
             if existing:
@@ -603,6 +616,8 @@ class DatabaseManager:
                             WHERE id = ?
                         ''', (series_data['name'], normalized_path, content_category, series_id))
                         self.logger.info(f"Serie actualizada: {series_data['name']} -> {normalized_path}")
+                elif existing[3] == series_data['name'] and existing[2] == content_category:
+                    pass  # nada que cambiar: no se escribe (antes, una escritura por serie y ciclo)
                 else:
                     # La ruta no cambió, solo actualizar nombre
                     cursor.execute('''
@@ -1430,9 +1445,6 @@ class DatabaseManager:
                 ).fetchall()
             }
 
-            # Primero limpiar episodios existentes para esta serie
-            cursor.execute('DELETE FROM local_episodes WHERE series_id = ?', (series_id,))
-            
             # Crear un set para evitar duplicados en el mismo lote
             unique_episodes = {}
             
@@ -1451,16 +1463,10 @@ class DatabaseManager:
                 else:
                     unique_episodes[episode_key] = episode
             
-            # Insertar episodios únicos
+            rows = []
             for episode in unique_episodes.values():
                 episode = _keep_measured_quality(episode, measured.get(str(episode['file_path']).lower()))
-                cursor.execute('''
-                    INSERT INTO local_episodes
-                    (series_id, season, episode, filename, file_path, resolution_height, codec, source, size_mb,
-                     quality_rank, hdr, quality_source, measured_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    series_id,
+                rows.append((
                     episode['season'],
                     episode['episode'],
                     episode['filename'],
@@ -1474,9 +1480,27 @@ class DatabaseManager:
                     episode.get('quality_source') or ('filename' if episode.get('resolution_height') else None),
                     episode.get('measured_at'),
                 ))
-            
+
+            # Si en disco no ha cambiado nada no se reescribe: antes cada
+            # ciclo borraba y reinsertaba todos los episodios de todas las
+            # series (miles de escrituras sobre la BD del NAS).
+            current = cursor.execute(
+                f'SELECT {_LOCAL_EPISODE_COLUMNS} FROM local_episodes WHERE series_id = ?', (series_id,)
+            ).fetchall()
+            if _same_rows(current, rows):
+                return False
+
+            cursor.execute('DELETE FROM local_episodes WHERE series_id = ?', (series_id,))
+            cursor.executemany(
+                f'INSERT INTO local_episodes (series_id, {_LOCAL_EPISODE_COLUMNS}) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                [(series_id, *row) for row in rows],
+            )
+            # "Actualizado" = cambió algo en disco, no "se escaneó".
+            cursor.execute('UPDATE series SET updated_at = CURRENT_TIMESTAMP WHERE id = ?', (series_id,))
             conn.commit()
-            
+            return True
+
         except Exception as e:
             self.logger.error(f"Error en insert_local_episodes: {e}")
             conn.rollback()

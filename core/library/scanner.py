@@ -265,60 +265,73 @@ class LibraryScanner:
                 return episode_info
         return None
 
+    def _video_files(self, folder, recursive):
+        """[(ruta, tamaño en bytes)] de los vídeos de una carpeta.
+
+        Con os.scandir: en Windows el tipo y el tamaño vienen en el propio
+        listado de la carpeta. Con iterdir()/rglob() + is_file() + stat()
+        eran 2-3 viajes de red más por archivo sobre la biblioteca del NAS.
+        """
+        found = []
+        pending = [str(folder)]
+        while pending:
+            current = pending.pop()
+            try:
+                with os.scandir(current) as entries:
+                    for entry in entries:
+                        try:
+                            if entry.is_dir():
+                                # Como rglob: no se entra en enlaces a carpetas (evita bucles).
+                                if recursive and not entry.is_symlink():
+                                    pending.append(entry.path)
+                                continue
+                            if not entry.is_file():
+                                continue
+                            path = Path(entry.path)
+                            if not self.is_video_file(path):
+                                continue
+                            size = entry.stat().st_size
+                        except OSError:
+                            continue
+                        found.append((path, size))
+            except OSError as e:
+                if current == str(folder):
+                    raise
+                self.logger.warning(f"No se pudo leer {current}: {e}")
+        return found
+
+    def _episode_from_file(self, file_path, size, root_folder, default_season=None):
+        episode_info = self._parse_episode_with_fallback(file_path, root_folder, default_season)
+        if not episode_info:
+            return None
+        episode_info['file_path'] = str(file_path)
+        episode_info.update(self.parser.parse_quality(file_path.name))
+        episode_info['size_mb'] = round(size / (1024 * 1024), 2)
+        return episode_info
+
     def scan_season_folder(self, season_folder, season_num):
         """Escanear carpeta de temporada"""
         episodes = []
-
-        for file_path in season_folder.iterdir():
-            if not file_path.is_file():
-                continue
-
-            # Solo archivos de video
-            if not self.is_video_file(file_path):
-                continue
-
-            episode_info = self._parse_episode_with_fallback(file_path, season_folder, season_num)
-
+        for file_path, size in self._video_files(season_folder, recursive=False):
+            episode_info = self._episode_from_file(file_path, size, season_folder, season_num)
             if episode_info:
-                episode_info['file_path'] = str(file_path)
-                quality = self.parser.parse_quality(file_path.name)
-                episode_info.update(quality)
-                try:
-                    episode_info['size_mb'] = round(file_path.stat().st_size / (1024 * 1024), 2)
-                except Exception:
-                    episode_info['size_mb'] = None
                 episodes.append(episode_info)
-        
         return episodes
-    
+
     def scan_flat_structure(self, series_folder):
         """Escanear estructura plana (sin carpetas de temporadas)"""
         episodes = []
         processed_files = set()  # Evitar procesar el mismo archivo múltiples veces
-        
-        for file_path in series_folder.rglob('*'):
-            if not file_path.is_file():
-                continue
-            
-            if not self.is_video_file(file_path):
-                continue
-            
+
+        for file_path, size in self._video_files(series_folder, recursive=True):
             # Evitar duplicados por nombre de archivo
-            file_key = (file_path.name.lower(), file_path.stat().st_size)
+            file_key = (file_path.name.lower(), size)
             if file_key in processed_files:
                 continue
             processed_files.add(file_key)
-            
-            episode_info = self._parse_episode_with_fallback(file_path, series_folder)
 
+            episode_info = self._episode_from_file(file_path, size, series_folder)
             if episode_info:
-                episode_info['file_path'] = str(file_path)
-                quality = self.parser.parse_quality(file_path.name)
-                episode_info.update(quality)
-                try:
-                    episode_info['size_mb'] = round(file_path.stat().st_size / (1024 * 1024), 2)
-                except Exception:
-                    episode_info['size_mb'] = None
                 episodes.append(episode_info)
 
         return episodes

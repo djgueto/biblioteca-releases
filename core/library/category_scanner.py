@@ -86,7 +86,7 @@ class CategoryLibraryScanner:
                     discovered.append(info)
                 continue
 
-            if entry.is_file() and self.is_video_file(entry):
+            if self.is_video_file(entry) and entry.is_file():
                 discovered.append({
                     'name': entry.stem,
                     'path': str(entry),
@@ -119,7 +119,7 @@ class CategoryLibraryScanner:
                     discovered.append(info)
                 continue
 
-            if entry.is_file() and self.is_video_file(entry):
+            if self.is_video_file(entry) and entry.is_file():
                 if LOOSE_EPISODE.search(entry.stem):
                     self.loose_episodes.append(str(entry))
                     self.logger.warning(f"Episodio suelto en {self.category}, no se trata como película: {entry}")
@@ -148,7 +148,7 @@ class CategoryLibraryScanner:
 
         try:
             for file_path in directory.rglob('*'):
-                if file_path.is_file() and self.is_video_file(file_path):
+                if self.is_video_file(file_path) and file_path.is_file():
                     video_count += 1
         except Exception as exc:
             self.logger.warning(f"No se pudo recorrer {directory}: {exc}")
