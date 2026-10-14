@@ -824,33 +824,11 @@ class Scheduler(BackgroundJob):
                     # de decidir -- así Hispashare se sigue comprobando aunque
                     # Wolfmax sea el proveedor que gane, y viceversa.
                     self.source_arbitration_service.refresh_all_offers(series_id, series)
-                    offer = self.source_arbitration_service.best_offer(series_id)
-                    if offer is None:
+                    offers = self.source_arbitration_service.ranked_offers(series_id)
+                    if not offers:
                         self._log(f"   ℹ️ [{name}] Sin oferta disponible en ningún proveedor")
                         continue
-
-                    provider = self.providers.get(offer.provider)
-                    if provider is None:
-                        self.logger.warning(f"Proveedor desconocido '{offer.provider}' para '{name}'")
-                        continue
-
-                    quality_label = f"{offer.quality.resolution_height}p" if offer.quality.resolution_height else "?"
-                    self._log(f"   🔍 [{offer.provider} {quality_label}] {name}")
-
-                    handle = provider.resolve_download(series, offer, missing_only=True)
-                    if handle is None:
-                        self._log("      ℹ️ Sin enlaces para episodios faltantes")
-                        continue
-
-                    if handle.kind == "ed2k":
-                        count = len(handle.payload.get("ed2k_links", []))
-                        total_downloads += count
-                        self._log(f"      ✅ {count} enlaces ed2k")
-                    elif handle.kind == "torrent":
-                        grabbed = handle.payload.get("grabbed", [])
-                        total_downloads += len(grabbed)
-                        destination = str(Path(grabbed[0]).parent) if grabbed else ""
-                        self._log(f"      ✅ {len(grabbed)} torrent(s) → {destination}")
+                    total_downloads += self._download_from_offers(series, offers)
 
                 except Exception as e:
                     self.logger.error(f"Error procesando '{name}': {e}")
@@ -867,6 +845,53 @@ class Scheduler(BackgroundJob):
         except Exception as e:
             self.logger.error(f"Error en process_downloads: {e}")
             raise
+
+    def _pending_missing(self, series):
+        """Faltantes que aún se pueden pedir (sin los ya enviados ni los que
+        esperan en la carpeta de descargas)."""
+        missing = {(m["season"], m["episode"]) for m in self.db.get_missing_episodes_for_series(series["id"])}
+        return missing - self.grab_history_repository.blocked_episodes(series, Settings.GRAB_RETRY_DAYS)
+
+    def _download_from_offers(self, series, offers):
+        """Pide los faltantes a la mejor oferta y, si quedan episodios que
+        esa no tiene (o el proveedor no puede ahora), a la siguiente. Cada
+        envío queda en grab_history, así el siguiente proveedor no repite lo
+        que ya pidió el anterior. Devuelve cuántas descargas se enviaron."""
+        name = series['name']
+        total = 0
+        for index, offer in enumerate(offers):
+            if not self.running:
+                break
+            if index and not self._pending_missing(series):
+                break
+            provider = self.providers.get(offer.provider)
+            if provider is None:
+                self.logger.warning(f"Proveedor desconocido '{offer.provider}' para '{name}'")
+                continue
+
+            quality_label = f"{offer.quality.resolution_height}p" if offer.quality.resolution_height else "?"
+            fallback = " (respaldo)" if index else ""
+            self._log(f"   🔍 [{offer.provider} {quality_label}]{fallback} {name}")
+            try:
+                handle = provider.resolve_download(series, offer, missing_only=True)
+            except Exception as e:
+                self.logger.error(f"Error con {offer.provider} para '{name}': {e}")
+                self._log(f"      ❌ {offer.provider}: {e}")
+                continue
+            if handle is None:
+                self._log("      ℹ️ Sin enlaces para episodios faltantes")
+                continue
+
+            if handle.kind == "ed2k":
+                count = len(handle.payload.get("ed2k_links", []))
+                total += count
+                self._log(f"      ✅ {count} enlaces ed2k")
+            elif handle.kind == "torrent":
+                grabbed = handle.payload.get("grabbed", [])
+                total += len(grabbed)
+                destination = str(Path(grabbed[0]).parent) if grabbed else ""
+                self._log(f"      ✅ {len(grabbed)} torrent(s) → {destination}")
+        return total
 
     def _save_hispashare_source(self, series_id, url, *, source_title="", reason=""):
         cover_url = self.db.derive_hispashare_cover_url(url) or ""

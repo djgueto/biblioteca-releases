@@ -88,6 +88,14 @@ class SourceArbitrationService:
         offers = [o for o in self.source_offer_repository.get_all_for_series(series_id) if o.available]
         return self.profile.best(offers)
 
+    def ranked_offers(self, series_id: int) -> list[SourceOffer]:
+        """Las ofertas aceptables de mejor a peor: si la mejor no puede dar
+        un episodio, se prueba con la siguiente."""
+        profile = self.profile
+        offers = [o for o in self.source_offer_repository.get_all_for_series(series_id)
+                  if o.available and profile.is_acceptable(o.quality)]
+        return sorted(offers, key=lambda o: profile.rank(o.quality), reverse=True)
+
     def should_upgrade(self, series_id: int, local: Quality) -> tuple[bool, SourceOffer | None]:
         best = self.best_offer(series_id)
         if best is None:
