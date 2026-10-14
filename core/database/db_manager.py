@@ -2105,21 +2105,12 @@ class DatabaseManager:
                 return 0
             
             series = dict(series_row)
-            
-            # Limpiar episodios faltantes existentes en la misma transaccion
-            cursor.execute(
-                '''
-                DELETE FROM missing_episodes
-                WHERE series_id = ?
-                ''',
-                (series_id,),
-            )
-            
-            # Obtener episodios de TMDB (solo los ya emitidos)
+
+            # Primero TMDB y el disco, sin transacción abierta: la llamada a
+            # TMDB tarda segundos y, si el DELETE va antes, la BD queda
+            # bloqueada para escribir mientras tanto ("database is locked").
             tmdb_client = TMDBClient(Settings.TMDB_API_KEY)
             tmdb_episodes = tmdb_client.get_all_episodes(series['tmdb_id'], only_aired=True)
-            
-            # Obtener episodios locales
             local_episodes = self.get_local_episodes_for_tmdb_id(series['tmdb_id'])
             
             # Crear set de episodios locales
@@ -2141,6 +2132,8 @@ class DatabaseManager:
                         'air_date': ep.get('air_date', '')
                     })
 
+            # Borrar y reinsertar en una transacción corta.
+            cursor.execute('DELETE FROM missing_episodes WHERE series_id = ?', (series_id,))
             missing_count = self.insert_missing_episodes_bulk(
                 missing_episodes,
                 conn=conn,

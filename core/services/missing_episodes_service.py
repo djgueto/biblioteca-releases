@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 class MissingEpisodesService:
     def __init__(self, db_manager, series_repository, decision_log_repository):
@@ -37,9 +41,17 @@ class MissingEpisodesService:
         total_missing = 0
         recalculated_series = 0
         series_results = []
+        failed = []
 
         for series in series_list:
-            result = self.rebuild_for_series(series["id"])
+            # Una serie que falla (TMDB caído, BD bloqueada...) conserva sus
+            # faltantes anteriores y no impide recalcular las demás.
+            try:
+                result = self.rebuild_for_series(series["id"])
+            except Exception as e:
+                logger.warning(f"No se pudieron recalcular los faltantes de '{series.get('name')}': {e}")
+                failed.append({"series_id": series["id"], "series_name": series.get("name", ""), "error": str(e)})
+                continue
             missing_count = int(result.get("missing_count", 0))
             total_missing += missing_count
             recalculated_series += 1
@@ -56,4 +68,5 @@ class MissingEpisodesService:
             "total_missing": total_missing,
             "series_results": series_results,
             "skipped_needs_review": skipped_needs_review,
+            "failed": failed,
         }

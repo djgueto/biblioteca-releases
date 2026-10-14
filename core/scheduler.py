@@ -430,6 +430,13 @@ class Scheduler(BackgroundJob):
                     f"   ⏸️ {skipped} series con match de baja confianza omitidas "
                     f"(pendientes de revisión manual)"
                 )
+            failed = result.get("failed") or []
+            if failed:
+                names = ", ".join(f["series_name"] for f in failed[:5]) + ("…" if len(failed) > 5 else "")
+                self._log(f"   ⚠️ {len(failed)} series no se pudieron recalcular (se mantienen sus "
+                          f"faltantes anteriores): {names}. Primer error: {failed[0]['error']}")
+                if hasattr(self, "_cycle_warnings"):
+                    self._cycle_warnings.append(f"Detección de faltantes: {len(failed)} series con error")
             return int(result.get("total_missing", 0))
             
         except Exception as e:
