@@ -279,6 +279,18 @@ class Scheduler(BackgroundJob):
             if not self.running:
                 return
 
+            # 8.2. Wolfmax4k: antes de descargar, para que las fichas que
+            # encuentre se usen ya en las descargas y mejoras de este ciclo
+            # (antes iba al final y esperaban al ciclo siguiente).
+            if getattr(Settings, 'WOLFMAX_UPGRADE_ENABLED', False):
+                self._progress(82, "🐺 Sincronizando catálogo Wolfmax4k...")
+                self._log("🐺 Escaneando categorías Wolfmax4k...")
+                self.scan_wolfmax_categories()
+                self._log("🐺 Buscando en Wolfmax4k lo que no sale en su catálogo reciente...")
+                self._step("Búsqueda en Wolfmax4k", self.relink_wolfmax)
+                if not self.running:
+                    return
+
             # 9. Descargar episodios faltantes
             self._progress(85, "⬇️ Procesando descargas...")
             self._log("⬇️ Procesando descargas de episodios faltantes...")
@@ -305,14 +317,6 @@ class Scheduler(BackgroundJob):
                 self._progress(93, "🔍 Buscando nuevo contenido...")
                 self._log("🔍 Iniciando barrido de nuevo contenido en Hispashare...")
                 self.scan_new_content(driver)
-
-            # 11. Descubrimiento de contenido en Wolfmax4k
-            if getattr(Settings, 'WOLFMAX_UPGRADE_ENABLED', False):
-                self._progress(97, "🐺 Sincronizando catálogo Wolfmax4k...")
-                self._log("🐺 Escaneando categorías Wolfmax4k...")
-                self.scan_wolfmax_categories()
-                self._log("🐺 Buscando en Wolfmax4k lo que no sale en su catálogo reciente...")
-                self._step("Búsqueda en Wolfmax4k", self.relink_wolfmax)
 
             warnings = self._cycle_warnings
             if warnings:
