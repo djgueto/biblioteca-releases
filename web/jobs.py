@@ -24,7 +24,7 @@ from core.events import (
     TMDB_MATCHED,
     EventBus,
 )
-from core.jobs import BackgroundJob
+from core.jobs import BackgroundJob, library_lock
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,12 @@ JOB_LABELS = {
     "library_scan": "Escanear biblioteca",
     "source_search": "Buscar en Hispashare",
 }
+
+# Tareas largas que escriben mucho en la BD: no corren a la vez entre sí ni
+# con un ciclo en marcha (ver core/jobs/library_lock.py). El ciclo toma el
+# candado él mismo en cada vuelta, no mientras duerme entre ciclos. La
+# búsqueda de una sola ficha es corta y no espera.
+EXCLUSIVE_JOBS = {"discovery", "quality_scan", "agenda", "importer", "tmdb_recalc", "library_scan"}
 
 
 def _default_factories() -> dict[str, Callable[[EventBus], BackgroundJob]]:
@@ -150,7 +156,10 @@ class JobManager:
 
     def _run(self, name: str, job: BackgroundJob):
         try:
-            job.run()
+            if name in EXCLUSIVE_JOBS:
+                library_lock.run_exclusive(job, job.run, JOB_LABELS.get(name, name))
+            else:
+                job.run()
         except Exception as e:
             logger.exception(f"Job {name} terminó con error")
             self._on_error(name, {"error": str(e)})

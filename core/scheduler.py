@@ -31,7 +31,7 @@ from core.services.quality_profile import TIERS, tier_of
 from core.repositories.item_quality_repository import ItemQualityRepository
 from core.repositories.grab_history_repository import GrabHistoryRepository
 from core.repositories.provider_search_log import ProviderSearchLog
-from core.jobs import task_runs
+from core.jobs import library_lock, task_runs
 from core.jobs.cycle_lock import CycleLock
 from core.library.quality_scan import MediaInfoUnavailable, measure_episodes, measure_items
 from config.settings import Settings
@@ -110,7 +110,7 @@ class Scheduler(BackgroundJob):
                 continue
             try:
                 try:
-                    self.execute_cycle()
+                    library_lock.run_exclusive(self, self.execute_cycle, "Ciclo automático")
                 finally:
                     self.cycle_lock.release()
                 
