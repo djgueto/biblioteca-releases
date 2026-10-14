@@ -58,7 +58,8 @@ class DatabaseManager:
     CLEANUP_MAX_DELETION_RATIO = 0.25
 
     # Versión del esquema que deja initialize_database (PRAGMA user_version).
-    SCHEMA_VERSION = 2
+    # 3: series.tmdb_media_type (sin subirla, las BD ya en 2 no la tenían).
+    SCHEMA_VERSION = 3
 
     # Búsqueda en Hispashare desactivada sola (no se encontró): se reintenta
     # pasado este tiempo, por si la han subido. Nunca si la apagó el usuario.
