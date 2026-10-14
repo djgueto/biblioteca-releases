@@ -173,6 +173,8 @@ class DontorrentSourceProvider:
                 continue
             if year and page.year and abs(page.year - int(year)) > 1:
                 continue
+            if self.history.is_blocklisted(self.name, f"{page.tabla}:{page.content_id}"):
+                continue  # ya se envió y no llegó
             quality = quality_from_label(page.format_label) if page.format_label else result.quality
             if quality.resolution_height is None:
                 quality = result.quality
@@ -221,6 +223,7 @@ class DontorrentSourceProvider:
             offer = self._movie_offer(item)
         if offer is None:
             return None
+        local = None
         if upgrade:
             from core.repositories.item_quality_repository import ItemQualityRepository
 
@@ -228,6 +231,12 @@ class DontorrentSourceProvider:
             if local is None or not self.profile.is_upgrade(local, offer.quality):
                 return None
         page = self._movie_page(offer.source_url)
+        if page is not None and self.history.is_blocklisted(self.name, f"{page.tabla}:{page.content_id}"):
+            # La oferta guardada es la versión que no llegó: otra, si la hay.
+            offer = self._movie_offer(item)
+            if offer is None or (upgrade and not self.profile.is_upgrade(local, offer.quality)):
+                return None
+            page = self._movie_page(offer.source_url)
         if page is None or self._downloads >= self.max_downloads:
             return None
         destination = self._grab(page.content_id, page.tabla, offer.title, offer.source_url)
@@ -260,6 +269,8 @@ class DontorrentSourceProvider:
                     covered = [e for e in link.episodes if e in pending]
                     if link.season != season or not covered:
                         continue
+                    if self.history.is_blocklisted(self.name, f"{link.tabla}:{link.content_id}"):
+                        continue  # ya se envió y no llegó: se busca en otra ficha
                     if self._downloads >= self.max_downloads:
                         return self._handle(grabbed)
                     destination = self._grab(link.content_id, link.tabla, f"{result.title} {link.label}", result.url)

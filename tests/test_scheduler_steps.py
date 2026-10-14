@@ -30,6 +30,7 @@ class TestCycleSurvivesFailingSteps(unittest.TestCase):
                      "update_agenda", "detect_missing", "retry_disabled_searches",
                      "search_hispashare_for_new_series", "search_hispashare_for_single_file_items",
                      "search_hispashare", "discover_search_offers", "rotate_provider_searches",
+                     "detect_failed_downloads",
                      "process_downloads", "process_wanted_movies", "scan_missing_resolutions",
                      "scan_item_qualities", "process_upgrades", "scan_new_content",
                      "scan_wolfmax_categories", "relink_wolfmax"):

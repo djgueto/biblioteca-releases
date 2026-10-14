@@ -291,6 +291,10 @@ class Scheduler(BackgroundJob):
                 if not self.running:
                     return
 
+            # 8.9. Envíos que no llegaron: a la lista negra, para que en este
+            # mismo ciclo se pida otra versión u otra fuente.
+            self._step("Descargas fallidas", self.detect_failed_downloads)
+
             # 9. Descargar episodios faltantes
             self._progress(85, "⬇️ Procesando descargas...")
             self._log("⬇️ Procesando descargas de episodios faltantes...")
@@ -845,6 +849,25 @@ class Scheduler(BackgroundJob):
         except Exception as e:
             self.logger.error(f"Error en process_downloads: {e}")
             raise
+
+    def detect_failed_downloads(self):
+        failed = self.grab_history_repository.detect_failed(Settings.GRAB_RETRY_DAYS)
+        if not failed:
+            return 0
+        self._log(f"🚫 {len(failed)} envío(s) no llegaron en {Settings.GRAB_RETRY_DAYS} días; "
+                  f"se buscará otra versión:")
+        for grab in failed:
+            episodes = grab["episodes"]
+            what = ", ".join(f"{s}x{e:02d}" for s, e in episodes[:6]) + ("…" if len(episodes) > 6 else "") \
+                if episodes else "película"
+            self._log(f"   • {grab['series_name']} {what} [{grab['provider']}] {grab['release_title']}")
+            self.decision_log_repository.append(
+                grab["series_id"], "download_failed",
+                f"No llegó la descarga de {grab['provider']}: {grab['release_title']}",
+                {"provider": grab["provider"], "item_key": grab["item_key"], "episodes": episodes,
+                 "reason": grab["reason"]},
+            )
+        return len(failed)
 
     def _pending_missing(self, series):
         """Faltantes que aún se pueden pedir (sin los ya enviados ni los que
