@@ -71,7 +71,8 @@ class TestCycleSurvivesFailingSteps(unittest.TestCase):
     def test_wolfmax_offers_found_before_downloads(self):
         self.scheduler.login_hispashare = lambda: None
         self.scheduler.scan_library = lambda: []
-        with patch("core.scheduler.Settings.WOLFMAX_UPGRADE_ENABLED", True, create=True):
+        with patch("core.scheduler.Settings.WOLFMAX_UPGRADE_ENABLED", True, create=True), \
+                patch("core.scheduler.Settings.UPGRADE_ENABLED", True, create=True):
             self._run()
         self.assertLess(self.ran.index("scan_wolfmax_categories"), self.ran.index("process_downloads"))
         self.assertLess(self.ran.index("relink_wolfmax"), self.ran.index("process_upgrades"))
