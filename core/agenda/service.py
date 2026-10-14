@@ -2,7 +2,8 @@
 
 - Episodios: para cada serie vigilada que sigue en emisión se guardan las
   fechas de emisión de TMDB en una ventana (de 2 semanas atrás a 4 meses
-  vista). Solo se piden a TMDB las temporadas que caen en esa ventana.
+  vista). Los episodios salen de la lista en caché que comparte con el
+  recálculo de faltantes (core/tmdb/episode_catalog.py).
 - Películas: fechas de estreno de las novedades (lista de seguimiento).
 
 Los episodios solo se buscan en las fuentes una vez emitidos: los
@@ -112,23 +113,18 @@ class AgendaService:
         return {"series": len(kept), "episodes": total}
 
     def _episodes_in_window(self, tmdb_id: int, start: str, end: str) -> list[dict] | None:
-        details = self.client.get_series_details(tmdb_id) or {}
-        last = (details.get("last_episode_to_air") or {})
-        upcoming = (details.get("next_episode_to_air") or {})
-        if details.get("status") in ENDED_STATUSES and (last.get("air_date") or "") < start:
-            return None
-        seasons = {s for s in (last.get("season_number"), upcoming.get("season_number")) if s}
-        if not seasons and not details.get("number_of_seasons"):
-            return None
-        seasons = seasons or {details["number_of_seasons"]}
-        episodes = []
-        for season in sorted(seasons):
-            data = self.client.get_season_details(tmdb_id, season) or {}
-            for ep in data.get("episodes") or []:
-                air_date = ep.get("air_date") or ""
-                if start <= air_date <= end:
-                    episodes.append({"season": season, "episode": ep["episode_number"],
-                                     "title": ep.get("name"), "air_date": air_date})
+        # Misma lista en caché que el recálculo de faltantes: una serie
+        # terminada no vuelve a costar peticiones a TMDB en un mes.
+        from core.tmdb.episode_catalog import EpisodeCatalog
+
+        status, all_episodes = EpisodeCatalog(self.db, self.client).series(tmdb_id)
+        episodes = [
+            {"season": ep["season_number"], "episode": ep["episode_number"],
+             "title": ep.get("name"), "air_date": ep["air_date"]}
+            for ep in all_episodes if start <= (ep.get("air_date") or "") <= end
+        ]
+        if not episodes and status in ENDED_STATUSES:
+            return None  # serie terminada fuera de la ventana: no sale en el calendario
         return episodes
 
     # --- consulta ---------------------------------------------------------------

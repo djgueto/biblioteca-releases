@@ -2086,9 +2086,8 @@ class DatabaseManager:
     
     def recalculate_missing_episodes_for_series(self, series_id):
         """Recalcular episodios faltantes para una serie específica"""
-        from core.tmdb.api_client import TMDBClient
-        from config.settings import Settings
-        
+        from core.tmdb.episode_catalog import EpisodeCatalog
+
         conn = self.get_connection()
         cursor = conn.cursor()
         
@@ -2109,8 +2108,9 @@ class DatabaseManager:
             # Primero TMDB y el disco, sin transacción abierta: la llamada a
             # TMDB tarda segundos y, si el DELETE va antes, la BD queda
             # bloqueada para escribir mientras tanto ("database is locked").
-            tmdb_client = TMDBClient(Settings.TMDB_API_KEY)
-            tmdb_episodes = tmdb_client.get_all_episodes(series['tmdb_id'], only_aired=True)
+            # Con caché (core/tmdb/episode_catalog.py); si TMDB falla y no hay
+            # copia guardada lanza TMDBUnavailable y se conservan los faltantes.
+            tmdb_episodes = EpisodeCatalog(self).episodes(series['tmdb_id'], only_aired=True)
             local_episodes = self.get_local_episodes_for_tmdb_id(series['tmdb_id'])
             
             # Crear set de episodios locales

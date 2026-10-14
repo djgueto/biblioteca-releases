@@ -10,6 +10,7 @@ from core.repositories import (
 from core.services import MissingEpisodesService, ReconciliationService, SourceMatchService
 from core.tmdb.api_client import TMDBClient
 from core.tmdb.auto_matcher import TMDBAutoMatcher
+from core.tmdb.episode_catalog import EpisodeCatalog
 
 
 class TMDBRecalcJob(BackgroundJob):
@@ -27,6 +28,9 @@ class TMDBRecalcJob(BackgroundJob):
                 return
 
             db = DatabaseManager()
+            # Recalcular = datos frescos: las listas de episodios en caché se
+            # vuelven a pedir (en este recálculo o en el próximo ciclo).
+            EpisodeCatalog(db).invalidate()
             tmdb = TMDBClient(Settings.TMDB_API_KEY)
             matcher = TMDBAutoMatcher(tmdb)
 

@@ -50,7 +50,7 @@ class TestAgenda(unittest.TestCase):
         conn.commit()
         client = MagicMock()
         client.get_series_details.side_effect = lambda tmdb_id: SERIES_DETAILS[tmdb_id]
-        client.get_season_details.side_effect = lambda tmdb_id, season: SEASONS.get((tmdb_id, season), {})
+        client.get_season_details.side_effect = lambda tmdb_id, season: SEASONS.get((tmdb_id, season), {"episodes": []})
         self.client = client
         self.key = patch.object(Settings, "TMDB_API_KEY", "k")
         self.key.start()
@@ -63,7 +63,10 @@ class TestAgenda(unittest.TestCase):
     def test_rebuild_only_window_and_active_series(self):
         result = self.service.rebuild()
         self.assertEqual(result, {"series": 1, "episodes": 3})
-        self.client.get_season_details.assert_called_once_with(10, 2)  # solo la temporada en curso
+        calls = self.client.get_series_details.call_count
+        # La lista queda en caché (la comparte el recálculo de faltantes).
+        self.assertEqual(self.service.rebuild(), result)
+        self.assertEqual(self.client.get_series_details.call_count, calls)
 
     def test_entries_status(self):
         self.service.rebuild()

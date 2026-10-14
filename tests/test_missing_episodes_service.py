@@ -60,12 +60,13 @@ class TestRecalculateMissingTransaction(unittest.TestCase):
         conn = self.db.get_connection()
         seen = {}
 
-        def get_all_episodes(tmdb_id, only_aired=True):
+        def get_season_details(tmdb_id, season):
             seen["in_transaction"] = conn.in_transaction
-            return [{"season_number": 1, "episode_number": 1, "name": "Uno", "air_date": "2020-01-01"}]
+            return {"episodes": [{"episode_number": 1, "name": "Uno", "air_date": "2020-01-01"}]}
 
         client = MagicMock()
-        client.get_all_episodes.side_effect = get_all_episodes
+        client.get_series_details.return_value = {"number_of_seasons": 1, "status": "Ended"}
+        client.get_season_details.side_effect = get_season_details
         with patch("core.tmdb.api_client.TMDBClient", return_value=client):
             count = self.db.recalculate_missing_episodes_for_series(1)
 
@@ -76,7 +77,7 @@ class TestRecalculateMissingTransaction(unittest.TestCase):
 
     def test_tmdb_failure_keeps_previous_missing(self):
         client = MagicMock()
-        client.get_all_episodes.side_effect = Exception("TMDB caído")
+        client.get_series_details.return_value = None  # TMDB caído (_make_request devuelve None)
         with patch("core.tmdb.api_client.TMDBClient", return_value=client):
             with self.assertRaises(Exception):
                 self.db.recalculate_missing_episodes_for_series(1)
