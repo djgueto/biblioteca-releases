@@ -19,11 +19,17 @@ from core.repositories import (
     SourceRepository,
 )
 from core.repositories.grab_history_repository import GrabHistoryRepository
+from core.services.download_status import missing_states
 from core.tmdb.metadata import TmdbMetadataService, image_url, media_type_for_category
 
 
 class MonitoredUpdate(BaseModel):
     monitored: bool
+
+
+class BlocklistEntry(BaseModel):
+    provider: str
+    item_key: str
 
 
 def _serialize_offer(offer) -> dict:
@@ -75,14 +81,19 @@ def build(ctx) -> APIRouter:
                 # Sin analizar con MediaInfo no se muestra calidad: el nombre no es fiable.
                 **{k: (ep.get(k) if measured else None) for k in ("resolution_height", "codec", "hdr")},
             })
-        for ep in db.get_missing_episodes_for_series(series_id):
+        missing = [{**ep, "series_id": series_id} for ep in db.get_missing_episodes_for_series(series_id)]
+        states = missing_states(db, missing, retry_days=Settings.GRAB_RETRY_DAYS)
+        for ep in missing:
             season = seasons.setdefault(ep["season"], {"season": ep["season"], "local": [], "missing": []})
-            season["missing"].append({k: ep.get(k) for k in ("episode", "name", "air_date")})
+            season["missing"].append({**{k: ep.get(k) for k in ("episode", "name", "air_date")},
+                                      **states.get((series_id, ep["season"], ep["episode"]), {})})
 
         item["seasons"] = [seasons[k] for k in sorted(seasons)]
         item["offers"] = [_serialize_offer(o) for o in SourceOfferRepository(db).get_all_for_series(series_id)]
         item["history"] = DecisionLogRepository(db).list_for_series(series_id, limit=30)
-        item["grabs"] = GrabHistoryRepository(db).list_for_series(series_id)
+        grabs = GrabHistoryRepository(db)
+        item["grabs"] = grabs.list_for_series(series_id)
+        item["blocklist"] = grabs.blocklist_for_series(series_id)
         item["rejected_sources"] = SourceRepository(db).list_rejected(series_id)
         # Otro elemento con la misma ficha de TMDB: es uno de los motivos de
         # "Revisar match" (dos carpetas que dicen ser la misma obra).
@@ -158,6 +169,23 @@ def build(ctx) -> APIRouter:
 
     @router.get("/api/wanted")
     def wanted():
-        return LibraryRepository(DatabaseManager()).list_missing()
+        db = DatabaseManager()
+        rows = LibraryRepository(db).list_missing()
+        states = missing_states(db, rows, retry_days=Settings.GRAB_RETRY_DAYS)
+        for row in rows:
+            row.update(states.get((row["series_id"], row["season"], row["episode"]), {}))
+        return rows
+
+    @router.delete("/api/series/{series_id}/blocklist")
+    def unblock_release(series_id: int, body: BlocklistEntry):
+        """Quitar una versión de la lista negra: se podrá volver a pedir."""
+        db = DatabaseManager()
+        if not GrabHistoryRepository(db).unblock(body.provider, body.item_key):
+            raise HTTPException(404, "No está en la lista negra")
+        DecisionLogRepository(db).append(
+            series_id, "blocklist_removed", f"Se quita de la lista negra una versión de {body.provider}",
+            {"provider": body.provider, "item_key": body.item_key, "origin": "web"},
+        )
+        return {"ok": True}
 
     return router

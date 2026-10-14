@@ -140,7 +140,8 @@ class TestWebApi(unittest.TestCase):
         self.assertEqual(len(detail["seasons"]), 1)
         season = detail["seasons"][0]
         self.assertEqual([e["episode"] for e in season["local"]], [1, 2])
-        self.assertEqual(season["missing"], [{"episode": 3, "name": "Tercero", "air_date": "2026-01-01"}])
+        self.assertEqual(season["missing"], [{"episode": 3, "name": "Tercero", "air_date": "2026-01-01",
+                                              "state": "buscando", "provider": None, "grabbed_at": None}])
         self.assertEqual(detail["cover_url"], "https://www.hispashare.org/images/titles/77/cover.jpg")
         self.assertEqual(self.client.get("/api/series/999").status_code, 404)
 
@@ -161,6 +162,24 @@ class TestWebApi(unittest.TestCase):
         self.assertFalse(items[1]["monitored"])
         history = self.client.get("/api/series/1").json()["history"]
         self.assertEqual(history[0]["decision_type"], "monitored_changed")
+
+    def test_wanted_shows_download_state(self):
+        from core.repositories.grab_history_repository import GrabHistoryRepository
+
+        GrabHistoryRepository(DatabaseManager()).record("dontorrent", "t:1", 1, [(1, 3)], release_title="rel")
+        row = self.client.get("/api/wanted").json()[0]
+        self.assertEqual((row["state"], row["provider"]), ("enviado", "dontorrent"))
+
+    def test_unblock_release(self):
+        from core.repositories.grab_history_repository import GrabHistoryRepository
+
+        GrabHistoryRepository(DatabaseManager()).blocklist("dontorrent", "t:1", 1, "rel", "No llegó")
+        self.assertEqual(self.client.get("/api/series/1").json()["blocklist"][0]["item_key"], "t:1")
+        r = self.client.request("DELETE", "/api/series/1/blocklist", json={"provider": "dontorrent", "item_key": "t:1"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(self.client.get("/api/series/1").json()["blocklist"], [])
+        r = self.client.request("DELETE", "/api/series/1/blocklist", json={"provider": "dontorrent", "item_key": "t:1"})
+        self.assertEqual(r.status_code, 404)
 
     def test_wanted_excludes_unmonitored(self):
         self.assertEqual(len(self.client.get("/api/wanted").json()), 1)

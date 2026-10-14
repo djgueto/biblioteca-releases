@@ -19,6 +19,24 @@ const api = {
   get: (p) => request('GET', p),
   post: (p, b) => request('POST', p, b),
   put: (p, b) => request('PUT', p, b),
+  del: (p, b) => request('DELETE', p, b),
+};
+
+// En qué punto está un episodio que falta (core/services/download_status.py).
+const MISSING_STATE = {
+  buscando: { label: 'Buscando', cls: '' },
+  enviado: { label: 'Enviado', cls: 'accent' },
+  descargando: { label: 'Descargando', cls: 'info' },
+  descargado: { label: 'Pendiente de importar', cls: 'ok' },
+  fallido: { label: 'No llegó', cls: 'bad' },
+};
+const missingTitle = (e) => {
+  const st = MISSING_STATE[e.state];
+  return [
+    `Falta${e.name ? ': ' + e.name : ''}`,
+    e.air_date,
+    st && st.label + (e.provider && e.state !== 'buscando' ? ` (${e.provider}${e.grabbed_at ? ', ' + fmtDate(e.grabbed_at) : ''})` : ''),
+  ].filter(Boolean).join(' · ');
 };
 
 function useFetch(path, deps = []) {
@@ -335,6 +353,15 @@ function SeriesDetail({ id, tick, toast }) {
       toast('Buscando en Hispashare… (el progreso está en Actividad)');
     } catch (e) { toast('Error: ' + e.message); }
   };
+  const unblock = async (b) => {
+    setBusy(true);
+    try {
+      await api.del(`/api/series/${it.id}/blocklist`, { provider: b.provider, item_key: b.item_key });
+      toast('Se podrá volver a pedir esa versión');
+      reload();
+    } catch (e) { toast('Error: ' + e.message); }
+    setBusy(false);
+  };
   const rematchTmdb = async () => {
     setBusy(true);
     try {
@@ -444,6 +471,8 @@ function SeriesDetail({ id, tick, toast }) {
             <span><span class="ep">1</span>En disco</span>
             <span><span class="ep q4k">1</span>En 4K</span>
             <span><span class="ep missing">1</span>Falta</span>
+            <span><span class="ep missing st-enviado">1</span>Enviado o descargando</span>
+            <span><span class="ep missing st-fallido">1</span>No llegó</span>
             <span><span class="ep unmeasured">1</span>Calidad sin analizar</span>
           </span>
         </h3>
@@ -465,8 +494,8 @@ function SeriesDetail({ id, tick, toast }) {
                 </div>
                 <div class="eps">
                   ${eps.map((e) => html`
-                    <span class=${'ep' + (!e.ok ? ' missing' : e.resolution_height >= 2000 ? ' q4k' : '') + (e.ok && !e.measured ? ' unmeasured' : '')}
-                      title=${e.ok ? `${e.filename} · ${e.measured ? [qualityLabel(e.resolution_height), e.codec, hdrLabel(e.hdr)].filter(Boolean).join(' · ') : 'calidad sin analizar'}` : `Falta${e.name ? ': ' + e.name : ''}${e.air_date ? ' · ' + e.air_date : ''}`}>
+                    <span class=${'ep' + (!e.ok ? ' missing' + (e.state ? ' st-' + e.state : '') : e.resolution_height >= 2000 ? ' q4k' : '') + (e.ok && !e.measured ? ' unmeasured' : '')}
+                      title=${e.ok ? `${e.filename} · ${e.measured ? [qualityLabel(e.resolution_height), e.codec, hdrLabel(e.hdr)].filter(Boolean).join(' · ') : 'calidad sin analizar'}` : missingTitle(e)}>
                       ${e.episode}
                     </span>`)}
                 </div>
@@ -513,6 +542,27 @@ function SeriesDetail({ id, tick, toast }) {
         </div>
       </div>`}
 
+    ${it.blocklist?.length > 0 && html`
+      <div class="section">
+        <h3>Versiones que no llegaron <span class="faint" style="font-size:12px;font-weight:400">· no se vuelven a pedir</span></h3>
+        <div class="panel">
+          <table class="list">
+            <thead><tr><th>Fecha</th><th>Proveedor</th><th>Versión</th><th>Motivo</th><th></th></tr></thead>
+            <tbody>
+              ${it.blocklist.map((b) => html`
+                <tr>
+                  <td class="faint mono" style="width:150px">${fmtDate(b.created_at)}</td>
+                  <td><b>${b.provider}</b></td>
+                  <td class="dim">${b.release_title || b.item_key}</td>
+                  <td class="faint">${b.reason}</td>
+                  <td style="text-align:right"><button class="btn small" disabled=${busy} onClick=${() => unblock(b)}
+                    title="Se podrá volver a pedir esta versión">Volver a permitir</button></td>
+                </tr>`)}
+            </tbody>
+          </table>
+        </div>
+      </div>`}
+
     ${it.history.length > 0 && html`
       <div class="section">
         <h3>Historial</h3>
@@ -539,18 +589,27 @@ function Wanted({ query, tick }) {
   return html`
     <div class="toolbar"><span class="muted">
       ${rows.length} episodios faltantes, más recientes primero${rows.length > 500 ? ' · mostrando 500 (usa el buscador para filtrar)' : ''}
+    </span>
+    <span class="faint" style="margin-left:auto;font-size:12px">
+      ${Object.entries(MISSING_STATE).map(([key, st]) => [st.label, rows.filter((r) => (r.state || 'buscando') === key).length])
+        .filter(([, n]) => n).map(([label, n]) => `${label}: ${n}`).join(' · ')}
     </span></div>
     <div class="panel">
       <table class="list">
-        <thead><tr><th>Serie</th><th>Episodio</th><th>Título</th><th>Emisión</th></tr></thead>
+        <thead><tr><th>Serie</th><th>Episodio</th><th>Título</th><th>Emisión</th><th>Estado</th></tr></thead>
         <tbody>
-          ${rows.slice(0, 500).map((r) => html`
+          ${rows.slice(0, 500).map((r) => {
+            const st = MISSING_STATE[r.state] || MISSING_STATE.buscando;
+            return html`
             <tr class="click" onClick=${() => go('series/' + r.series_id)}>
               <td><b>${r.series_name}</b></td>
               <td class="mono">${String(r.season).padStart(2, '0')}x${String(r.episode).padStart(2, '0')}</td>
               <td class="dim">${r.name || '—'}</td>
               <td class="faint">${r.air_date || '—'}</td>
-            </tr>`)}
+              <td title=${r.provider && r.state !== 'buscando' ? `${r.provider}${r.grabbed_at ? ' · ' + fmtDate(r.grabbed_at) : ''}` : ''}>
+                <span class=${'pill ' + st.cls}>${st.label}</span></td>
+            </tr>`;
+          })}
         </tbody>
       </table>
     </div>`;

@@ -32,6 +32,7 @@ from core.wolfmax.category_scanner import _title_score
 logger = logging.getLogger(__name__)
 
 CACHE_SECONDS = 300
+STILL_WRITING_SECONDS = 600
 _PARTIAL = re.compile(r"\.(part|!qb|crdownload|tmp|importing)$", re.IGNORECASE)
 
 
@@ -44,6 +45,7 @@ class DownloadedFile:
     season: int | None
     episode: int | None
     year: int | None
+    partial: bool = False  # a medias (.part, .!qb...)
 
 
 class DownloadsIndex:
@@ -62,9 +64,12 @@ class DownloadsIndex:
                     name = _PARTIAL.sub("", path.name)  # una descarga a medias también cuenta
                     if Path(name).suffix.lower() not in VIDEO_EXTENSIONS:
                         continue
-                    size = path.stat().st_size
+                    stat = path.stat()
+                    size = stat.st_size
                 except OSError:
                     continue
+                # Como en la importación: sin cambios en un rato = terminado.
+                partial = name != path.name or stat.st_mtime > time.time() - STILL_WRITING_SECONDS
                 stem = Path(name).stem
                 found = parse_release_episode(stem)
                 if found:
@@ -78,7 +83,8 @@ class DownloadsIndex:
                     title, season, episode = clean[:end], None, None
                     year = int(year_match.group(1)) if year_match else None
                 self.files.append(DownloadedFile(str(path), name.lower(), size,
-                                                 _comparable(_clean_name(title)), season, episode, year))
+                                                 _comparable(_clean_name(title)), season, episode, year,
+                                                 partial=partial))
                 self.names.add(name.lower())
                 self.sizes.add(size)
 
@@ -88,6 +94,16 @@ class DownloadsIndex:
 
     def episodes_for(self, series: dict) -> set[tuple[int, int]]:
         return {(f.season, f.episode) for f in self.files if f.season is not None and self._matches(f, series)}
+
+    def episode_progress(self, series: dict) -> dict[tuple[int, int], bool]:
+        """(temporada, episodio) -> ¿terminado? (si hay una copia terminada y
+        otra a medias, cuenta la terminada)."""
+        found: dict[tuple[int, int], bool] = {}
+        for f in self.files:
+            if f.season is not None and self._matches(f, series):
+                key = (f.season, f.episode)
+                found[key] = found.get(key, False) or not f.partial
+        return found
 
     def has_movie(self, series: dict) -> bool:
         year = series.get("year")
