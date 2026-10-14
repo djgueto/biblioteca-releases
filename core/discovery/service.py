@@ -27,7 +27,7 @@ from core.discovery.rules import (
     APPROVED, DISMISSED, EXCLUDED_TV_GENRES, EXPIRED, IN_LIBRARY, REJECTED, WAITING,
     DiscoverySettings, classify_category, evaluate,
 )
-from core.tmdb.metadata import TmdbMetadataService, media_type_for_category
+from core.tmdb.metadata import TmdbMetadataService, media_type_for_category, media_type_for_item
 
 logger = logging.getLogger(__name__)
 
@@ -90,9 +90,10 @@ class DiscoveryService:
 
     def _library_tmdb_ids(self) -> set[tuple[int, str]]:
         rows = self.db.get_connection().execute(
-            "SELECT tmdb_id, content_category FROM series WHERE tmdb_id IS NOT NULL AND COALESCE(placeholder, 0) = 0"
+            "SELECT tmdb_id, content_category, tmdb_media_type FROM series "
+            "WHERE tmdb_id IS NOT NULL AND COALESCE(placeholder, 0) = 0"
         ).fetchall()
-        return {(r[0], media_type_for_category(r[1])) for r in rows}
+        return {(r[0], media_type_for_item({"content_category": r[1], "tmdb_media_type": r[2]})) for r in rows}
 
     # --- 2. evaluación ----------------------------------------------------------
     def evaluate_pending(self) -> dict:
@@ -185,10 +186,10 @@ class DiscoveryService:
 
     def _library_row(self, tmdb_id: int, media_type: str) -> dict | None:
         rows = self.db.get_connection().execute(
-            "SELECT id, content_category, COALESCE(placeholder, 0) AS placeholder FROM series WHERE tmdb_id = ? "
-            "ORDER BY placeholder ASC", (tmdb_id,)).fetchall()
+            "SELECT id, content_category, tmdb_media_type, COALESCE(placeholder, 0) AS placeholder FROM series "
+            "WHERE tmdb_id = ? ORDER BY placeholder ASC", (tmdb_id,)).fetchall()
         for row in rows:
-            if media_type_for_category(row["content_category"]) == media_type:
+            if media_type_for_item(dict(row)) == media_type:
                 return dict(row)
         return None
 
@@ -203,9 +204,10 @@ class DiscoveryService:
             media_type = media_type_for_category(p["content_category"])
             real = next((
                 r for r in conn.execute(
-                    "SELECT id, content_category FROM series WHERE tmdb_id = ? AND id != ? AND COALESCE(placeholder, 0) = 0",
+                    "SELECT id, content_category, tmdb_media_type FROM series "
+                    "WHERE tmdb_id = ? AND id != ? AND COALESCE(placeholder, 0) = 0",
                     (p["tmdb_id"], p["id"])).fetchall()
-                if media_type_for_category(r["content_category"]) == media_type
+                if media_type_for_item(dict(r)) == media_type
             ), None)
             if real is not None:
                 # El archivo llegó con otro nombre y el emparejado TMDB lo identificó.

@@ -241,7 +241,7 @@ function TmdbPicker({ item, toast, onClose, onSaved }) {
       + 'Se recalcularán los episodios que faltan y las fuentes guardadas se volverán a comprobar en el próximo ciclo.')) return;
     setSaving(r.id);
     try {
-      const res = await api.put(`/api/series/${item.id}/tmdb`, { tmdb_id: r.id });
+      const res = await api.put(`/api/series/${item.id}/tmdb`, { tmdb_id: r.id, media_type: r.media_type });
       toast(`Identificado como ${res.tmdb_name}${res.renamed_to ? ` · carpeta renombrada a «${res.renamed_to}»` : ''}`);
       onSaved();
     } catch (e) { toast('Error: ' + e.message); }
@@ -264,10 +264,11 @@ function TmdbPicker({ item, toast, onClose, onSaved }) {
       ${state.results && state.results.length > 0 && html`
         <div class="tmdb-results">
           ${state.results.map((r) => html`
-            <div class=${'tmdb-result' + (r.current ? ' current' : '')} key=${r.id}>
+            <div class=${'tmdb-result' + (r.current ? ' current' : '')} key=${r.media_type + r.id}>
               ${r.poster_url ? html`<img src=${r.poster_url} alt="" loading="lazy" />` : html`<div class="noimg"></div>`}
               <div>
                 <div class="name">${r.title} ${r.year && html`<span class="faint" style="font-weight:400">(${r.year})</span>`}
+                  ${item.content_mode !== 'episodic' && html` <span class="pill">${r.media_type === 'tv' ? 'Serie' : 'Película'}</span>`}
                   ${r.current && html` <span class="pill accent">Actual</span>`}</div>
                 <div class="faint" style="font-size:12px">
                   ${r.original_title && r.original_title !== r.title ? r.original_title + ' · ' : ''}TMDB ${r.id}${r.vote_average ? ` · ★ ${r.vote_average.toFixed(1)}` : ''}
@@ -383,7 +384,7 @@ function SeriesDetail({ id, tick, toast }) {
         <div class="faint">${it.category_label}</div>
         <h2>${displayName(it)} ${it.year && html`<span class="faint" style="font-weight:400">(${it.year})</span>`}</h2>
         <div class="meta">
-          ${it.tmdb_id ? html`<a href=${`https://www.themoviedb.org/${it.content_mode === 'episodic' ? 'tv' : 'movie'}/${it.tmdb_id}`} target="_blank" rel="noopener"><b>TMDB</b> ${it.tmdb_id}</a>` : html`<span>Sin TMDB</span>`}
+          ${it.tmdb_id ? html`<a href=${`https://www.themoviedb.org/${it.tmdb_media_type}/${it.tmdb_id}`} target="_blank" rel="noopener"><b>TMDB</b> ${it.tmdb_id}</a>` : html`<span>Sin TMDB</span>`}
           ${it.confidence_score != null && html`<span>Confianza <b>${Math.round(it.confidence_score * 100)}%</b></span>`}
           ${it.needs_review ? html`<span class="pill" style="background:rgba(167,139,250,.15);color:var(--violet)">Revisar match</span>` : null}
           ${!it.monitored && html`<span class="pill">No vigilado</span>`}

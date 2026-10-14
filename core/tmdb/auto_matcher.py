@@ -5,6 +5,7 @@ import logging
 import unicodedata
 
 from config.settings import Settings
+from core.tmdb.metadata import allowed_media_types
 
 
 class TMDBAutoMatcher:
@@ -78,7 +79,8 @@ class TMDBAutoMatcher:
             'name': self.get_result_title(best_match),
             'year': year,
             'confidence_score': best_score,
-            'needs_review': best_score < Settings.AUTO_MATCH_THRESHOLD
+            'needs_review': best_score < Settings.AUTO_MATCH_THRESHOLD,
+            'media_type': 'tv',
         }
 
     def match_single_file(self, local_item):
@@ -86,28 +88,29 @@ class TMDBAutoMatcher:
 
         self.logger.debug(f"Buscando archivo unico: {normalized_name}")
 
-        results = self.api.search_movies(normalized_name)
+        # Documentales y similares: en TMDB muchos son miniseries.
+        allow_tv = 'tv' in allowed_media_types(local_item.get('content_category'))
+        allowed = ('movie', 'tv', None) if allow_tv else ('movie', None)
+        results = [(r, 'movie') for r in self.api.search_movies(normalized_name)]
         if not results:
             results = [
-                result for result in self.api.search_multi(normalized_name)
-                if result.get('media_type') in ('movie', None)
+                (result, result.get('media_type') or 'movie') for result in self.api.search_multi(normalized_name)
+                if result.get('media_type') in allowed
             ]
 
-        if not results:
+        scored_results = self._score_single_file(local_item, results)
+        if allow_tv and (not scored_results or scored_results[0][1] < 0.45):
+            # Documentales y similares: en TMDB muchos son miniseries.
+            seen = {(r['id'], media_type) for (r, media_type), _ in scored_results}
+            series = [(r, 'tv') for r in self.api.search_series(normalized_name) if (r['id'], 'tv') not in seen]
+            scored_results = sorted(scored_results + self._score_single_file(local_item, series),
+                                    key=lambda x: x[1], reverse=True)
+
+        if not scored_results:
             self.logger.warning(f"No se encontraron resultados para: {local_item.get('name', '')}")
             return None
 
-        scored_results = []
-        for result in results[:10]:
-            score = self.calculate_single_file_match_score(local_item, result)
-            scored_results.append((result, score))
-
-            self.logger.debug(
-                f"  - {self.get_result_title(result)} ({self.get_result_year(result) or ''}): {score:.2%}"
-            )
-
-        scored_results.sort(key=lambda x: x[1], reverse=True)
-        best_match, best_score = scored_results[0]
+        (best_match, media_type), best_score = scored_results[0]
 
         if best_score < 0.45:
             self.logger.warning(
@@ -120,9 +123,22 @@ class TMDBAutoMatcher:
             'name': self.get_result_title(best_match),
             'year': self.get_result_year(best_match),
             'confidence_score': best_score,
-            'needs_review': best_score < Settings.AUTO_MATCH_THRESHOLD
+            'needs_review': best_score < Settings.AUTO_MATCH_THRESHOLD,
+            'media_type': media_type,
         }
-    
+
+    def _score_single_file(self, local_item, results):
+        """[((resultado, media_type), score)] de mayor a menor."""
+        scored = []
+        for result, media_type in results[:10]:
+            score = self.calculate_single_file_match_score(local_item, result)
+            scored.append(((result, media_type), score))
+            self.logger.debug(
+                f"  - {self.get_result_title(result)} ({self.get_result_year(result) or ''}) [{media_type}]: {score:.2%}"
+            )
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored
+
     def calculate_match_score(self, local_series, tmdb_result):
         """Calcular score de coincidencia (0-1)"""
         local_name = local_series.get('name', '')

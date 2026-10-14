@@ -264,6 +264,38 @@ class TestWebApi(unittest.TestCase):
         items = {i["id"]: i for i in self.client.get("/api/library").json()}
         self.assertEqual(items[1]["tmdb_id"], 1399)  # la caché de la biblioteca se invalidó
 
+    def test_documentary_can_be_a_tv_miniseries(self):
+        # «Kevin Spacey al descubierto»: un archivo en Documentales que en
+        # TMDB es una miniserie. Las películas siguen sin poder ser series.
+        sqlite3.connect(self.db_path).execute(
+            "INSERT INTO series (id, name, folder_path, content_category) "
+            "VALUES (3, 'Kevin Spacy Al Descubierto', '/media/docs/k.mp4', 'documentaries')").connection.commit()
+        doc = {"id": 252727, "name": "Kevin Spacey al descubierto", "first_air_date": "2024-09-09"}
+        film = {"id": 77, "title": "Al descubierto", "release_date": "2022-01-01"}
+
+        def request(_client, endpoint, params=None):
+            return {"search/movie": {"results": [film]}, "search/tv": {"results": [doc]},
+                    "tv/252727": doc}.get(endpoint)
+
+        with patch.object(Settings, "TMDB_API_KEY", "clave"), \
+                patch.object(Settings, "AUTO_RENAME_FOLDER_ON_TMDB_ASSIGN", False), \
+                patch("core.tmdb.api_client.TMDBClient._make_request", request):
+            results = self.client.get("/api/series/3/tmdb_search?q=spacey").json()["results"]
+            self.assertEqual([(r["id"], r["media_type"]) for r in results], [(77, "movie"), (252727, "tv")])
+            link = self.client.get("/api/series/3/tmdb_search",
+                                   params={"q": "https://www.themoviedb.org/tv/252727-spacey-unmasked"}).json()
+            self.assertEqual([(r["id"], r["media_type"]) for r in link["results"]], [(252727, "tv")])
+            self.assertEqual(self.client.get("/api/series/2/tmdb_search",
+                                             params={"q": "https://www.themoviedb.org/tv/252727"}).status_code, 422)
+            self.assertEqual(self.client.put("/api/series/2/tmdb",
+                                             json={"tmdb_id": 252727, "media_type": "tv"}).status_code, 422)
+            r = self.client.put("/api/series/3/tmdb", json={"tmdb_id": 252727, "media_type": "tv"})
+            self.assertEqual(r.status_code, 200)
+            detail = self.client.get("/api/series/3").json()
+            self.assertEqual((detail["tmdb_id"], detail["tmdb_media_type"]), (252727, "tv"))
+            again = self.client.get("/api/series/3/tmdb_search?q=spacey").json()["results"]
+            self.assertEqual([r["id"] for r in again if r["current"]], [252727])
+
     def test_seasons_show_premiere_date(self):
         from core.tmdb.metadata import TmdbMetaRepository
 

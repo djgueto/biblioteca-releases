@@ -295,6 +295,9 @@ class DatabaseManager:
         for column_sql, column_name in (
             ("ALTER TABLE series ADD COLUMN search_disabled_at TIMESTAMP", "search_disabled_at"),
             ("ALTER TABLE series ADD COLUMN search_disabled_manual INTEGER DEFAULT 0", "search_disabled_manual"),
+            # 'tv' o 'movie'; NULL = lo que toca por biblioteca. Un documental
+            # (archivo único) puede ser una miniserie en TMDB.
+            ("ALTER TABLE series ADD COLUMN tmdb_media_type TEXT", "tmdb_media_type"),
         ):
             try:
                 cursor.execute(column_sql)
@@ -684,7 +687,7 @@ class DatabaseManager:
             cursor.execute('''
                 UPDATE series
                 SET tmdb_id = ?, tmdb_name = ?, year = ?,
-                    confidence_score = ?, needs_review = ?,
+                    confidence_score = ?, needs_review = ?, tmdb_media_type = ?,
                     search_disabled = CASE
                         WHEN COALESCE(hispashare_url, '') = '' THEN 0
                         ELSE COALESCE(search_disabled, 0)
@@ -701,6 +704,7 @@ class DatabaseManager:
                 match_data['year'],
                 match_data['confidence_score'],
                 needs_review,
+                match_data.get('media_type'),
                 series_id
             ))
             
@@ -731,6 +735,7 @@ class DatabaseManager:
                     year = NULL,
                     confidence_score = NULL,
                     needs_review = 0,
+                    tmdb_media_type = NULL,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
             ''', (series_id,))
@@ -806,8 +811,8 @@ class DatabaseManager:
             values = []
             
             for field, value in changes.items():
-                if field in ['tmdb_id', 'tmdb_name', 'year', 'confidence_score', 
-                           'needs_review', 'hispashare_url', 'status']:
+                if field in ['tmdb_id', 'tmdb_name', 'year', 'confidence_score',
+                           'needs_review', 'hispashare_url', 'status', 'tmdb_media_type']:
                     set_clauses.append(f"{field} = ?")
                     values.append(value)
 

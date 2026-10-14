@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from config.settings import Settings
+from core.tmdb.metadata import media_type_for_item
 
 
 class LibraryRepository:
@@ -58,6 +59,7 @@ class LibraryRepository:
         item = dict(item)
         item["category_label"] = Settings.get_category_label(item.get("content_category"))
         item["content_mode"] = Settings.get_category_content_mode(item.get("content_category"))
+        item["tmdb_media_type"] = media_type_for_item(item)
         item["cover_url"] = self.cover_url(item)
         # Misma regla que la lista (_present): hay carátula si hay TMDB
         # (cartel) o Hispashare. Antes la ficha solo miraba Hispashare.

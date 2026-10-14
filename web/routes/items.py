@@ -13,7 +13,7 @@ from core.database.db_manager import DatabaseManager
 from core.repositories import DecisionLogRepository
 from core.services.factory import build_domain_services
 from core.services.item_actions import ItemActions, ItemNotFound
-from core.tmdb.metadata import TmdbMetadataService, image_url, media_type_for_category
+from core.tmdb.metadata import TmdbMetadataService, allowed_media_types, image_url, media_type_for_item
 from web.jobs import JobAlreadyRunning
 
 logger = logging.getLogger(__name__)
@@ -27,24 +27,26 @@ class HispashareUrlUpdate(BaseModel):
 
 class TmdbUpdate(BaseModel):
     tmdb_id: int
+    media_type: str | None = None  # sin indicar: lo que toca por biblioteca
 
 
 class SearchToggle(BaseModel):
     enabled: bool
 
 
-def _tmdb_result(data: dict, current_id) -> dict:
+def _tmdb_result(data: dict, current: tuple | None, media_type: str) -> dict:
     date = data.get("first_air_date") or data.get("release_date") or ""
     overview = data.get("overview") or ""
     return {
         "id": data["id"],
+        "media_type": media_type,
         "title": data.get("name") or data.get("title") or "Sin nombre",
         "original_title": data.get("original_name") or data.get("original_title") or "",
         "year": int(date[:4]) if date[:4].isdigit() else None,
         "overview": overview if len(overview) <= 320 else overview[:320].rsplit(" ", 1)[0] + "…",
         "poster_url": image_url(data.get("poster_path"), "w185"),
         "vote_average": data.get("vote_average"),
-        "current": data["id"] == current_id,
+        "current": (data["id"], media_type) == current,
     }
 
 
@@ -118,25 +120,30 @@ def build(ctx) -> APIRouter:
         if not item:
             raise HTTPException(404, "No existe")
         item = dict(item)
-        media = media_type_for_category(item.get("content_category"))
+        allowed = allowed_media_types(item.get("content_category"))
+        media = allowed[0]
         client = _tmdb_client()
         q = q.strip()
         link = TMDB_LINK.search(q)
-        if link and link.group(1) != media:
+        if link and link.group(1) not in allowed:
             kind = "una película" if link.group(1) == "movie" else "una serie"
             label = Settings.get_category_label(item.get("content_category"))
             raise HTTPException(422, f"Ese enlace es de {kind}, pero «{label}» no es una biblioteca de ese tipo")
         direct = link.group(2) if link else (q if q.isdigit() else None)
+        results: list[tuple[dict, str]] = []
         if direct:
-            # Un número o un enlace de themoviedb.org: esa ficha exacta.
+            # Un número o un enlace de themoviedb.org: esa ficha exacta. Un
+            # número suelto se busca como lo que toca por biblioteca.
+            media = link.group(1) if link else media
             data = client._make_request(f"{media}/{direct}")
-            results = [data] if data and "id" in data else []
+            results = [(data, media)] if data and "id" in data else []
         elif q:
-            results = client.search_series(q) if media == "tv" else client.search_movies(q)
-        else:
-            results = []
-        return {"media_type": media,
-                "results": [_tmdb_result(r, item.get("tmdb_id")) for r in results[:20] if "id" in r]}
+            for kind in allowed:
+                found = client.search_series(q) if kind == "tv" else client.search_movies(q)
+                results += [(r, kind) for r in found[:20]]
+        current = (item.get("tmdb_id"), media_type_for_item(item))
+        return {"media_type": allowed[0],
+                "results": [_tmdb_result(r, current, kind) for r, kind in results if "id" in r]}
 
     @router.post("/api/series/{series_id}/tmdb_confirm")
     def confirm_tmdb(series_id: int):
@@ -173,15 +180,19 @@ def build(ctx) -> APIRouter:
         if not item:
             raise HTTPException(404, "No existe")
         item = dict(item)
-        media = media_type_for_category(item.get("content_category"))
+        allowed = allowed_media_types(item.get("content_category"))
+        media = body.media_type or allowed[0]
+        if media not in allowed:
+            label = Settings.get_category_label(item.get("content_category"))
+            raise HTTPException(422, f"«{label}» no se puede vincular a {'una serie' if media == 'tv' else 'una película'}")
         # Nombre y año se leen de TMDB, no del navegador.
         data = _tmdb_client()._make_request(f"{media}/{body.tmdb_id}")
         if not data or "id" not in data:
             raise HTTPException(422, f"TMDB no tiene ninguna {'serie' if media == 'tv' else 'película'} con ese ID")
-        found = _tmdb_result(data, None)
+        found = _tmdb_result(data, None, media)
         changes = {
             "tmdb_id": found["id"], "tmdb_name": found["title"], "year": found["year"],
-            "confidence_score": 1.0, "needs_review": False,
+            "confidence_score": 1.0, "needs_review": False, "tmdb_media_type": media,
         }
         result = ItemActions(db, log=logger.warning).apply_manual_changes(series_id, changes)
         renamed = result.get("renamed_to")

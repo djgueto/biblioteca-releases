@@ -20,7 +20,7 @@ from core.repositories import (
 )
 from core.repositories.grab_history_repository import GrabHistoryRepository
 from core.services.download_status import missing_states
-from core.tmdb.metadata import TmdbMetadataService, image_url, media_type_for_category
+from core.tmdb.metadata import TmdbMetadataService, image_url, media_type_for_item
 
 
 class MonitoredUpdate(BaseModel):
@@ -100,10 +100,10 @@ def build(ctx) -> APIRouter:
         item["same_tmdb"] = [
             {"id": r[0], "name": r[1], "category_label": Settings.get_category_label(r[2])}
             for r in db.get_connection().execute(
-                "SELECT id, COALESCE(NULLIF(tmdb_name, ''), name), content_category FROM series "
+                "SELECT id, COALESCE(NULLIF(tmdb_name, ''), name), content_category, tmdb_media_type FROM series "
                 "WHERE tmdb_id = ? AND id != ?", (item.get("tmdb_id"), series_id)).fetchall()
             if item.get("tmdb_id")
-            and media_type_for_category(r[2]) == media_type_for_category(item.get("content_category"))
+            and media_type_for_item({"content_category": r[2], "tmdb_media_type": r[3]}) == media_type_for_item(item)
         ]
         item["search_disabled_manual"] = bool(item.get("search_disabled_manual"))
         disabled_at = item.get("search_disabled_at")

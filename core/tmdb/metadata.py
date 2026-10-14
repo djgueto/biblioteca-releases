@@ -25,6 +25,29 @@ def media_type_for_category(category: str | None) -> str:
     return "tv" if Settings.get_category_content_mode(category or "series") == "episodic" else "movie"
 
 
+# Bibliotecas de archivo único que nunca se vinculan a una serie de TMDB.
+MOVIE_ONLY_CATEGORIES = {"movies", "animated_movies"}
+
+
+def allowed_media_types(category: str | None) -> tuple[str, ...]:
+    """Con qué puede vincularse un elemento, la primera la de su biblioteca.
+    Documentales, conciertos y música son un archivo pero en TMDB a menudo
+    son una miniserie."""
+    default = media_type_for_category(category)
+    if default == "tv" or category in MOVIE_ONLY_CATEGORIES:
+        return (default,)
+    return ("movie", "tv")
+
+
+def media_type_for_item(item: dict) -> str:
+    """El tipo con el que se vinculó (un documental de archivo único puede ser
+    una miniserie en TMDB); si no consta, el de su biblioteca."""
+    item = item or {}
+    if item.get("tmdb_media_type") in ("tv", "movie"):
+        return item["tmdb_media_type"]
+    return media_type_for_category(item.get("content_category"))
+
+
 def image_url(path: str | None, size: str = "w342") -> str:
     return f"{IMAGE_BASE}{size}{path}" if path else ""
 
@@ -191,5 +214,4 @@ class TmdbMetadataService:
         return self.repo.get(tmdb_id, media_type, max_age_days=None)
 
     def for_item(self, item: dict, *, need_seasons: bool = False) -> dict | None:
-        return self.get(item.get("tmdb_id"), media_type_for_category(item.get("content_category")),
-                        need_seasons=need_seasons)
+        return self.get(item.get("tmdb_id"), media_type_for_item(item), need_seasons=need_seasons)
