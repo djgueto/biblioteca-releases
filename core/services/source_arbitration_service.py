@@ -34,7 +34,13 @@ class SourceArbitrationService:
         }
 
         legacy_url = (item.get("hispashare_url") or "").strip()
-        if legacy_url and "hispashare" not in known:
+        stored = known.get("hispashare")
+        if legacy_url and (stored is None or stored.source_url != legacy_url):
+            # La ficha de la serie manda: es la que se usa para descargar. Si
+            # la oferta guardada apunta a otra (quedó de una ficha anterior),
+            # revisarla a ella la marcaba "no disponible" para siempre y
+            # Hispashare se quedaba fuera del reparto (Ted Lasso: 720p de
+            # DonTorrent habiendo 1080p en Hispashare).
             known["hispashare"] = SourceOffer(
                 provider="hispashare", source_url=legacy_url, quality=Quality()
             )

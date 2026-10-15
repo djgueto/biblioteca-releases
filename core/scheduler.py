@@ -875,6 +875,18 @@ class Scheduler(BackgroundJob):
         missing = {(m["season"], m["episode"]) for m in self.db.get_missing_episodes_for_series(series["id"])}
         return missing - self.grab_history_repository.blocked_episodes(series, Settings.GRAB_RETRY_DAYS)
 
+    def _quality_floor(self, series_id):
+        """Resolución mínima para los faltantes de una serie: la peor de su
+        última temporada en disco (medida con MediaInfo). Si la temporada 3
+        está en 1080p, la 4 no se baja en 720p: se espera a una fuente buena.
+        None si no hay nada medido."""
+        measured = [ep for ep in self.db.get_local_episodes(series_id)
+                    if ep.get("quality_source") == "mediainfo" and ep.get("resolution_height")]
+        if not measured:
+            return None
+        last_season = max(ep["season"] for ep in measured)
+        return min(ep["resolution_height"] for ep in measured if ep["season"] == last_season)
+
     def _download_from_offers(self, series, offers):
         """Pide los faltantes a la mejor oferta y, si quedan episodios que
         esa no tiene (o el proveedor no puede ahora), a la siguiente. Cada
@@ -882,6 +894,7 @@ class Scheduler(BackgroundJob):
         que ya pidió el anterior. Devuelve cuántas descargas se enviaron."""
         name = series['name']
         total = 0
+        floor = self._quality_floor(series['id'])
         for index, offer in enumerate(offers):
             if not self.running:
                 break
@@ -894,9 +907,17 @@ class Scheduler(BackgroundJob):
 
             quality_label = f"{offer.quality.resolution_height}p" if offer.quality.resolution_height else "?"
             fallback = " (respaldo)" if index else ""
+            height = offer.quality.resolution_height
+            if floor and height and height < floor:
+                self._log(f"   ⏭️ [{offer.provider} {quality_label}] {name}: por debajo de lo que ya tienes "
+                          f"({floor}p); se espera a una fuente mejor")
+                continue
             self._log(f"   🔍 [{offer.provider} {quality_label}]{fallback} {name}")
             try:
-                handle = provider.resolve_download(series, offer, missing_only=True)
+                # min_resolution: el proveedor tampoco debe caer, dentro de
+                # su sitio, a una versión peor (DonTorrent tiene fichas de
+                # respaldo en otras calidades).
+                handle = provider.resolve_download({**series, "min_resolution": floor}, offer, missing_only=True)
             except Exception as e:
                 self.logger.error(f"Error con {offer.provider} para '{name}': {e}")
                 self._log(f"      ❌ {offer.provider}: {e}")

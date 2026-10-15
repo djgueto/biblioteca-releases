@@ -258,6 +258,11 @@ class DontorrentSourceProvider:
         if not wanted:
             return None
         candidates = self._candidates(item)
+        floor = item.get("min_resolution")
+        if floor and missing_only:
+            # No bajar de la calidad que la serie ya tiene en disco.
+            candidates = [c for c in candidates
+                          if not c[0].quality.resolution_height or c[0].quality.resolution_height >= floor]
         grabbed = []
         for season in sorted({s for s, _ in wanted}):
             for result, _ in self._by_quality([c for c in candidates if c[0].season == season]):
