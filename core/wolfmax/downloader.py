@@ -81,6 +81,14 @@ class WolfmaxRateLimited(RuntimeError):
         self.wait_minutes = wait_minutes
 
 
+class WolfmaxVerificationRequired(RuntimeError):
+    """El sitio exige una verificación de persona (captcha/Turnstile) para
+    descargar: ninguna descarga automática va a funcionar."""
+
+    def __init__(self):
+        super().__init__('wolfmax exige verificación de persona (Cloudflare Turnstile) para descargar')
+
+
 def _make_driver():
     opts = Options()
     opts.add_argument('--headless=new')
@@ -155,8 +163,11 @@ def _api_post(driver, payload: dict) -> dict:
     data = res.get('data') or {}
     if data.get('status') == 'limit_exceeded':
         raise WolfmaxRateLimited(int(data.get('wait_minutes') or 60))
-    if data.get('status') == 'captcha_required':
-        raise RuntimeError('wolfmax exige captcha para esta descarga')
+    if data.get('status') in ('captcha_required', 'turnstile_required'):
+        # Desde 2026-10-10 el sitio pide Cloudflare Turnstile (verificación
+        # de persona) para descargar. No se intenta saltar: se avisa y el
+        # proveedor deja de descargar en este ciclo.
+        raise WolfmaxVerificationRequired()
     if res.get('status') != 200 or not data.get('success'):
         raise RuntimeError(
             f"wolfmax /api/descargas {payload.get('action')}: HTTP {res.get('status')} "

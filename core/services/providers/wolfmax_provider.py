@@ -7,7 +7,12 @@ from core.download_clients import TORRENT, DownloadDispatcher, Release
 from core.repositories.grab_history_repository import GrabHistoryRepository
 from core.services.providers.base import DownloadHandle, SourceOffer
 from core.services.quality import Quality
-from core.wolfmax.downloader import WolfmaxDownloader, WolfmaxRateLimited, is_current_url
+from core.wolfmax.downloader import (
+    WolfmaxDownloader,
+    WolfmaxRateLimited,
+    WolfmaxVerificationRequired,
+    is_current_url,
+)
 from core.wolfmax.searcher import WolfmaxSearcher
 
 logger = logging.getLogger(__name__)
@@ -26,6 +31,10 @@ class WolfmaxSourceProvider:
         self.dispatcher = dispatcher
         self._searcher = WolfmaxSearcher()
         self._downloader = WolfmaxDownloader()
+        # El sitio exige verificación de persona para descargar: no se
+        # reintenta en lo que queda de ciclo (cada intento abre un Chrome y
+        # tarda ~12 s; con cientos de episodios eran horas perdidas).
+        self.verification_required = False
 
     def find_candidate(self, item: dict, *, content_mode: str = "episodic") -> SourceOffer | None:
         title = (item.get("tmdb_name") or item.get("name") or "").strip()
@@ -71,6 +80,8 @@ class WolfmaxSourceProvider:
         self, item: dict, offer: SourceOffer, *, missing_only: bool = True
     ) -> DownloadHandle | None:
         if self.dispatcher is None or not self.dispatcher.can_handle(TORRENT):
+            return None
+        if self.verification_required:
             return None
 
         series_id = item.get("id")
@@ -128,6 +139,10 @@ class WolfmaxSourceProvider:
                 grabbed.append(destination)
             except WolfmaxRateLimited as e:
                 logger.warning(str(e))
+                break
+            except WolfmaxVerificationRequired as e:
+                logger.warning(f"{e}: descargas de Wolfmax en pausa en este ciclo")
+                self.verification_required = True
                 break
             except Exception as e:
                 logger.error(f"wolfmax resolve_download error {ep_url}: {e}")

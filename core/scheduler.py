@@ -316,6 +316,12 @@ class Scheduler(BackgroundJob):
                 self._log("🔼 Buscando upgrades de calidad (ej. 2160p)...")
                 self._step("Mejoras de calidad", self.process_upgrades, driver)
 
+            if getattr(self.providers.get("wolfmax"), "verification_required", False):
+                message = ("Wolfmax pide verificación de persona (Cloudflare Turnstile) para descargar: "
+                           "sus descargas quedan en pausa y se usan las demás fuentes")
+                self._log(f"⚠️ {message}")
+                self._cycle_warnings.append(message)
+
             # 10. Barrido de nuevo contenido en Hispashare
             if driver is not None:
                 self._progress(93, "🔍 Buscando nuevo contenido...")
