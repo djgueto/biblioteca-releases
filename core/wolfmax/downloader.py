@@ -19,6 +19,8 @@ import time
 import base64
 import hashlib
 import logging
+from curl_cffi import requests as cffi_requests
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from pathlib import Path
 from urllib.parse import urlparse, unquote, quote_plus
 from selenium import webdriver
@@ -32,6 +34,8 @@ _GIBBERISH_JS = Path(__file__).with_name('gibberish-aes.js')
 _REAL_KEY = 'fee631d2cffda38a78b96ee6d2dfb43a'
 
 BASE_URL = 'https://wolfmax4k.com'
+_API_BASE = 'https://wolftorrent.com'
+_API_URL = _API_BASE + '/api/descargas'
 
 # Sección del sitio → valor `tabla` que espera /api/descargas
 _SECTION_TABLA = {
@@ -263,6 +267,94 @@ def _download_torrent(driver, torrent_url: str, output_dir) -> Path:
     out_path.write_bytes(content)
     return out_path
 
+# ---------------------------------------------------------------------------
+# Flujo de descarga con curl_cffi (sin Selenium) + Turnstile automático
+# ---------------------------------------------------------------------------
+
+def _decrypt_gibberish(link_out: str, passphrase: str) -> str:
+    """Descifra un enlace cifrado con GibberishAES (AES-256-CBC OpenSSL)."""
+    try:
+        raw = base64.b64decode(base64.b64decode(link_out))
+    except Exception:
+        raw = base64.b64decode(link_out)
+    if raw[:8] != b'Salted__':
+        raise RuntimeError('Formato OpenSSL no reconocido')
+    salt, ct = raw[8:16], raw[16:]
+    d0 = hashlib.md5(passphrase.encode() + salt).digest()
+    d1 = hashlib.md5(d0 + passphrase.encode() + salt).digest()
+    d2 = hashlib.md5(d1 + passphrase.encode() + salt).digest()
+    decryptor = Cipher(algorithms.AES(d0 + d1), modes.CBC(d2)).decryptor()
+    pt = decryptor.update(ct) + decryptor.finalize()
+    return pt[:-pt[-1]].decode('utf-8')
+
+
+def _cffi_generate(code: str, tabla: str) -> dict:
+    resp = cffi_requests.post(
+        _API_URL, json={'action': 'generate', 'code': code, 'tabla': tabla},
+        impersonate='chrome', timeout=15)
+    data = resp.json()
+    if not data.get('success'):
+        raise RuntimeError(f'wolfmax generate: {data}')
+    return data
+
+
+def _cffi_validate(challenge: str, nonce: int, turnstile_token: str | None = None) -> dict:
+    payload: dict = {'action': 'validate', 'challenge': challenge, 'nonce': nonce}
+    if turnstile_token:
+        payload['cf-turnstile-response'] = turnstile_token
+    resp = cffi_requests.post(_API_URL, json=payload, impersonate='chrome', timeout=15)
+    data = resp.json()
+    if data.get('status') == 'limit_exceeded':
+        raise WolfmaxRateLimited(int(data.get('wait_minutes') or 60))
+    if data.get('status') in ('captcha_required', 'turnstile_required'):
+        raise WolfmaxVerificationRequired()
+    if not data.get('success'):
+        raise RuntimeError(f'wolfmax validate: {data}')
+    return data
+
+
+def _cffi_resolve_torrent_url(wolfmax_url: str, solver=None) -> str:
+    url = normalize_url(wolfmax_url)
+    m = EPISODE_URL_RE.match(url) or CONTENT_URL_RE.match(url)
+    if not m:
+        raise RuntimeError(f'URL wolfmax no reconocida: {url}')
+    section, code = m.group(1), m.group(2)
+    gen = _cffi_generate(code, _SECTION_TABLA[section])
+    nonce = _solve_pow(gen['challenge'])
+    token = None
+    verification = gen.get('verification')
+    if verification and verification.get('provider') == 'turnstile':
+        if not solver:
+            raise WolfmaxVerificationRequired()
+        token = solver.solve(verification)
+        if not token:
+            raise WolfmaxVerificationRequired()
+    val = _cffi_validate(gen['challenge'], nonce, token)
+    download_url = val['download_url']
+    if val.get('external'):
+        resp = cffi_requests.get(
+            download_url, impersonate='chrome', timeout=15,
+            headers={'Referer': _API_BASE + '/'})
+        m_lo = re.search(r'var\s+link_out\s*=\s*["\']([^"\']+)["\']', resp.text)
+        if not m_lo:
+            raise RuntimeError('link_out no encontrado en enlacito')
+        download_url = _decrypt_gibberish(m_lo.group(1), _REAL_KEY)
+    return download_url
+
+
+def _cffi_fetch_torrent(torrent_url: str) -> tuple[str, bytes]:
+    resp = cffi_requests.get(
+        torrent_url, impersonate='chrome', timeout=30,
+        headers={'Referer': _API_BASE + '/'})
+    if resp.status_code != 200:
+        raise RuntimeError(f'Descarga torrent: HTTP {resp.status_code}')
+    content = resp.content
+    if not content.startswith(b'd'):
+        raise RuntimeError('La respuesta no es un .torrent válido')
+    filename = unquote(Path(urlparse(torrent_url).path).name) or 'descarga.torrent'
+    filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+    return filename, content
+
 
 def _collect_episodes(soup, seen: set[str]) -> list[dict]:
     episodes = []
@@ -287,7 +379,10 @@ def _collect_episodes(soup, seen: set[str]) -> list[dict]:
 
 class WolfmaxDownloader:
     """Descarga archivos .torrent de wolfmax4k.com al directorio de staging configurado."""
-
+    def __init__(self, solver=None):
+        self._solver = solver
+    # get_episodes, get_episode_links, get_download_url → sin cambios
+    
     def get_episodes(self, series_url: str, all_seasons: bool = True, max_search_pages: int = 3) -> list[dict]:
         """
         Devuelve los episodios de una ficha de temporada como dicts
@@ -356,26 +451,15 @@ class WolfmaxDownloader:
             driver.quit()
 
     def fetch_torrent(self, wolfmax_url: str) -> tuple[str, bytes]:
-        """Obtiene el .torrent de un episodio/película sin escribirlo en disco.
-        Devuelve (nombre de archivo, contenido)."""
-        driver = _make_driver()
-        try:
-            torrent_url = _resolve_torrent_url(driver, wolfmax_url)
-            logger.info(f'wolfmax: obteniendo {torrent_url}')
-            return _fetch_torrent(driver, torrent_url)
-        finally:
-            driver.quit()
+        torrent_url = _cffi_resolve_torrent_url(wolfmax_url, self._solver)
+        logger.info('wolfmax: obteniendo %s', torrent_url)
+        return _cffi_fetch_torrent(torrent_url)
 
     def download_to_staging(self, wolfmax_url: str, staging_dir: str) -> Path:
-        """
-        Descarga el .torrent de un episodio/película de wolfmax al directorio
-        staging (carpeta vigilada por el cliente torrent).
-        Devuelve la ruta del archivo descargado.
-        """
-        driver = _make_driver()
-        try:
-            torrent_url = _resolve_torrent_url(driver, wolfmax_url)
-            logger.info(f'wolfmax: descargando {torrent_url} → {staging_dir}')
-            return _download_torrent(driver, torrent_url, staging_dir)
-        finally:
-            driver.quit()
+        filename, content = self.fetch_torrent(wolfmax_url)
+        out_dir = Path(staging_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / filename
+        out_path.write_bytes(content)
+        logger.info('wolfmax: descargado → %s', out_path)
+        return out_path

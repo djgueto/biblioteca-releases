@@ -30,11 +30,16 @@ class WolfmaxSourceProvider:
         self.db = db_manager
         self.dispatcher = dispatcher
         self._searcher = WolfmaxSearcher()
-        self._downloader = WolfmaxDownloader()
-        # El sitio exige verificación de persona para descargar: no se
-        # reintenta en lo que queda de ciclo (cada intento abre un Chrome y
-        # tarda ~12 s; con cientos de episodios eran horas perdidas).
+        from core.wolfmax.turnstile import TurnstileSolver
+        self._solver = TurnstileSolver()
+        self._downloader = WolfmaxDownloader(solver=self._solver)
         self.verification_required = False
+
+    def close(self):
+        if self._solver:
+            self._solver.close()
+            self._solver = None
+
 
     def find_candidate(self, item: dict, *, content_mode: str = "episodic") -> SourceOffer | None:
         title = (item.get("tmdb_name") or item.get("name") or "").strip()

@@ -346,7 +346,12 @@ class Scheduler(BackgroundJob):
             self.logger.error(f"Error en execute_cycle: {e}", exc_info=True)
             raise
         finally:
-            # Asegurar que el navegador se cierre siempre
+            wolfmax = self.providers.get("wolfmax")
+            if wolfmax and hasattr(wolfmax, 'close'):
+                try:
+                    wolfmax.close()
+                except Exception as e:
+                    self.logger.error(f"Error cerrando wolfmax solver: {e}")
             if driver:
                 try:
                     driver.quit()
